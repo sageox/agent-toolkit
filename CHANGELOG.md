@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A probing job body can address its post, so the agents it names actually wake.**
+  `post_message` takes `mentions`, and the adapter renders them as its surface's addressing
+  primitive — a `p` tag on Buzz, `<@id>` on Slack. Without it a probe posted into a channel
+  and woke nobody: a `p` tag is Buzz's only wake trigger, a channel post deliberately
+  carries none, and so a roll call read back an empty thread and reported the entire fleet
+  silent — a failure indistinguishable from a total outage, on the one job whose output is
+  consumed as fleet liveness. Recipients are **ids the surface resolves** (`npub…` or hex,
+  a Slack member id) and never display names, which render and wake no one; the adapter
+  refuses a name rather than publish a message that looks addressed and is not. At most 64
+  per message, and being addressed reaches no further than `jobs[].report` already did. The
+  field is the probe's alone: a status post — this body's own `report`, and every non-probe
+  job's — still addresses nobody, and the brain's `post_message` has no such field.
+
 - **A bundle can say which of a job's credentials the gateway's own process must not hold.**
   `jobs[].run.jobSecrets` takes the same env-var-to-`secretRef` map `run.secrets` does and
   resolves from the same directory list, so a one-directory deployment satisfies both. What

@@ -62,11 +62,26 @@ export interface SurfaceAdapter {
    * thread, which is why `GuardedMessage` stays as narrow as it is. `undefined` when the
    * surface reports no id — a caller reads that as "no thread root" and posts the next line
    * at top level rather than dropping it.
+   *
+   * `mentions` addresses the post to a named set, rendered as whatever this surface's
+   * addressing primitive is — a `p` tag on Buzz, `<@id>` on Slack. A channel post is
+   * otherwise addressed to a channel and nobody in it wakes, which is right for a status
+   * line and is the whole failure mode of a probe: a roll call nobody was addressed by
+   * reads back as an empty thread and reports every agent silent. Only the per-run job
+   * channel passes it, and only for a `report.probe` job; a status post never does.
+   *
+   * **Ids the surface resolves, never display names.** A name renders and wakes no one, so
+   * an adapter validates the shape it was handed and refuses rather than posting a message
+   * that looks addressed and is not. An adapter on a surface with **no** addressing
+   * primitive must throw on a non-empty list for the same reason {@link readThread} is
+   * absent rather than answering `[]` — silence a caller cannot distinguish from an answer
+   * is the bug both rules exist to prevent.
    */
   post?(
     channel: ChannelRef,
     msg: GuardedMessage,
     threadRoot?: EventRef,
+    mentions?: readonly string[],
   ): Promise<EventRef | undefined>;
 
   /**

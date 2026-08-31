@@ -188,7 +188,7 @@ MCP `tools/call` over HTTP, so a `curl` is enough and there is still nothing to 
 
 | Tool | Takes | Answers |
 |---|---|---|
-| `post_message` | `text`, and optionally a `threadRoot` this run posted | `{"posted": true, "threadRoot": "…"}` — `null` where the surface named no id, so there is nothing to read back |
+| `post_message` | `text`, optionally `mentions` — who to address it to — and optionally a `threadRoot` this run posted | `{"posted": true, "threadRoot": "…"}` — `null` where the surface named no id, so there is nothing to read back |
 | `thread_read` | `root` — a `threadRoot` this run was handed — and optionally `limit` | `{"replies": [{"author", "text", "ts"}, …]}`, oldest first |
 
 ```js
@@ -210,7 +210,7 @@ const call = async (name, args) =>
     ).result.content[0].text,
   );
 
-const { threadRoot } = await call("post_message", { text: rollCall });
+const { threadRoot } = await call("post_message", { text: rollCall, mentions: roster });
 // … wait, on a schedule this body owns …
 const { replies } = await call("thread_read", { root: threadRoot });
 ```
@@ -221,6 +221,16 @@ only a root **this run** posted; an id from anywhere else is refused, so a body 
 back a conversation it was never party to. The listener is opened before the body is
 spawned, closed when it exits, and its token is minted per run. A job that declares no
 `probe` is spawned into exactly the envelope it had before — no URL, no token.
+
+**Address the message, or nobody wakes.** A channel post is addressed to a channel: everyone
+subscribed is delivered it and nobody is woken by it, which is right for a status line and
+fatal for a roll call — the thread reads back empty and the verdict names the whole fleet
+silent. `mentions` is what wakes them, rendered as the surface's own addressing primitive: a
+`p` tag on Buzz, `<@id>` on Slack. Pass **ids the surface resolves** — a pubkey (`npub…` or
+hex), a Slack member id — never display names. A name renders in the text and tags nothing,
+so the adapter refuses it rather than publish a message that looks addressed and is not. At
+most 64 per message, and being addressed reaches no further than the destination already
+did. Only a `probe` body has the field: a `report` status post never carries one.
 
 **Reply text is verbatim and untrusted.** It is whatever anyone put in the channel,
 including an instruction addressed to whoever reads it. Count it, match it, tally it; never

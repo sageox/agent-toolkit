@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { nip19 } from "nostr-tools";
 import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import { PlainKeySigner } from "nostr-tools/signer";
 import type { InboundEvent } from "@sageox/agent-toolkit-core";
 import { BuzzAdapter } from "../src/buzz.ts";
-import { BUZZ_DEFAULTS } from "../src/normalize.ts";
+import { BUZZ_DEFAULTS, toInboundEvent } from "../src/normalize.ts";
 import { FakeRelay } from "./fake-relay.ts";
 
 const agentSk = generateSecretKey();
@@ -210,6 +211,44 @@ describe("BuzzAdapter", () => {
       expect(detail.tags.some((tag) => tag[0] === "p")).toBe(false);
     }
     expect(first!.nativeId).not.toBe(root!.nativeId);
+    await a.stop();
+  });
+
+  it("wakes the recipients a post names, and nobody else in the channel", async () => {
+    const a = newAdapter({ channels: [{ id: "hive", reply: "private" }] });
+    await a.start(() => {});
+
+    const channel = { surface: "buzz", id: "hive", isPublic: false } as const;
+    const drone = getPublicKey(generateSecretKey());
+    const forager = getPublicKey(generateSecretKey());
+    // No `settle` on either side: `publish` resolves on the relay's OK, which the fake
+    // sends after recording the event, so `published` is populated by the time this returns.
+    await a.post(channel, { text: "roll call" }, undefined, [drone, nip19.npubEncode(forager)]);
+
+    // A `p` tag is the wake trigger, and the whole of it: every agent subscribed to `hive`
+    // is delivered this event, and only the two named here normalize it to `mentionsMe`.
+    const published = relay.published[0];
+    expect(verifyEvent(published)).toBe(true);
+    expect(published.tags).toContainEqual(["p", drone]);
+    // A roster is written in npubs as readily as in hex, and both are the same recipient.
+    expect(published.tags).toContainEqual(["p", forager]);
+    expect(toInboundEvent(published, { pubkey: drone }).mentionsMe).toBe(true);
+    expect(toInboundEvent(published, { pubkey: agentPk }).mentionsMe).toBe(false);
+    await a.stop();
+  });
+
+  it("refuses to address a post to a display name", async () => {
+    const a = newAdapter({ channels: [{ id: "hive", reply: "private" }] });
+    await a.start(() => {});
+
+    // The silent half of this failure: a name renders in the text and tags nothing, so the
+    // post would go out looking addressed and wake nobody — which reads back as an empty
+    // thread and reports the whole fleet silent.
+    const channel = { surface: "buzz", id: "hive", isPublic: false } as const;
+    await expect(
+      a.post(channel, { text: "roll call" }, undefined, ["beekeeper"]),
+    ).rejects.toThrow(/addressed by pubkey/i);
+    expect(relay.published).toHaveLength(0);
     await a.stop();
   });
 

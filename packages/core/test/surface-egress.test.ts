@@ -14,15 +14,20 @@ import { ToolPolicy } from "../src/tool-policy.ts";
 const SERVE_BOTH = { postMessage: true, react: true };
 
 function adapter(kind: string, targets: ChannelRef[]) {
-  const posted: Array<{ channel: ChannelRef; msg: GuardedMessage; threadRoot?: EventRef }> = [];
+  const posted: Array<{
+    channel: ChannelRef;
+    msg: GuardedMessage;
+    threadRoot?: EventRef;
+    mentions?: readonly string[];
+  }> = [];
   const reactions: Array<{ target: string; emoji: string }> = [];
   const value: SurfaceAdapter = {
     kind,
     start: async () => {},
     send: async () => {},
     postTargets: () => targets,
-    post: async (channel, msg, threadRoot) => {
-      posted.push({ channel, msg, threadRoot });
+    post: async (channel, msg, threadRoot, mentions) => {
+      posted.push({ channel, msg, threadRoot, mentions });
       return { surface: kind, nativeId: `e${posted.length}` };
     },
     // The ref identifies the reaction, so one emoji on one message answers alike however
@@ -77,6 +82,7 @@ describe("SurfaceEgress", () => {
       {
         channel: { surface: "buzz", id: "hive", isPublic: false },
         msg: { text: "shipped" },
+        mentions: undefined,
       },
     ]);
     await expect(egress.post("buzz", "other", { text: "no" })).rejects.toThrow(
@@ -95,6 +101,25 @@ describe("SurfaceEgress", () => {
     // buys no way around the public-channel or allowlist rules.
     await egress.post("buzz", "hive", { text: "NOT PROVEN: jscpd did not execute" }, root);
     expect(buzz.posted[1].threadRoot).toEqual(root);
+  });
+
+  it("carries recipients to the surface, and never from the brain's own tool", async () => {
+    const buzz = adapter("buzz", [{ surface: "buzz", id: "hive", isPublic: false }]);
+    const egress = new SurfaceEgress({ manifest: manifest(), adapters: [buzz.value] });
+
+    await egress.post("buzz", "hive", { text: "roll call" }, undefined, ["drone", "forager"]);
+    expect(buzz.posted[0].mentions).toEqual(["drone", "forager"]);
+
+    // The brain's `post_message` has no such field, and a call that names one is dropped
+    // by the schema rather than reaching a surface: being addressed is a job's capability.
+    await surfaceEgressHandler(egress, new ToolPolicy([SURFACE_EGRESS_TOOL], []), SERVE_BOTH)({
+      method: "tools/call",
+      params: {
+        name: "post_message",
+        arguments: { surface: "buzz", channel: "hive", text: "hi", mentions: ["drone"] },
+      },
+    });
+    expect(buzz.posted[1].mentions).toBeUndefined();
   });
 
   it("applies the public-channel guard to cross-posts", async () => {

@@ -220,6 +220,25 @@ describe("SlackAdapter", () => {
     expect(api.posts).toHaveLength(2);
   });
 
+  it("addresses a post to the members it names, and refuses anything that is not one", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
+
+    await instance.post(channel, { text: "roll call" }, undefined, ["U0DRONE", "B0FORAGER"]);
+    expect(api.posts[0].text).toBe("<@U0DRONE> <@B0FORAGER> roll call");
+
+    // A display name renders and wakes nobody, which is the silent failure the recipients
+    // exist to avoid — and an id carrying markup would close the `<@…>` it sits inside and
+    // smuggle back the broadcast `text` is already screened for.
+    for (const who of ["beekeeper", "U0X><!channel><@U0Y"]) {
+      await expect(
+        instance.post(channel, { text: "roll call" }, undefined, [who]),
+      ).rejects.toThrow(/addressed by member id/i);
+    }
+    expect(api.posts).toHaveLength(1);
+  });
+
   it("refuses a top-level post to an unconfigured channel", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});

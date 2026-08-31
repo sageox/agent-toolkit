@@ -17,6 +17,17 @@ const THREAD_READ = "thread_read";
  */
 const MAX_REPLIES = 500;
 
+/**
+ * The most recipients one post may address.
+ *
+ * A roster is fleet configuration this toolkit has no view of, so the bound is on the size
+ * of one message rather than on who is in it — a body may address whom it likes, and cannot
+ * turn one `post_message` into a broadcast to everyone a surface knows. Well above any real
+ * fleet, and the same order as `MAX_REPLIES`: a roll call that addresses more agents than it
+ * can read replies from has already stopped being one message.
+ */
+const MAX_MENTIONS = 64;
+
 export interface JobChannelOptions {
   /** The one channel this run may speak into — the job's own declared destination. */
   report: NonNullable<JobConfig["report"]>;
@@ -42,7 +53,11 @@ export interface JobChannelOptions {
  * Bounded twice, and both bounds are here rather than in the body's good behaviour:
  *
  * - `post_message` carries text to the channel `jobs[].report` names. There is no field
- *   for a destination, so no value the body computes can choose one.
+ *   for a destination, so no value the body computes can choose one. It may *address* that
+ *   line to named recipients, which is what wakes them — a channel post wakes nobody, and a
+ *   roll call that woke nobody reads back as an empty thread and reports the fleet silent.
+ *   The recipients are ids the surface resolves, and the reach is still one channel: being
+ *   addressed does not put the message anywhere the destination did not already.
  * - `thread_read` reads only a root **this run** posted. The set is built from what this
  *   server handed back, so a body cannot name an id it read somewhere and pull back
  *   channel history it was never party to.
@@ -78,10 +93,15 @@ export function jobChannelHandler(opts: JobChannelOptions): McpHandler {
     // accountability question here — there is no destination argument to record, and the
     // message itself is one the guard has already ruled on. A refused call names the id
     // that was tried, which is the line worth having at 3am.
+    //
+    // `mentions` is deliberately **not** declared, and that is what records it usefully: an
+    // undeclared argument is written as its shape, so a list of recipients lands as
+    // `<array 12>`. The count is the number that answers "did this roll call address
+    // anybody", and it stays one bounded field however long the roster gets.
     audit: { [POST_MESSAGE]: ["threadRoot"], [THREAD_READ]: ["root", "limit"] },
     call: async (tool, args) => {
       if (tool === POST_MESSAGE) {
-        const { text, threadRoot } = PostArgs.parse(args);
+        const { text, threadRoot, mentions } = PostArgs.parse(args);
         if (threadRoot !== undefined && !rooted.has(threadRoot)) {
           throw new Error(unrooted(threadRoot));
         }
@@ -89,6 +109,7 @@ export function jobChannelHandler(opts: JobChannelOptions): McpHandler {
           report,
           text,
           threadRoot ? { surface: report.surface, nativeId: threadRoot } : undefined,
+          mentions,
         );
         // `null` where the surface named no id, so a body reads "posted, and there is no
         // thread to read back" rather than being handed something to pass to `thread_read`
@@ -129,6 +150,15 @@ function unrooted(id: string): string {
 const PostArgs = z.object({
   text: z.string().min(1),
   threadRoot: z.string().min(1).optional(),
+  /**
+   * Who this line is addressed to, by the ids the surface itself resolves.
+   *
+   * Unvalidated beyond its shape here, because what an id looks like is the surface's to
+   * know and this file must not learn it — the adapter refuses a display name, which is the
+   * one wrong value worth naming: a name renders, wakes nobody, and reads back as the empty
+   * thread this field exists to prevent.
+   */
+  mentions: z.array(z.string().min(1)).max(MAX_MENTIONS).optional(),
 });
 
 const ReadArgs = z.object({
@@ -154,6 +184,18 @@ function tools(report: NonNullable<JobConfig["report"]>): unknown[] {
             description:
               "Thread this line under a message this same run posted. Omitted, it posts " +
               "at top level.",
+          },
+          mentions: {
+            type: "array",
+            items: { type: "string" },
+            maxItems: MAX_MENTIONS,
+            description:
+              "Address this line to these recipients, so each of them is woken by it. " +
+              "**Surface ids** — a Buzz pubkey, a Slack user id — never display names: a " +
+              "name renders in the text and wakes nobody, and a probe that addressed only " +
+              "names reads back an empty thread and reports everyone silent. Omitted, the " +
+              "line is addressed to the channel and no one is woken, which is what a status " +
+              `line wants. At most ${MAX_MENTIONS}.`,
           },
         },
         required: ["text"],
