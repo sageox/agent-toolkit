@@ -161,11 +161,16 @@ interface Started extends JobStart {
  * The returned ref is the whole point of the type. A headline answers with its own id, and
  * that id is what threads the detail underneath it. `undefined` means the surface reported
  * no id, and the caller posts the next line at top level rather than losing it.
+ *
+ * `mentions` addresses the post to a named set, by the surface's own ids. Nothing on the
+ * status path passes it — only the per-run job channel does, and only for a `report.probe`
+ * job. See `SurfaceAdapter.post` in `adapter.ts` for what a surface makes of it.
  */
 export type JobPoster = (
   report: NonNullable<JobConfig["report"]>,
   text: string,
   threadRoot?: EventRef,
+  mentions?: readonly string[],
 ) => Promise<EventRef | undefined>;
 
 /**

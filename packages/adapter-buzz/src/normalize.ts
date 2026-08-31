@@ -172,23 +172,32 @@ export function toReplyTemplate(msg: GuardedMessage, inReplyTo: InboundEvent): E
 }
 
 /**
- * A new channel post, deliberately carrying no invented reply or mention context.
+ * A new channel post, carrying no invented reply context and no mention the caller did not
+ * ask for.
  *
- * `threadRoot` is the one piece of context it may carry, and only ever an id this adapter
- * handed back from a post of its own — never one read off an inbound message, which is
- * what `toReplyTemplate` is for. No mention tag either way: a headline and the detail
- * beneath it are addressed to a channel, not to a person.
+ * `threadRoot` is context this adapter handed back from a post of its own — never an id
+ * read off an inbound message, which is what `toReplyTemplate` is for. A headline and the
+ * detail beneath it are addressed to a channel and get no `p` tag, which is why a status
+ * post pings nobody.
+ *
+ * `mentions` is the exception, and it is the only way a post wakes anyone: a `p` tag is the
+ * wake trigger this relay convention has (`toInboundEvent` reads `mentionsMe` off exactly
+ * these), so a probe that must be answered addresses its roster and a status line still
+ * does not. The pubkeys are hex, already normalised by the caller — `p` on a name is a tag
+ * no agent matches itself against.
  */
 export function toChannelPostTemplate(
   msg: GuardedMessage,
   channelId: string,
   threadRoot?: string,
+  mentions: readonly string[] = [],
 ): EventTemplate {
   const tags: string[][] = [[BUZZ_DEFAULTS.channelTag, channelId]];
   // The root of its own thread, so root and parent coincide — the same single marked tag
   // `toReplyTemplate` uses, and the same flatness: detail sits one level under the
   // headline rather than nesting beneath whichever detail line came before it.
   if (threadRoot) tags.push([BUZZ_DEFAULTS.replyTag, threadRoot, "", "reply"]);
+  for (const pubkey of mentions) tags.push([BUZZ_DEFAULTS.mentionTag, pubkey]);
 
   return {
     kind: BUZZ_DEFAULTS.kind,

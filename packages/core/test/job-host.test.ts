@@ -567,13 +567,13 @@ describe("the status post", () => {
     id: (n: number) => EventRef | undefined = named,
     announce: JobAnnounce = "unproven",
   ) => {
-    const posts: Array<{ text: string; threadRoot?: EventRef }> = [];
-    const post: JobPoster = async (report, text, threadRoot) => {
+    const posts: Array<{ text: string; threadRoot?: EventRef; mentions?: readonly string[] }> = [];
+    const post: JobPoster = async (report, text, threadRoot, mentions) => {
       // Recorded before it is checked. `announce()` catches whatever a line throws and
       // charges it to that line, so an expectation that fails in here is swallowed — and a
       // test whose whole assertion is that `posts` stayed empty would then pass because the
       // check broke rather than because nothing was posted.
-      posts.push({ text, threadRoot });
+      posts.push({ text, threadRoot, mentions });
       // Whole-object, so a field added to the destination has to be accounted for here
       // rather than reaching every poster unnoticed.
       expect(report).toEqual({ surface: "console", channel: "hive", announce, probe: false });
@@ -581,6 +581,16 @@ describe("the status post", () => {
     };
     return { posts, post };
   };
+
+  it("addresses nobody, headline and detail alike", async () => {
+    const { posts, post } = feed();
+    await host(undefined, post).tick(body(MIXED, REPORTS));
+
+    // A status line is a report, not a page. Only a probing body's own `post_message` may
+    // name recipients, and it reaches this poster by a different call than this one.
+    expect(posts).not.toHaveLength(0);
+    expect(posts.every((line) => line.mentions === undefined)).toBe(true);
+  });
 
   it("puts one line at top level and threads every gate beneath it", async () => {
     const { posts, post } = feed();

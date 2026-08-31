@@ -13,6 +13,7 @@ import type {
   ReactionResult,
   ThreadReply,
 } from "@sageox/agent-toolkit-core";
+import { toHexPubkey } from "./identity.ts";
 import {
   toInboundEvent,
   toChannelPostTemplate,
@@ -209,6 +210,7 @@ export class BuzzAdapter implements SurfaceAdapter {
     channel: ChannelRef,
     msg: GuardedMessage,
     threadRoot?: EventRef,
+    mentions: readonly string[] = [],
   ): Promise<EventRef | undefined> {
     if (!this.relay) throw new Error("BuzzAdapter.start() must be called before post()");
     const configured = this.postTargets().some((target) => target.id === channel.id);
@@ -222,8 +224,23 @@ export class BuzzAdapter implements SurfaceAdapter {
       throw new Error(`a ${threadRoot.surface} thread root cannot anchor a Buzz post`);
     }
 
+    // `p` on anything but a pubkey is a tag no agent matches itself against, so a display
+    // name would publish a post that looks addressed and wakes no one — the silent half of
+    // this failure, which a caller cannot tell from a fleet that did not answer. `npub…` is
+    // accepted and folded to hex because that is the spelling a roster is written in.
+    const addressed = mentions.map((who) => {
+      try {
+        return toHexPubkey(who);
+      } catch {
+        throw new Error(
+          "a Buzz post is addressed by pubkey (npub… or 64-char hex), and one recipient " +
+            "is neither — a display name renders but wakes nobody",
+        );
+      }
+    });
+
     const signed = await this.opts.signer.signEvent(
-      toChannelPostTemplate(msg, channel.id, threadRoot?.nativeId),
+      toChannelPostTemplate(msg, channel.id, threadRoot?.nativeId, addressed),
     );
     await this.relay.publish(signed);
     // The id the signature already committed to, not something scraped back out of the
