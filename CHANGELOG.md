@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-31
+
+First full release of 0.1.0. It is `v0.1.0-rc.2` plus the two entries below —
+everything the two release-candidate sections describe is in it, and those sections
+stay as the record of when each part arrived.
+
+Published as `ghcr.io/sageox/agent-base:0.1.0`, and this is the first release to take
+the floating tags a candidate is refused: `:latest` and `:0.1`. `:0` is not published
+at all — before 1.0.0 a minor bump may break you, so a major-only alias would promise
+a stability that does not exist. Pin the digest recorded on the GitHub Release in
+production; the tags are for humans.
+
+Still pre-1.0: configuration format and CLI flags may move between minor versions.
+
+The Helm chart is 0.9.0, unchanged since rc.2. Both entries below are code rather than
+templates — `jobs[].report.probe` is a key an older binary refuses under `.strict()`,
+and `announce: reported` is a value outside that binary's enum — so roll the image
+before setting either, and no chart bump is needed to render an agent that does.
+
 ### Added
 
 - **A job body can post into its report channel, read the answers back, and mint its
