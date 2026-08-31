@@ -1,0 +1,20 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+setup = """
+if command -v mise >/dev/null 2>&1; then
+  mise exec -- pnpm install --frozen-lockfile
+else
+  corepack enable
+  pnpm install --frozen-lockfile
+fi
+"""
+run_mode = "concurrent"
+
+[scripts.run.test]
+command = "if command -v mise >/dev/null 2>&1; then mise exec -- pnpm test; else pnpm test; fi"
+icon = "test-tube"
+
+[scripts.run.typecheck]
+command = "if command -v mise >/dev/null 2>&1; then mise exec -- pnpm typecheck; else pnpm typecheck; fi"
+icon = "list-checks"

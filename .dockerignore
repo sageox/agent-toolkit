@@ -1,0 +1,7 @@
+node_modules
+packages/*/node_modules
+.git
+.env
+**/.env
+deploy/docker/secrets
+*.log

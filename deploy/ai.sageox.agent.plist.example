@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd service for one agent.
+
+  Four placeholders must be filled in: AGENT_BIN (the absolute path to
+  bin/sageox-agent), AGENT_NAME (the agent's name), AGENT_HOME (its directory), and
+  RUNTIME_PATH (a PATH reaching node, claude-agent-acp, and ox). Copying this file
+  unchanged leaves the job with PATH=RUNTIME_PATH and it will not start, so use the `sed`
+  recipe in docs/guide/run-it-for-real.md, Step 9a — it fills all four from the shell you run it in — then:
+
+    launchctl bootstrap gui/$(id -u) \
+      ~/Library/LaunchAgents/ai.sageox.AGENT_NAME.plist
+
+  The agent reads everything from ~/.config/agent-toolkit/agents/AGENT_NAME/, so this needs no working
+  directory — run one plist per agent, each with its own Label.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.sageox.AGENT_NAME</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>AGENT_BIN</string>
+    <string>run</string>
+    <string>AGENT_NAME</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <!-- Back off instead of hot-looping if the agent fails to start. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <!-- Logs sit beside the agent's own files. -->
+  <key>StandardOutPath</key>
+  <string>AGENT_HOME/agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>AGENT_HOME/agent.error.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Generated from the shell that selected Node; node, claude-agent-acp, and ox
+         (for team memory) must be reachable here. -->
+    <key>PATH</key>
+    <string>RUNTIME_PATH</string>
+  </dict>
+</dict>
+</plist>

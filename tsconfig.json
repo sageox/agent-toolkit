@@ -1,0 +1,4 @@
+// Only the root `test/` directory. Every package is checked from its own tsconfig by
+// `pnpm -r`, which does not include the workspace root, so without this the repo-level
+// tests would be the one thing here that ships unchecked.
+{ "extends": "./tsconfig.base.json", "include": ["test"] }

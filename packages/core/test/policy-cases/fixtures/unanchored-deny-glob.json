@@ -1,0 +1,45 @@
+{
+  "$comment": [
+    "SYNTHETIC. The same glob-in-the-server-segment spelling on the DENY side,",
+    "where Claude Code's rules are different and this one is honoured: a deny",
+    "glob matches the full tool name, so `mcp__*__pr_list` reaches",
+    "`mcp__github__pr_list`.",
+    "",
+    "This is the asymmetry that matters. An allow rule the brain's own",
+    "permission layer skips costs the agent a tool; a DENY rule it honours and",
+    "the gateway ignores costs the deny entirely \u2014 and the gateway is the layer",
+    "that exists because the brain holds the capability token and can reach a",
+    "server without asking Claude Code anything. The allow rule is wide on",
+    "purpose, so a Denied verdict is this deny firing rather than nothing",
+    "matching."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__*"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)",
+      "mcp__*__pr_list"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ]
+}

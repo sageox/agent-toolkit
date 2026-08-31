@@ -1,0 +1,25 @@
+Head-and-shoulders character portrait, centered and filling a square frame. Use one flat,
+solid, muted background color extending to every edge and corner. No circular border,
+ring, frame, badge outline, scenery, text, watermark, letters, or signature. Leave clear
+plain-background margin around the head so chat clients can crop it to a circle.
+
+Draw this as part of one consistent premium character-design lineup by a single artist in a
+single sitting, so every character belongs on the same model sheet: bold black ink outlines,
+heavy on the outer silhouette and finer for interior detail, at the same weight ratio on
+every character; flat cel shading with exactly two tones per color and hard-edged shadows;
+no gradients, airbrush, texture, painterly rendering, or 3D.
+
+Eyes are always open and clearly visible, looking at the viewer — never closed, never hidden,
+never obscured by hair, a brim, glare, or eyewear, since eyes are the feature that reads first
+at chat-icon size. Draw a bold upper lash, round iris, small pupil, and one highlight dot. Use
+a simple nose, a confident single-line mouth, one flat blush shape, one face shadow, and one
+clothing shadow. The head occupies roughly the upper half of the frame with shoulders cut at
+the bottom edge, in a natural relaxed tilt — never stiff, never rigidly symmetrical, never a
+passport photo. Use five or six muted colors with gentle warm-cool contrast.
+
+Any signature prop must be worn, carried, or in active use — resting on a shoulder, slung on
+a strap, tucked behind an ear, held in a working grip. Never a floating object beside the
+head, never held up flat to the camera like a product photo, and never an unattached icon
+drawn into the background. Make the role and one warm joke legible at 32px through silhouette
+and scale. Pacific Northwest energy: warm, wry, unpretentious, handmade, and full of
+personality. Not photorealistic, gritty, dark, generic clip-art, or a stock mascot.

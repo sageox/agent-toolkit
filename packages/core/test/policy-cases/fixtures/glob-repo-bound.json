@@ -1,0 +1,42 @@
+{
+  "$comment": [
+    "SYNTHETIC. A bound written as a glob \u2014 'everything under this owner' \u2014 by",
+    "an operator who has just written `Read(//mnt/secrets-store/**)` in the deny list",
+    "of the same file.",
+    "",
+    "A scope value is an exact string comparison, so a glob would match nothing",
+    "and the agent would have a server that refuses every call. It does not get",
+    "that far: the schema refuses the spelling when the config is read. That is",
+    "the whole point of this fixture \u2014 the inert-rule defect the rest of this",
+    "table keeps finding in the tool policy is structurally closed on the bound,",
+    "and closed at load rather than at 3am at call time."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__*"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/*"
+        ]
+      }
+    }
+  ]
+}

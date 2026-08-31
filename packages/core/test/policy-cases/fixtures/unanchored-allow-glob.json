@@ -1,0 +1,46 @@
+{
+  "$comment": [
+    "SYNTHETIC. An allow rule with a glob in the SERVER segment, which reads as",
+    "'this tool from whichever server provides it'.",
+    "",
+    "Claude Code skips it: an allow glob is honoured only after a literal",
+    "`mcp__<server>__` prefix, and an unanchored one auto-approves nothing.",
+    "This matcher agreed with that outcome for the wrong reason \u2014 it compared",
+    "the rule exactly and matched a name containing a literal asterisk \u2014 and",
+    "either way the agent could not list pull requests while the settings file",
+    "said it could.",
+    "",
+    "The whole policy is now refused when it is read. The second rule is here",
+    "so the refusal is visibly about the first one rather than about a fixture",
+    "that grants nothing."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__*__pr_list",
+      "mcp__github__issue_list"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ]
+}

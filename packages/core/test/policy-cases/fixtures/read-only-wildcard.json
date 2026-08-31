@@ -1,0 +1,38 @@
+{
+  "$comment": [
+    "SYNTHETIC. Never an agent's real bundle, never a real repository.",
+    "",
+    "The baseline: one wildcard allow covering the whole server, bound to one",
+    "repository. Every tool is permitted by the policy, so a refusal here cannot",
+    "have come from the policy \u2014 which makes this the fixture for the gate-order",
+    "rows, because it names the gate that produced the refusal by elimination."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__*"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ]
+}

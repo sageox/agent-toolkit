@@ -1,0 +1,49 @@
+{
+  "$comment": [
+    "SYNTHETIC. The pattern is a placeholder shape, not anybody's real secret.",
+    "",
+    "Everything the policy can grant is granted and the repository is bound, so",
+    "the scan is the only gate left that can refuse \u2014 which is what makes a",
+    "Leaked verdict here mean the scan fired rather than something in front of",
+    "it. An MCP call is the other way out of this agent: text that reaches a",
+    "third-party server has left the building whether the tool was called a read",
+    "or a write, which is why the scan reads every argument rather than a",
+    "declared subset."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__*"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ],
+  "guard": {
+    "leakPatterns": [
+      {
+        "name": "fake-token",
+        "regex": "ghp_[A-Za-z0-9]{8,}"
+      }
+    ]
+  }
+}

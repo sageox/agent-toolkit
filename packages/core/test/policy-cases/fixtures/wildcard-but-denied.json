@@ -1,0 +1,41 @@
+{
+  "$comment": [
+    "SYNTHETIC. One tool named on the deny side of a policy whose allow rule",
+    "covers the whole server \u2014 the split-brain configuration an operator writes",
+    "when they grant a server and then think better of one verb.",
+    "",
+    "This fixture pins which side wins at the boundary: deny beats allow. It is",
+    "also the control for the deny rows in section B \u2014 with no working deny",
+    "anywhere in this table, B1's verdict could be read as 'deny rules do not",
+    "work here' rather than as the finding it is."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__*"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)",
+      "mcp__github__pr_create"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ]
+}

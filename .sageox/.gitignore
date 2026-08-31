@@ -1,0 +1,30 @@
+# Ignore logs, cache, and session data
+logs/
+cache/
+session.jsonl
+sessions/
+.needs-doctor
+.needs-doctor-agent
+
+# Ignore agent instance state (ephemeral, per-user)
+agent_instances/
+
+# Ignore agent task queue (ephemeral, local-only)
+agent_tasks/
+
+# Ignore local-only config (sync state, machine-specific)
+config.local.toml
+
+# Ignore local symlinks to user-directory data
+# kb/ holds daemon-materialized knowledge-bubble symlinks (GH #732 moved
+# this rule here from the project's root .gitignore — derived state, and
+# not ox's business to declare in a file the developer owns).
+kb/
+ledger
+teams/
+
+# Keep core files (committed to git)
+!README.md
+!config.json
+!discovered.jsonl
+!offline/

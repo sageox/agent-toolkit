@@ -1,0 +1,19 @@
+{
+  "name": "agent-toolkit",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.25.0",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && pnpm -r exec tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "ws": "^8.21.3"
+  }
+}

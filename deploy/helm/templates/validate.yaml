@@ -1,0 +1,152 @@
+{{- if not .Values.agents -}}
+{{- fail "agents must contain at least one agent bundle" -}}
+{{- end -}}
+{{/*
+Rules for a direction `policyTypes` does not name. Kubernetes ignores them — a policy
+restricts only the directions it lists — so what the consumer wrote applies nowhere and the
+object still applies cleanly. Refused here rather than left to the schema, which can say
+each list is well formed but not that the pair disagrees.
+*/}}
+{{- $networkPolicy := .Values.networkPolicy | default dict -}}
+{{- range $direction := list "Ingress" "Egress" -}}
+{{- if and (get $networkPolicy (lower $direction)) (not (has $direction $networkPolicy.policyTypes)) -}}
+{{- fail (printf "networkPolicy.%s has rules but networkPolicy.policyTypes does not name %s: a policy restricts only the directions it lists, so these would render and never apply" (lower $direction) $direction) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $agent := .Values.agents -}}
+{{/*
+A bundle that names neither a volume nor a stager has no source at all: nothing populates
+`/config`, `cp -LR /config/.` fails the init container, and on the CronJob path that is a
+run lost under `backoffLimit: 0`. Refused here rather than left to the schema, which can say
+the shape is legal but not that the pair is empty.
+*/}}
+{{- if and (not $agent.bundle.volume) (not $agent.bundle.stageImage) -}}
+{{- fail (printf "%s: bundle needs a volume or a stageImage — one of them has to put the bundle at /config" $name) -}}
+{{- end -}}
+{{/*
+Only a ConfigMap source can carry a key-to-path mapping the consumer wrote by hand, so this
+is where an escaping or credential-shaped path can still be spelled. Every other source
+carries its own layout, which Kubernetes builds and no value here can redirect.
+
+Absolute as well as `..`-escaping, because the API server refuses both and would refuse
+them here — at `helm upgrade`, on a Pod spec whose other objects have already applied.
+*/}}
+{{- range $item := (($agent.bundle.volume).configMap).items -}}
+{{- if or (hasPrefix "/" $item.path) (regexMatch `(^|/)\.\.(/|$)` $item.path) -}}
+{{- fail (printf "%s: bundle item path must stay inside the bundle: %s" $name $item.path) -}}
+{{- end -}}
+{{- if or (hasPrefix "secrets/" $item.path) (regexMatch `(^|/)\.env($|[./])` $item.path) -}}
+{{- fail (printf "%s: refusing credential path in bundle ConfigMap: %s" $name $item.path) -}}
+{{- end -}}
+{{- end -}}
+{{- range $field := list "secrets" "jobSecrets" -}}
+{{- $source := get $agent $field -}}
+{{- if kindIs "map" $source -}}
+{{- if and $source.kubernetesSecret $source.csi.secretProviderClass -}}
+{{- fail (printf "%s: %s: choose only one source" $name $field) -}}
+{{- end -}}
+{{- if and $source.csi.provider (not $source.csi.secretProviderClass) -}}
+{{- fail (printf "%s: %s: a CSI provider requires secretProviderClass" $name $field) -}}
+{{- end -}}
+{{- if and (not $source.csi.provider) $source.csi.parameters -}}
+{{- fail (printf "%s: %s: CSI parameters require a provider" $name $field) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{/*
+`jobSecrets` is mounted by the CronJob Pods this chart renders and by nothing else, so an
+agent with no schedule mounts it nowhere. Refused rather than rendered: the whole point of
+the field is to move a credential off the Pod that runs the brain, and one set on an agent
+whose only Pod is the Deployment has moved nothing while reading as though it had.
+
+A schedule and not a job, because a schedule is what renders the Pod. A job declaring only
+`onRequest` renders no CronJob, and a run started that way executes inside the gateway's own
+process, in the Deployment Pod, with no second directory to search — so a ref that lives only
+here fails to resolve and the run fails by name. That is the boundary holding rather than a
+gap in it, and it is why the count here is of schedules.
+*/}}
+{{- if kindIs "map" $agent.jobSecrets -}}
+{{- $scheduled := 0 -}}
+{{- range $job := $agent.jobs -}}
+{{- $scheduled = add $scheduled (len $job.trigger.schedules) -}}
+{{- end -}}
+{{- if eq $scheduled 0 -}}
+{{- fail (printf "%s: jobSecrets is mounted by scheduled job Pods only, and this agent declares no schedule" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (not $agent.serviceAccount.create) (not $agent.serviceAccount.name) -}}
+{{- fail (printf "%s: serviceAccount.name is required when create is false" $name) -}}
+{{- end -}}
+{{- end -}}
+{{/*
+Two objects of one kind cannot answer to one name. What that renders is two Deployments, two
+CronJobs, two ServiceAccounts, or two SecretProviderClasses of one name in one namespace,
+which is not two objects at all: on install the second is rejected, and on upgrade it patches
+the first, so one agent takes over the other's workload, state, schedule, or identity. Refuse
+at render, where both names are still in view — and name both sides, because the object that
+survives says nothing about the one that did not.
+
+Of one *kind*, so a registry per kind and not one between them. An agent's Deployment, claim
+and ServiceAccount already share a name deliberately, which is the chart saying a name is
+qualified by its kind; between agents it has to mean the same thing, or a legal release would
+be refused on a resemblance Kubernetes does not care about.
+
+Four ways into a real collision, and they need one check each:
+
+  - `fullnameOverride`, equal to another override or to another agent's default. Agent
+    names are unique for free, being map keys, and while every object name was built from
+    one that was the whole guarantee. This is the first value that can spend it.
+  - A hyphen that two agents read differently. A job's object is `<agent>-<slug>`, so
+    `foo` with `bar-baz` and `foo-bar` with `baz` are one CronJob, and no override is
+    needed to get there.
+  - `serviceAccount.name`, and `secrets.csi.secretProviderClass`. These are the two names a
+    consumer supplies outright for an object this chart creates, so neither was ever built
+    from the map key that made agents unique. Both name the agent's identity rather than its
+    workload, and both fail quiet: the surviving definition is what every Pod naming it
+    mounts, so the agent whose definition lost assumes the other's cloud role, or reads the
+    other's credentials, instead of failing to start.
+
+Creation is what collides, not the name. An agent that sets `create: false`, or that names a
+`secretProviderClass` without a `provider`, is referencing an object this chart does not
+render — which is how several agents legitimately share one operator-owned ServiceAccount or
+SecretProviderClass, and renders a single object rather than two.
+*/}}
+{{- $agentNames := dict -}}
+{{- $jobNames := dict -}}
+{{- $serviceAccountNames := dict -}}
+{{- $secretClassNames := dict -}}
+{{- range $name, $agent := .Values.agents -}}
+{{- $context := dict "root" $ "name" $name "agent" $agent -}}
+{{- $full := include "agent.agentFullname" $context -}}
+{{- if hasKey $agentNames $full -}}
+{{- fail (printf "%s and %s would both render objects named %s: every agent of a release must resolve to its own name" (get $agentNames $full) $name $full) -}}
+{{- end -}}
+{{- $_ := set $agentNames $full $name -}}
+{{- if $agent.serviceAccount.create -}}
+{{- $account := include "agent.serviceAccountName" $context -}}
+{{- if hasKey $serviceAccountNames $account -}}
+{{- fail (printf "%s and %s would both create a ServiceAccount named %s: an object this chart creates belongs to one agent — to share one, set serviceAccount.create to false on every agent but its owner" (get $serviceAccountNames $account) $name $account) -}}
+{{- end -}}
+{{- $_ := set $serviceAccountNames $account $name -}}
+{{- end -}}
+{{- range $field := list "secrets" "jobSecrets" -}}
+{{- $source := get $agent $field -}}
+{{- if and (kindIs "map" $source) $source.csi.provider -}}
+{{- $class := $source.csi.secretProviderClass -}}
+{{- if hasKey $secretClassNames $class -}}
+{{- fail (printf "%s and %s/%s would both create a SecretProviderClass named %s: an object this chart creates belongs to one agent, and to one of its two secret sources — to share one, leave csi.provider unset everywhere but its owner" (get $secretClassNames $class) $name $field $class) -}}
+{{- end -}}
+{{- $_ := set $secretClassNames $class (printf "%s/%s" $name $field) -}}
+{{- end -}}
+{{- end -}}
+{{- range $job := $agent.jobs -}}
+{{- $schedules := $job.trigger.schedules -}}
+{{- range $index, $schedule := $schedules -}}
+{{- $scheduled := include "agent.jobFullname" (merge (dict "job" $job "index" $index "total" (len $schedules)) $context) -}}
+{{- if hasKey $jobNames $scheduled -}}
+{{- fail (printf "%s and %s/%s would both render a CronJob named %s: every scheduled job of a release must resolve to its own name" (get $jobNames $scheduled) $name $job.slug $scheduled) -}}
+{{- end -}}
+{{- $_ := set $jobNames $scheduled (printf "%s/%s" $name $job.slug) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

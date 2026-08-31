@@ -1,0 +1,4 @@
+interface:
+  display_name: "Monitor PR"
+  short_description: "Monitor checks and resolve review feedback"
+  default_prompt: "Use $monitor-pr to open or update my PR and keep fixing CI and review feedback until every required check and review is clean."

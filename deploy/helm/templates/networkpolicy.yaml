@@ -1,0 +1,47 @@
+{{/*
+One NetworkPolicy per agent, selecting that agent's Pods. Release-wide values and a
+per-agent object, like every other object here: what a fleet counts is an agent's roll
+call, and a release-scoped policy would be the one object in this chart no agent owns.
+
+The selector covers the agent's CronJob Pods as well as its Deployment Pod — both carry
+`agent.agentSelectorLabels`, and a scheduled run reaches the same network the agent does.
+
+Rules pass through verbatim, like `bundle.volume`: the API server validates a
+NetworkPolicyPeer, and a list here of the peers this chart knew would refuse the next one
+Kubernetes adds.
+
+`policyTypes` is the switch, and there is no `enabled` beside it, because a NetworkPolicy
+that names no direction is not inert — Kubernetes defaults an empty `policyTypes` to
+`Ingress`, so it would render a deny-all-ingress rule. Empty renders no object at all.
+
+Whether any of it is enforced belongs to the cluster: on one whose CNI does not implement
+NetworkPolicy the object applies cleanly and constrains nothing.
+*/}}
+{{- if (.Values.networkPolicy).policyTypes }}
+{{- range $name, $agent := .Values.agents }}
+{{- $context := dict "root" $ "name" $name "agent" $agent -}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "agent.agentFullname" $context }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "agent.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "agent.agentSelectorLabels" $context | nindent 6 }}
+  policyTypes:
+    {{- toYaml $.Values.networkPolicy.policyTypes | nindent 4 }}
+  {{- with $.Values.networkPolicy.ingress }}
+  ingress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $.Values.networkPolicy.egress }}
+  egress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{ end }}
+{{- end }}

@@ -1,0 +1,135 @@
+{{/*
+One CronJob per declared schedule of every declared job, implementing the Jobs clause of
+`docs/deployment-contract.md`. A job with no schedule renders nothing scheduled, which is
+the correct rendering: a target invents no trigger the manifest did not declare.
+
+Jobs are declared in `agent.yaml`. Helm cannot read an operator-supplied bundle at render
+time, so what a schedule fires is mirrored into these values — the clock and the bound, and
+nothing else. There is no `archetype`, no `killSwitch`, no `report`, no deadline of its own,
+and not even the job's own argv, which `job run` reads from the manifest. What values can say
+is when a job runs, never what it is or what it may do.
+
+Everything provider-specific arrives the way it already does for the Deployment: as chart
+values and native references. Nothing below knows it is on any particular cloud.
+*/}}
+{{- range $name, $agent := .Values.agents }}
+{{- range $job := $agent.jobs }}
+{{- $schedules := $job.trigger.schedules -}}
+{{- range $index, $schedule := $schedules }}
+{{- $context := dict "root" $ "name" $name "agent" $agent "job" $job "index" $index "total" (len $schedules) -}}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "agent.jobFullname" $context }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "agent.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name | quote }}
+    agent-toolkit/job: {{ $job.slug | quote }}
+spec:
+  schedule: {{ $schedule | quote }}
+  timeZone: {{ $job.trigger.timezone | quote }}
+  # The hard switch parks the clock, not the job: a human may still start a parked job
+  # through `job run` by hand, and the host decides that — never this object.
+  suspend: {{ $job.suspend }}
+  # Single-flight: an overlapping run is refused, never queued. `Forbid` holds per object,
+  # so two schedules on one job are two objects and can still overlap — the RFC's open
+  # problem, not something this template can close.
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      # The platform deadline is the declared budget plus its declared headroom — the same
+      # sum `jobDeadlineMs` derives — rounded up to the whole second Kubernetes counts in.
+      # Derived, never a values knob: a deadline an operator can set independently eventually
+      # lands below the budget, and the job is then SIGKILLed inside the window the headroom
+      # reserves for its closing writes. Up rather than down is what keeps this object the
+      # backstop: the host's own SIGTERM and SIGKILL land inside it, never after it.
+      activeDeadlineSeconds: {{ div (add $job.budget.wallClockMs $job.budget.deadlineHeadroomMs 999) 1000 }}
+      # No platform retry — a failed run is a failed run. A re-run spends a budget nobody
+      # widened.
+      backoffLimit: 0
+      template:
+        metadata:
+          {{- with omit $.Values.podAnnotations "agent-toolkit/config-sha256" }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labels:
+            {{- include "agent.agentSelectorLabels" $context | nindent 12 }}
+            agent-toolkit/job: {{ $job.slug | quote }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "agent.serviceAccountName" $context }}
+          # The one pod spec here a cluster token may reach, and only when this agent's
+          # values ask. A job Pod runs the argv the manifest declared, with no brain and no
+          # channel text in it; the Deployment's `false` is unconditional because that Pod
+          # runs an LLM over untrusted text. The knob is named for the job rather than the
+          # agent so no single value can put a token in the LLM container. What the token may
+          # then read is the Role and RoleBinding the consumer wrote — never this chart's.
+          automountServiceAccountToken: {{ $agent.serviceAccount.automountJobToken | default false }}
+          {{- with $.Values.priorityClassName }}
+          priorityClassName: {{ . | quote }}
+          {{- end }}
+          {{- with $.Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $.Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          # The same staging the agent Pod runs, from the same bundle source onto the same
+          # claim. A job that instead relied on the Deployment having gone first would
+          # lose its run on a fresh install — and with no retry, lost is lost.
+          initContainers:
+            {{- include "agent.stageConfig" $context | nindent 12 }}
+          containers:
+            - name: job
+              image: {{ required "imageRef is required" $.Values.imageRef | quote }}
+              # The host, never the body. It reads the job's own argv out of the bundle and
+              # owns the rest of the envelope: admission past both switches, single-flight,
+              # the budget's bow-out, the run record, and the verdict. `--trigger schedule`
+              # is provenance a clock is entitled to claim and a job body is not.
+              args:
+                - job
+                - run
+                - {{ $job.slug | quote }}
+                - --trigger
+                - schedule
+                - --bundle
+                - /agents/{{ $name }}
+                {{- if or $agent.secrets.kubernetesSecret $agent.secrets.csi.secretProviderClass }}
+                - --secrets
+                - {{ include "agent.secretsMountPath" $context }}
+                {{- end }}
+{{- /*
+Searched before `--secrets`, and passed here and nowhere else. A ref that lives only in this
+mount is resolvable by a scheduled body and by nothing in the Deployment Pod, which is the
+whole of what the second mount buys.
+*/}}
+                {{- if include "agent.hasJobSecrets" $agent }}
+                - --job-secrets
+                - {{ include "agent.jobSecretsMountPath" $context }}
+                {{- end }}
+              resources:
+                {{- toYaml $agent.resources | nindent 16 }}
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 10001
+                runAsGroup: 10001
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                {{- include "agent.agentVolumeMounts" $context | nindent 16 }}
+          volumes:
+            {{- include "agent.podVolumes" $context | nindent 12 }}
+{{ end }}
+{{- end }}
+{{- end }}

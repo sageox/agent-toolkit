@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["imageRef", "agents"],
+  "properties": {
+    "global": { "type": "object" },
+    "imageRef": { "type": "string", "minLength": 1 },
+    "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
+    "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+    "tolerations": { "type": "array", "items": { "type": "object" } },
+    "priorityClassName": { "type": "string" },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policyTypes"],
+      "properties": {
+        "policyTypes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["Ingress", "Egress"] },
+          "description": "Directions each agent's NetworkPolicy restricts. Empty renders no NetworkPolicy at all, because a policy that names no direction is a deny-all-ingress rule rather than an inert one."
+        },
+        "ingress": { "type": "array", "items": { "type": "object" } },
+        "egress": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Kubernetes NetworkPolicy rules, passed through verbatim. Left open like bundle.volume: the API server validates a peer, and a schema here that listed the peers it knew would refuse the next one Kubernetes adds."
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "maxLength": 63,
+        "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/agent" }
+    }
+  },
+  "$defs": {
+    "optionalObjectName": {
+      "type": "string",
+      "pattern": "^$|^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$"
+    },
+    "objectName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$"
+    },
+    "secretSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kubernetesSecret", "csi"],
+      "properties": {
+        "kubernetesSecret": { "$ref": "#/$defs/optionalObjectName" },
+        "csi": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secretProviderClass"],
+          "properties": {
+            "secretProviderClass": { "$ref": "#/$defs/optionalObjectName" },
+            "provider": { "type": "string" },
+            "parameters": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug", "suspend", "trigger", "budget"],
+      "properties": {
+        "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "suspend": { "type": "boolean" },
+        "trigger": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schedules", "timezone"],
+          "properties": {
+            "schedules": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            },
+            "timezone": { "type": "string", "minLength": 1 }
+          }
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["wallClockMs", "deadlineHeadroomMs"],
+          "properties": {
+            "wallClockMs": { "type": "integer", "minimum": 1 },
+            "deadlineHeadroomMs": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle", "serviceAccount", "secrets", "persistence",
+        "terminationGracePeriodSeconds", "resources", "sharedVolumes"
+      ],
+      "properties": {
+        "fullnameOverride": { "$ref": "#/$defs/optionalObjectName" },
+        "bundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "volume": {
+              "type": "object",
+              "minProperties": 1,
+              "description": "Any Kubernetes VolumeSource, passed through verbatim and mounted read-only at /config. Left open on purpose: the API server validates a VolumeSource, and a schema here that listed the sources it knew would refuse the next one Kubernetes adds."
+            },
+            "stageImage": {
+              "type": "string",
+              "description": "The image the stage-config init container runs; defaults to imageRef. With no volume it must carry the bundle at /config."
+            }
+          }
+        },
+        "serviceAccount": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["create", "name"],
+          "properties": {
+            "create": { "type": "boolean" },
+            "name": { "$ref": "#/$defs/optionalObjectName" },
+            "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+            "automountJobToken": {
+              "type": "boolean",
+              "description": "Mount the projected ServiceAccount token on this agent's CronJob Pods, so a job can call the Kubernetes API. Default false. Named for the job because the Deployment Pod runs an LLM over untrusted text and never mounts one. Grant what it may read with your own Role and RoleBinding; this chart renders neither."
+            }
+          }
+        },
+        "secrets": { "$ref": "#/$defs/secretSource" },
+        "jobSecrets": {
+          "allOf": [{ "$ref": "#/$defs/secretSource" }],
+          "description": "A second secret source, mounted by this agent's CronJob Pods in addition to `secrets` and searched ahead of it when a job body resolves `run.secrets`. Absent, every Pod mounts `secrets` alone, exactly as before this existed. It is where a credential only a job needs belongs: what is not in `secrets` is not a file in the container that runs the brain, which is a boundary no tool policy can draw. The agent's own credentials stay in `secrets` and are rotated once — the job Pod still mounts them, so splitting a credential out never costs a job its status post or its kill switch. Requires at least one schedule, since no other Pod mounts it."
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "size": { "type": "string", "minLength": 1 },
+            "storageClass": { "type": "string" },
+            "existingClaim": { "$ref": "#/$defs/optionalObjectName" }
+          }
+        },
+        "jobs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/job" }
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 121,
+          "description": "Seconds between SIGTERM and SIGKILL, which must outlast a turn. 121 is the floor for the default limits.turnTimeoutMs of 120000; an agent that raises that timeout must raise this with it, which no render can check because Helm never reads the manifest."
+        },
+        "resources": { "type": "object" },
+        "sharedVolumes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "claimName", "mountPath"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$" },
+              "claimName": { "$ref": "#/$defs/objectName" },
+              "mountPath": { "type": "string", "pattern": "^/" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

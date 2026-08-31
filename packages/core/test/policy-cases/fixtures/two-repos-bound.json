@@ -1,0 +1,41 @@
+{
+  "$comment": [
+    "SYNTHETIC. Repositories are PLACEHOLDERS \u2014 no agent is bound to these.",
+    "",
+    "Everything the policy can grant is granted, and two repositories are bound.",
+    "That is the isolation the bound rows need. With a narrower fixture a refusal",
+    "would be ambiguous \u2014 the bound could have held, or the policy could have",
+    "refused first \u2014 and the bypass would look contained. Here the repository",
+    "argument is the only thing left that can decide, so an OutOfBounds verdict",
+    "proves the bound holds and an Allowed verdict proves it was walked past."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__*"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service",
+          "acme/tools"
+        ]
+      }
+    }
+  ]
+}

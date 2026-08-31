@@ -1,0 +1,63 @@
+# Copy this file into the deployment repository that owns these Kubernetes objects.
+imageRef: ghcr.io/example/agent-base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+agents:
+  harry:
+    # Any Kubernetes VolumeSource, mounted read-only at /config and copied onto the claim.
+    # A ConfigMap is the ordinary one and the only one with a 1 MiB cap; an `image:` or a
+    # `persistentVolumeClaim:` source has none. `items` here is the native ConfigMap
+    # mapping, so it also narrows the volume to the keys it lists.
+    bundle:
+      volume:
+        configMap:
+          name: agent-harry-bundle
+          items:
+            - { key: hidden-policy, path: .tool-policy.yaml }
+    serviceAccount: { create: true, name: "" }
+    secrets:
+      kubernetesSecret: agent-harry
+      csi: { secretProviderClass: "" }
+    persistence: { size: 10Gi }
+    # Mirrored from this agent's agent.yaml jobs[]; not authored here. Only the clock and
+    # the bound appear — the archetype, kill switch, report, and the job's own argv stay in
+    # the manifest, which is the one place a job is declared and the only thing `job run`
+    # reads them from.
+    jobs:
+      # A scheduled job. The rendered deadline is 1800000 + 300000 ms = 2100 seconds.
+      - slug: shift
+        suspend: false
+        trigger:
+          schedules: ["0 */4 * * 1-5"]
+          timezone: America/New_York
+        budget: { wallClockMs: 1800000, deadlineHeadroomMs: 300000 }
+      # An on-request job declares no schedule, so it renders no scheduled object; it is
+      # started by hand with `sageox-agent job run inbox --trigger on-request`. It is still
+      # listed: a job missing from this mirror is a job silently unrendered.
+      - slug: inbox
+        suspend: false
+        trigger: { schedules: [], timezone: UTC }
+        budget: { wallClockMs: 600000, deadlineHeadroomMs: 300000 }
+    terminationGracePeriodSeconds: 130
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    sharedVolumes: []
+  ida:
+    bundle: { volume: { configMap: { name: agent-ida-bundle } } }
+    serviceAccount: { create: true, name: "" }
+    secrets:
+      kubernetesSecret: agent-ida
+      csi: { secretProviderClass: "" }
+    persistence: { size: 5Gi }
+    # A job parked by its hard switch: the object exists on the roster, and its clock
+    # does not fire.
+    jobs:
+      - slug: sweep
+        suspend: true
+        trigger:
+          schedules: ["0 3 * * 0"]
+          timezone: UTC
+        budget: { wallClockMs: 3600000, deadlineHeadroomMs: 300000 }
+    terminationGracePeriodSeconds: 130
+    resources: {}
+    sharedVolumes: []

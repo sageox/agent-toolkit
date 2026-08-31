@@ -1,0 +1,10 @@
+{
+  "name": "@sageox/agent-toolkit-adapter-console",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./src/console.ts",
+  "dependencies": {
+    "@sageox/agent-toolkit-core": "workspace:*"
+  }
+}

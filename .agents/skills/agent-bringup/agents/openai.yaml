@@ -1,0 +1,4 @@
+interface:
+  display_name: "Buzz Agent Bring-up"
+  short_description: "Create and publish a safe hosted agent"
+  default_prompt: "Use $agent-bringup to create and configure a new hosted agent."

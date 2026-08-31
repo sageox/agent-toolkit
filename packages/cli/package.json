@@ -1,0 +1,19 @@
+{
+  "name": "@sageox/agent-toolkit-cli",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "sageox-agent": "./src/cli.ts"
+  },
+  "dependencies": {
+    "@sageox/agent-toolkit-adapter-buzz": "workspace:*",
+    "@sageox/agent-toolkit-adapter-console": "workspace:*",
+    "@sageox/agent-toolkit-adapter-slack": "workspace:*",
+    "@sageox/agent-toolkit-core": "workspace:*",
+    "@clack/prompts": "^1.7.0",
+    "sharp": "^0.35.3",
+    "yaml": "^2.5.0",
+    "zod": "^4.4.3"
+  }
+}

@@ -1,0 +1,47 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Review guidance for agent-toolkit. Keep this aligned with the project's
+# documented security boundary and contribution guidance.
+language: en-US
+
+reviews:
+  profile: assertive
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+  path_filters:
+    - "!pnpm-lock.yaml"
+  path_instructions:
+    - path: "packages/**/test/**"
+      instructions: >-
+        Require tests at the lowest layer that can falsify the claim. Assert
+        observable outcomes and failure paths, avoid sleeps and wall-clock
+        timing assertions, and do not accept silent passes for unavailable
+        infrastructure.
+    - path: "packages/core/src/**"
+      instructions: >-
+        Protect the core security boundary: brains must not receive transport,
+        signing, or tool credentials; outbound actions and hosted MCP tools must
+        pass through gateway policy and guard enforcement. Flag changes that
+        bypass or weaken those chokepoints.
+    - path: "packages/cli/src/**"
+      instructions: >-
+        Never write literal credentials into agent.yaml, settings.json, logs,
+        command output, or generated deployment manifests. Preserve the
+        separation between secret references in configuration and values held
+        by the gateway or deployment secret store.
+    - path: "deploy/**"
+      instructions: >-
+        Flag plaintext credentials, over-broad IAM/RBAC, mutable image identity,
+        or changes that weaken the documented deployment contract. Secret names
+        and references are expected; secret values are not.
+    - path: "package.json"
+      instructions: >-
+        The root is a private pnpm workspace, not a publishable package. Keep
+        Node and pnpm versions aligned with CI and .mise.toml, and keep the
+        Apache-2.0 license consistent with package manifests and LICENSE.
+    - path: ".github/workflows/**"
+      instructions: >-
+        Keep third-party actions pinned to commit SHAs, permissions least
+        privilege, and Node, pnpm, Helm, and Terraform versions aligned with
+        the repository's declared toolchain.

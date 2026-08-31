@@ -1,0 +1,4 @@
+#!/bin/sh
+# Convenience wrapper: runs the CLI from source until the packages are published.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$ROOT/node_modules/.bin/tsx" "$ROOT/packages/cli/src/cli.ts" "$@"

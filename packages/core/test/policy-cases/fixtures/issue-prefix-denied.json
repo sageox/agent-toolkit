@@ -1,0 +1,41 @@
+{
+  "$comment": [
+    "SYNTHETIC. The same mid-token prefix as issue-prefix-allowed.json, written",
+    "on the DENY side by someone shutting off the issue write.",
+    "",
+    "It shuts off the reads too. `mcp__github__issue_*` is a character-offset",
+    "prefix in both directions, so the rule that was meant to reach one tool",
+    "reaches four, and an agent whose job is working an issue backlog silently",
+    "stops being able to read one. The allow rule above it is deliberately wide,",
+    "so a Denied verdict here is the deny arm firing rather than nothing matching."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__*"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)",
+      "mcp__github__issue_*"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ]
+}

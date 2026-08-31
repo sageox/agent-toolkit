@@ -1,0 +1,11 @@
+{
+  "name": "@sageox/agent-toolkit-adapter-buzz",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@sageox/agent-toolkit-core": "workspace:*",
+    "nostr-tools": "^2.24.2"
+  }
+}

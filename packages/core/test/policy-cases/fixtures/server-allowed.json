@@ -1,0 +1,40 @@
+{
+  "$comment": [
+    "SYNTHETIC. The bare server name as an ALLOW rule, and the reason the",
+    "matcher has to understand it rather than merely stop being wrong about it:",
+    "`mcp__github` is what Claude Code's documentation reaches for first, so an",
+    "operator who grants a server that way has a working policy on one side of",
+    "the file and an agent with no tools from it on the other.",
+    "",
+    "Paired with server-denied.json \u2014 one spelling, both directions, one",
+    "meaning."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ]
+}

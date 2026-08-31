@@ -1,0 +1,45 @@
+{
+  "$comment": [
+    "SYNTHETIC. The shape an operator reaches for to grant 'the issue tools' in",
+    "one line: an allow rule whose prefix ends MID-TOKEN, after the underscore.",
+    "",
+    "This fixture is the counterexample. `matches()` compares a `*` rule as a",
+    "character-offset prefix, so `mcp__github__issue_*` covers `issue_list` and",
+    "`issue_view` as intended \u2014 and `issue_create` too, which is a write. The",
+    "table shows what the rule actually reaches.",
+    "",
+    "Claude Code's own matcher does the opposite with a mid-token prefix: a",
+    "`Bash(git push origin agentns/:*)` rule stops at a SPACE and so matches",
+    "nothing anyone would type. Same spelling, two readings \u2014 see NOT_ESTABLISHED",
+    "in cases.ts."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__issue_*",
+      "mcp__github__pr_list"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ]
+}

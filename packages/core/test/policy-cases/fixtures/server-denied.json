@@ -1,0 +1,44 @@
+{
+  "$comment": [
+    "SYNTHETIC. A deny written as the bare server name, which is Claude Code's",
+    "own spelling for 'everything from this server' \u2014 so it is the natural",
+    "thing for an operator to write, and it has to mean the same thing on both",
+    "sides of the file.",
+    "",
+    "It did not. The rule carries no glob, so it was compared exactly against",
+    "`mcp__github__pr_list` and matched nothing: the broadest-looking line in",
+    "the file was the one that did nothing, and a reader who saw it stopped",
+    "looking for the gap it appeared to close. The allow rule above it is wide",
+    "on purpose, so a Denied verdict is this deny firing rather than nothing",
+    "matching."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__*"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)",
+      "mcp__github"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ]
+}

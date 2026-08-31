@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose an idea, enhancement, or new integration.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A well-crafted agent prompt or implementation plan is a welcome
+        contribution too — you don't need to write the code yourself to open a
+        great feature request.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you solving?
+      description: Describe the problem or limitation you're running into.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to see happen?
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other approaches or workarounds you've tried.
+
+  - type: dropdown
+    id: willing-to-pr
+    attributes:
+      label: Would you be up for submitting a PR? (optional)
+      options:
+        - "yes"
+        - "maybe"
+        - "no"

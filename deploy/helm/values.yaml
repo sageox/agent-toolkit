@@ -1,0 +1,37 @@
+# imageRef is the immutable image tag or digest to run.
+imageRef: ""
+
+# podAnnotations supports cluster integrations such as observability and policy engines.
+podAnnotations: {}
+
+# Scheduling settings are passed through to the Pod spec for heterogeneous clusters.
+nodeSelector: {}
+tolerations: []
+priorityClassName: ""
+
+# networkPolicy renders one NetworkPolicy per agent, covering that agent's Deployment and
+# CronJob Pods. `ingress` and `egress` are Kubernetes NetworkPolicy rules, passed through
+# verbatim.
+#
+# `policyTypes` is the switch: empty renders no object, because Kubernetes defaults an empty
+# `policyTypes` to `Ingress`, making such a policy a deny-all-ingress rule rather than an
+# inert one. A direction with no rules is the
+# deliberate deny-all — `["Egress"]` alone cuts every outbound connection, DNS included.
+#
+# Enforcement is the cluster's: where the CNI does not implement NetworkPolicy the object
+# applies cleanly and constrains nothing.
+networkPolicy:
+  policyTypes: []
+  ingress: []
+  egress: []
+
+# Each map entry is one independently restarted singleton workload. The key must match the
+# name in agent.yaml. See examples/two-agents.values.yaml for a complete example. The volume
+# an agent's bundle comes from, its Secrets, and shared claims are created by your native
+# deployment tooling.
+#
+# An agent's `jobs` mirror the clock and the bound of each `jobs[]` entry its agent.yaml
+# declares — never the job body's argv, which `job run` reads from the manifest — because
+# Helm cannot read a bundle at render time. Mirror every declared job: one left
+# out renders no schedule, and nothing here can tell that apart from an agent with no jobs.
+agents: {}

@@ -1,0 +1,25 @@
+{{- range $name, $agent := .Values.agents }}
+{{- if not $agent.persistence.existingClaim }}
+{{- $context := dict "root" $ "name" $name "agent" $agent -}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "agent.claimName" $context }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "agent.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name | quote }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if $agent.persistence.storageClass }}
+  storageClassName: {{ $agent.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $agent.persistence.size | default "10Gi" }}
+{{ end }}
+{{ end }}

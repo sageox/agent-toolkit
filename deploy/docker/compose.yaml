@@ -1,0 +1,48 @@
+# Copy this file into the deployment repository that owns your paths and secrets.
+# Add one service per agent; every service uses the same immutable runtime image.
+name: agents
+
+x-agent: &agent
+  image: ${AGENT_IMAGE:?set AGENT_IMAGE to a versioned tag or digest}
+  # Bind mounts preserve numeric ownership. Run as the user that owns the writable bundles.
+  user: ${AGENT_UID:?set AGENT_UID to the bundle owner's numeric uid}:${AGENT_GID:?set AGENT_GID to the bundle owner's numeric gid}
+  restart: unless-stopped
+  stop_grace_period: ${AGENT_STOP_GRACE_PERIOD:-130s}
+  environment:
+    BRAIN_MCP_HOST: 127.0.0.1
+    # An arbitrary host uid does not own the image's /home/agent.
+    HOME: /tmp
+
+services:
+  harry:
+    <<: *agent
+    command: ["run", "--bundle", "/agents/harry", "--secrets", "/mnt/secrets-store"]
+    volumes:
+      - type: bind
+        source: ${HARRY_BUNDLE:?set HARRY_BUNDLE to Harry's bundle directory}
+        target: /agents/harry
+      # Never inherit the authoring workstation's local .env.
+      - type: bind
+        source: /dev/null
+        target: /agents/harry/.env
+        read_only: true
+      - type: bind
+        source: ${HARRY_SECRETS:?set HARRY_SECRETS to Harry's secret directory}
+        target: /mnt/secrets-store
+        read_only: true
+
+  ida:
+    <<: *agent
+    command: ["run", "--bundle", "/agents/ida", "--secrets", "/mnt/secrets-store"]
+    volumes:
+      - type: bind
+        source: ${IDA_BUNDLE:?set IDA_BUNDLE to Ida's bundle directory}
+        target: /agents/ida
+      - type: bind
+        source: /dev/null
+        target: /agents/ida/.env
+        read_only: true
+      - type: bind
+        source: ${IDA_SECRETS:?set IDA_SECRETS to Ida's secret directory}
+        target: /mnt/secrets-store
+        read_only: true

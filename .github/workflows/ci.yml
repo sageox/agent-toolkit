@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.25.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Helm
+        uses: Azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.8
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # From the upstream release, not apt: `apt-get update` goes through the runner's
+      # Ubuntu mirror, and a stall there hangs until the job timeout kills a run that never
+      # reached the tests. Pinned by version and digest, like every action above.
+      - name: Install age
+        env:
+          AGE_VERSION: v1.3.1
+          AGE_SHA256: bdc69c09cbdd6cf8b1f333d372a1f58247b3a33146406333e30c0f26e8f51377
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/age.tar.gz" \
+            "https://github.com/FiloSottile/age/releases/download/$AGE_VERSION/age-$AGE_VERSION-linux-amd64.tar.gz"
+          echo "$AGE_SHA256  $RUNNER_TEMP/age.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/age.tar.gz" -C "$RUNNER_TEMP"
+          sudo install "$RUNNER_TEMP/age/age" "$RUNNER_TEMP/age/age-keygen" /usr/local/bin/
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Run typecheck
+        run: pnpm typecheck
+
+      # Helm lint validates the native values schema and renders the two-agent example.
+      - name: Lint Helm chart
+        run: |
+          helm lint --strict deploy/helm \
+            --values deploy/helm/examples/two-agents.values.yaml
+
+      - name: Test deployment examples
+        env:
+          AGENT_IMAGE: ghcr.io/example/agent-base:test
+          AGENT_UID: "1001"
+          AGENT_GID: "1001"
+          HARRY_BUNDLE: /srv/agents/harry
+          HARRY_SECRETS: /srv/agent-secrets/harry
+          IDA_BUNDLE: /srv/agents/ida
+          IDA_SECRETS: /srv/agent-secrets/ida
+        run: |
+          docker compose -f deploy/docker/compose.yaml config > /tmp/compose.yaml
+          grep -F 'user: 1001:1001' /tmp/compose.yaml
+          helm template agents deploy/helm \
+            --values deploy/helm/examples/two-agents.values.yaml > /tmp/helm.yaml
+          grep -F 'dest="/agents/harry/${file#$stage/}"' /tmp/helm.yaml
+          deploy/helm/tests/jobs.sh
+          deploy/helm/tests/consume.sh
+          deploy/helm/tests/bundle.sh
+          deploy/helm/tests/networkpolicy.sh
+
+      - name: Validate Terraform deployment
+        run: |
+          terraform fmt -check -recursive deploy/terraform
+          for deployment in aws-eks-bootstrap aws-eks-agent; do
+            terraform -chdir="deploy/terraform/${deployment}" init -backend=false
+            terraform -chdir="deploy/terraform/${deployment}" validate
+          done
+          terraform -chdir="deploy/terraform/aws-eks-agent" test
+
+  # `release.yml` builds this image from a tag, where a break is both expensive and late:
+  # the release is the first thing that ever compiles the Dockerfile. Building it here —
+  # same file, same architectures, nothing pushed — moves that failure into the pull
+  # request that caused it.
+  #
+  # Its own job rather than a step in `test`, so it runs alongside the suite instead of
+  # extending it, and needs none of that job's toolchain.
+  image:
+    name: Build the runtime image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build every architecture the release publishes
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          # Kept in step with release.yml deliberately. The Dockerfile pins `ox` by a
+          # per-architecture checksum, so an amd64-only build would stay green through
+          # exactly the edit most likely to break a release — a version bump that updates
+          # one checksum and forgets the other.
+          platforms: linux/amd64,linux/arm64
+          # Nothing downstream needs the image, only the proof that it builds. A
+          # multi-platform result cannot be loaded into the local daemon anyway.
+          push: false
+          outputs: type=cacheonly

@@ -1,0 +1,80 @@
+{{- range $name, $agent := .Values.agents }}
+{{- $context := dict "root" $ "name" $name "agent" $agent -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agent.agentFullname" $context }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "agent.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name | quote }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "agent.agentSelectorLabels" $context | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent.agentSelectorLabels" $context | nindent 8 }}
+      annotations:
+        {{- with omit $.Values.podAnnotations "agent-toolkit/config-sha256" }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        # A hash of the whole `bundle` stanza, so a rollout follows any change of source —
+        # a renamed ConfigMap, a new image digest, a different claim. What is inside the
+        # source stays out of view: a same-name ConfigMap edited in place rolls nothing.
+        agent-toolkit/bundle-sha256: {{ toYaml $agent.bundle | sha256sum | quote }}
+    spec:
+      serviceAccountName: {{ include "agent.serviceAccountName" $context }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ $agent.terminationGracePeriodSeconds }}
+      {{- with $.Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        {{- include "agent.stageConfig" $context | nindent 8 }}
+      containers:
+        - name: agent
+          image: {{ required "imageRef is required" $.Values.imageRef | quote }}
+          args:
+            - run
+            - --bundle
+            - /agents/{{ $name }}
+            {{- if or $agent.secrets.kubernetesSecret $agent.secrets.csi.secretProviderClass }}
+            - --secrets
+            - {{ include "agent.secretsMountPath" $context }}
+            {{- end }}
+          env:
+            - name: BRAIN_MCP_HOST
+              value: 127.0.0.1
+          resources:
+            {{- toYaml $agent.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            {{- include "agent.agentVolumeMounts" $context | nindent 12 }}
+      volumes:
+        {{- include "agent.podVolumes" $context | nindent 8 }}
+{{ end }}

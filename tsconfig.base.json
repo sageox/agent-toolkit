@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+
+    // Prefix a parameter with `_` where a signature has to keep one it does not use.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // Packages ship raw TS (`main` points at `src/`) and run under vitest/tsx, so
+    // nothing is compiled. Explicit `.ts` import specifiers require both flags.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+
+    // Named rather than discovered: TypeScript 7 stops walking up to the workspace root
+    // for `node_modules/@types`, and every package here is checked from its own directory,
+    // where pnpm leaves no `@types` of its own. Without this, `process`, `Buffer`, and
+    // every `node:` import go missing in all five packages. `@types/ws` needs no entry —
+    // this list only governs GLOBAL types, and `ws`'s come in through its import.
+    "types": ["node"]
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Buzz Agent Avatar"
+  short_description: "Design and publish a recognizable avatar"
+  default_prompt: "Use $agent-avatar to create or update an agent avatar and public profile."

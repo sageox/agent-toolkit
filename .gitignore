@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+.vitest/
+.terraform/
+deploy/terraform/**/.terraform.lock.hcl
+
+# Secrets & local config — NEVER commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+/mnt/secrets-store/
+
+# ox local state — per-machine init provenance and caches. `config.json` is the
+# shared pointer (repo_id, team_id, endpoint) and stays tracked; this is the record of
+# who ran `ox init` on which machine, and a clone does not need it: ox resolves the repo
+# from config.json alone.
+.sageox/.repo_*
+
+# Local dev scratch
+.context/
+*.log
+# throwaway diagnostic scripts
+/*.mjs
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local agent runtime — an agent bundle scaffolded in the working tree, not the
+# repository's own files. The negation is for the one collision: this repo has an
+# AGENTS.md of its own, and `CLAUDE.md` is a symlink to it.
+agent.yaml
+settings.json
+AGENTS.md
+!/AGENTS.md
+agent.log
+agent.error.log

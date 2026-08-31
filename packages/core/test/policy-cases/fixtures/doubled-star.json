@@ -1,0 +1,43 @@
+{
+  "$comment": [
+    "SYNTHETIC. The `**` glob spelling, borrowed from the deny list two lines",
+    "below it \u2014 which is where an operator learns it. `Read(//mnt/secrets-store/**)`",
+    "is a real path glob, so `mcp__github__**` looks like the same idea applied",
+    "to a tool name.",
+    "",
+    "It now is: a `*` spans anything, so the doubled form reaches the same tools",
+    "the single one does. It used to reach none of them \u2014 one trailing `*` was",
+    "stripped and the remaining one was matched as a literal asterisk \u2014 so the",
+    "whole surface was silently inert. The row is kept because the spelling is",
+    "one an operator will keep writing, and 'it happens to work' is worth as",
+    "much of a test as 'it happens not to'."
+  ],
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "mcp__github__**"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(//mnt/secrets-store/**)",
+      "Read(**/auth.json)"
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "node",
+      "args": [
+        "github-mcp.js"
+      ],
+      "secrets": {
+        "GITHUB_TOKEN": "GITHUB_TOKEN"
+      },
+      "scope": {
+        "repo": [
+          "acme/service"
+        ]
+      }
+    }
+  ]
+}

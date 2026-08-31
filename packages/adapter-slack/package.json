@@ -1,0 +1,12 @@
+{
+  "name": "@sageox/agent-toolkit-adapter-slack",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@sageox/agent-toolkit-core": "workspace:*",
+    "@slack/socket-mode": "^3.0.0",
+    "@slack/web-api": "^8.0.0"
+  }
+}
