@@ -59,13 +59,13 @@ report, then enable the schedule.
 
 **Decide where the job's credentials live, before you arm a trigger.** In `run.secrets` a
 credential is also a file in the gateway's container — unread there, but kept so by policy
-rather than by the kernel. In `run.jobSecrets` it reaches only the process a scheduled or
-webhook run is launched in, and that job **may not arm `trigger.onRequest`**: an on-request
-run executes inside the gateway, so "can be asked for in chat" and "absent from the process
-running the brain" are the same question with opposite answers. The manifest refuses that
-pair at load and names the ref. Choose deliberately — chat-triggerable, or kernel-separated
-and started only by a clock, a webhook, or `job run` at the host. The same work holding the
-same credential cannot be both, and no configuration makes it both.
+rather than by the kernel. In `run.jobSecrets` it reaches only `sageox-agent job run`, the
+separate process every trigger but one enters through — a clock, a webhook, or an operator
+at the host — and that job **may not arm `trigger.onRequest`**: an on-request run executes
+inside the gateway, so "can be asked for in chat" and "absent from the process running the
+brain" are the same question with opposite answers. The manifest refuses that pair at load
+and names the ref. Choose deliberately: chat-triggerable, or kernel-separated. The same work
+holding the same credential cannot be both, and no configuration makes it both.
 
 ## Publish deliberately
 

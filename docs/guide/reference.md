@@ -87,7 +87,8 @@ rather than one not allowed to. A job that declares `run.jobSecrets` may not arm
 at all — a run started here executes in the gateway's own process, which is not given the
 directory such a ref lives in, so `loadManifest` refuses the pair and names the ref. That is
 the one credential decision that has to be made before the trigger: a job holding a
-credential the gateway must not hold is a job nothing can ask for.
+credential the gateway must not hold is a job no conversation can start. A clock, a webhook,
+and an operator running `sageox-agent job run` at the host all still can.
 
 `memory add` and `mcp add` write these for you. Reach for this table only when editing a
 policy by hand — and `doctor` will tell you if you get it wrong.
