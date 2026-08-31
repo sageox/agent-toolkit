@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A bundle can say which of a job's credentials the gateway's own process must not hold.**
+  `jobs[].run.jobSecrets` takes the same env-var-to-`secretRef` map `run.secrets` does and
+  resolves from the same directory list, so a one-directory deployment satisfies both. What
+  it adds is a load-time refusal: a job declaring one **may not arm `trigger.onRequest`**,
+  named ref and all. A target could already hand `job run` a second directory it does not
+  give the gateway — `--job-secrets`, which chart 0.9.0 mounts as `agents.<name>.jobSecrets`
+  — but nothing in the manifest recorded which ref lived there, so a job that was both
+  scheduled and on-request resolved it on every tick and was refused by name the first time
+  a person asked for it. `onRequest` is the only trigger the gateway serves; every other one
+  enters through `job run`, a separate process. The gateway still gains no credential to fix
+  it — the message names the three ways out instead: drop `onRequest`, keep the credential
+  in `secrets` and take the weaker guarantee knowingly, or give the credentialed work a job
+  of its own that nothing may ask for. A name declared in both maps is refused too, since
+  the envelope merges them. `run.jobSecrets` is also left out of the inventory `run` checks
+  before it opens a socket, which is what lets such an agent launch at all: a credential
+  that moved but stayed spelled `secrets` refuses the launch, not just the run. Nothing that
+  loads today stops loading — the key is new, and `run` was already `.strict()`.
+
 ## [0.1.0] - 2026-08-31
 
 First full release of 0.1.0. It is `v0.1.0-rc.2` plus the two entries below —

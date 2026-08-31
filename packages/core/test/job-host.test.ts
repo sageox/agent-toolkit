@@ -321,6 +321,49 @@ describe("bounding", () => {
     expect(seen.GITHUB_TOKEN).toBe("github_pat_the_job_was_granted");
   });
 
+  it("resolves a jobSecrets ref out of the directory only this process was given", async () => {
+    const envelope = join(workDir, "envelope");
+    const jobSecretsDir = join(workDir, "job-secrets");
+    await mkdir(jobSecretsDir);
+    await writeFile(join(secretsDir, "GH_TOKEN"), "github_pat_the_agents_own");
+    await writeFile(join(jobSecretsDir, "GH_APP_PEM"), "-----BEGIN PRIVATE KEY-----\n");
+    // No `onRequest`: the manifest refuses that beside `jobSecrets`.
+    const declared = body(
+      `fs.writeFileSync(${JSON.stringify(envelope)},JSON.stringify(process.env));${PROVES}`,
+      { trigger: '{schedules: ["0 3 * * 0"]}' },
+    );
+    await new JobHost({
+      workDir,
+      env: { ...process.env, MARKER: marker },
+      secretOpts: { dir: [jobSecretsDir, secretsDir] },
+    }).tick({
+      ...declared,
+      run: {
+        ...declared.run,
+        secrets: { GITHUB_TOKEN: "GH_TOKEN" },
+        jobSecrets: { GH_APP_PEM: "GH_APP_PEM" },
+      },
+    });
+    const seen = JSON.parse(readFileSync(envelope, "utf8")) as Record<string, string>;
+
+    // Both, in one envelope: splitting a credential out never costs a job the agent's own,
+    // which is what its status post is signed with and its switch read with.
+    expect(seen.GITHUB_TOKEN).toBe("github_pat_the_agents_own");
+    expect(seen.GH_APP_PEM).toBe("-----BEGIN PRIVATE KEY-----");
+  });
+
+  it("names an unresolvable jobSecrets ref exactly as it names an unresolvable secret", async () => {
+    const declared = body(PROVES, { trigger: '{schedules: ["0 3 * * 0"]}' });
+    const run = await host().tick({
+      ...declared,
+      run: { ...declared.run, jobSecrets: { GH_APP_PEM: "NEVER_MOUNTED" } },
+    });
+
+    expect(run.outcome).toBe("crashed");
+    expect(run.reason).toContain("NEVER_MOUNTED");
+    expect(spawns()).toBe(0);
+  });
+
   it("cannot see an ambient variable it did not declare — cloud identity included", async () => {
     const envelope = join(workDir, "envelope");
     // This body writes no `MARKER`: the case below declares nothing but `AWS_ROLE_ARN`, and

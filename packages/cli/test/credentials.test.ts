@@ -321,6 +321,23 @@ describe("declared secretRefs", () => {
     );
   });
 
+  it("leaves out a ref the deployment keeps off this process's own directory", () => {
+    // Listed, it would refuse the launch of every agent that split a credential out — the
+    // arrangement `run.jobSecrets` exists to describe.
+    const split = loadManifest(`${FLEET}      jobSecrets: { GH_APP_PEM: DEMO_JOB_PEM }\n`);
+    const declared = declaredSecrets(split, parseReposConf(PRIVATE_REPO));
+
+    expect(declared.map((secret) => secret.name)).not.toContain("DEMO_JOB_PEM");
+    writeFileSync(join(secretsDir, "GITHUB_TOKEN"), "ghp_x");
+    for (const name of ["DEMO_NSEC", "DEMO_SLACK_BOT", "DEMO_SLACK_APP", "DEMO_AGE_IDENTITY"]) {
+      writeFileSync(join(secretsDir, name), "value");
+    }
+    writeFileSync(join(secretsDir, "DEMO_TRACKER_KEY"), "value");
+    writeFileSync(join(secretsDir, "DEMO_JOB_TOKEN"), "value");
+    // The PEM is absent from this directory and the launch still goes ahead.
+    expect(requireDeclaredSecrets(declared, { dir: secretsDir })).toEqual([]);
+  });
+
   it("names every missing ref at once, with where it is declared and how to get one", () => {
     const declared = declaredSecrets(loadManifest(FLEET), parseReposConf(PRIVATE_REPO));
     let message = "";

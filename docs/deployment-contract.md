@@ -76,8 +76,8 @@ the fake trigger this declaration
 [deletes](design/2026-08-19-jobs-rfc.md#51-a-scheduleless-job-is-legal-here-and-it-is-not-in-the-fleet-today).
 
 A job body's environment is **declared, not inherited**: it is built from the same six-variable
-allowlist every spawned child gets, plus whatever `run.env`, `run.secrets`, and
-`run.passthrough` name ([the job body contract](job-contract.md#what-the-host-passes-in)).
+allowlist every spawned child gets, plus whatever `run.env`, `run.secrets`, `run.jobSecrets`,
+and `run.passthrough` name ([the job body contract](job-contract.md#what-the-host-passes-in)).
 A target therefore owes a job run the `secretRef` mounts, not a copy of the gateway's
 environment — and a job that needs the pod's cloud identity says so by name in
 `run.passthrough`, which is a grant a reviewer can read rather than an inheritance nobody
@@ -92,10 +92,11 @@ resolves the agent's own credentials as well, for the surface its status post is
 and the switch it is admitted past, and a target that swapped one mount for the other would
 answer a missing credential with a disarmed switch and a lost report rather than a refusal.
 A run started on request gets no such mount: it executes inside the gateway's own process,
-off the agent's own, so a ref that lives only in the scheduled mount fails to resolve there
-and the run fails by name. And a job run is not a second replica: it serves no surface and
-holds no cursor, so `Identity` above is untouched. The rest of the envelope is the
-runtime's rather than the target's — trigger
+off the agent's own, so a ref that lives only in the scheduled mount cannot resolve there.
+Which refs those are is the bundle's to say — `run.jobSecrets` — and a job naming one may not
+arm `trigger.onRequest`, so no target has to make that pairing work. And a job run is not a
+second replica: it serves no surface and holds no cursor, so `Identity` above is untouched.
+The rest of the envelope is the runtime's rather than the target's — trigger
 provenance, admission past a parked switch, the soft kill switch read from the agent's own
 memory, the budget's own bow-out, the run record, and the verdict artifact the job writes. A
 target supplies a clock, a process, a deadline, and durable state.

@@ -589,14 +589,61 @@ describe("jobs", () => {
     ).toEqual({ GH_TOKEN: "GH_TOKEN" });
   });
 
-  it("defaults the three environment fields to empty, so a job declares its way out of nothing", () => {
+  it("defaults the four environment fields to empty, so a job declares its way out of nothing", () => {
     expect(loadManifest(withJob()).jobs[0].run).toEqual({
       command: "node",
       args: ["runner/src/sweep.ts"],
       env: {},
       secrets: {},
+      jobSecrets: {},
       passthrough: [],
     });
+  });
+
+  it("refuses a credential the gateway may not hold on a job a person may ask for", () => {
+    const both = withJob({
+      trigger: '{schedules: ["0 3 * * 0"], onRequest: true}',
+      run: "{command: node, jobSecrets: {GH_APP_PEM: GH_APP_PEM}}",
+    });
+    // Named, because "this job" would send an operator to read the whole `run` block.
+    expect(() => loadManifest(both)).toThrow(/GH_APP_PEM/);
+    expect(() => loadManifest(both)).toThrow(/trigger\.onRequest/);
+
+    // Every trigger but `onRequest` enters through `job run`, which takes the directory.
+    expect(
+      loadManifest(withJob({ run: "{command: node, jobSecrets: {GH_APP_PEM: GH_APP_PEM}}" }))
+        .jobs[0].run.jobSecrets,
+    ).toEqual({ GH_APP_PEM: "GH_APP_PEM" });
+    expect(() =>
+      loadManifest(
+        withJob({ trigger: "{webhook: true}", run: "{command: node, jobSecrets: {P: P}}" }),
+      ),
+    ).not.toThrow();
+    // And an on-request job whose refs are all in the directory every process gets is fine.
+    expect(() =>
+      loadManifest(
+        withJob({
+          trigger: '{schedules: ["0 3 * * 0"], onRequest: true}',
+          run: "{command: node, secrets: {GH_TOKEN: GH_TOKEN}}",
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("refuses one variable declared in both secret maps, which the envelope would merge", () => {
+    expect(() =>
+      loadManifest(
+        withJob({
+          run: "{command: node, secrets: {GH_TOKEN: GH_TOKEN}, jobSecrets: {GH_TOKEN: GH_APP_PEM}}",
+        }),
+      ),
+    ).toThrow(/both run\.secrets and run\.jobSecrets/);
+  });
+
+  it("holds a jobSecrets ref to the same grammar, since it names a file too", () => {
+    expect(() =>
+      loadManifest(withJob({ run: "{command: node, jobSecrets: {GH_APP_PEM: '../PEM'}}" })),
+    ).toThrow(/secretRef/);
   });
 
   it("is absent unless declared — an agent with no scheduled work is the default", () => {

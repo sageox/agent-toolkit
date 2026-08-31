@@ -993,9 +993,9 @@ export class JobHost {
    * 1. `passthroughEnv` — the six variables a process needs to run, plus the names this job
    *    declared in `passthrough`. Nothing else in `opts.env` reaches the body.
    * 2. `run.env` — plain configuration, from the bundle.
-   * 3. `run.secrets` — resolved refs. A secret wins over config of the same name, so a
-   *    credential can never be silently downgraded to a hardcoded value (`McpBroker` orders
-   *    them the same way, for the same reason).
+   * 3. `run.secrets` and `run.jobSecrets` — resolved refs. A secret wins over config of the
+   *    same name, so a credential can never be silently downgraded to a hardcoded value
+   *    (`McpBroker` orders them the same way, for the same reason).
    * 4. The `JOB_*` envelope, which is the host's and outranks all of it: a body that could
    *    redefine `JOB_VERDICT_PATH` could point this host at a file it wrote in advance. The
    *    `JOB_PARAM_*` values this run was given are part of that block, for the same reason,
@@ -1008,7 +1008,9 @@ export class JobHost {
     channel?: HostedMcp,
   ): NodeJS.ProcessEnv {
     const secrets: NodeJS.ProcessEnv = {};
-    for (const [envVar, ref] of Object.entries(job.run.secrets)) {
+    // Both maps, one loop: `jobSecrets` says which processes are given the directory a ref
+    // lives in, not how it is found. The manifest refuses a name declared in both.
+    for (const [envVar, ref] of Object.entries({ ...job.run.secrets, ...job.run.jobSecrets })) {
       const value = resolveSecret(ref, this.opts.secretOpts ?? {});
       // Refusing here names the missing ref. Handing the body a hole instead produces an
       // auth failure several minutes into unattended work, attributed to whatever it called.

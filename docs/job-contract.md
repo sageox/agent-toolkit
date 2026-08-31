@@ -35,10 +35,21 @@ jobs:
       # Env var name -> secretRef. Resolved by the host, from /mnt/secrets-store or the
       # environment, and refused at startup if it does not resolve.
       secrets: { GH_TOKEN: GH_TOKEN, ANTHROPIC_API_KEY: ANTHROPIC_API_KEY }
+      # The same, for a credential the gateway's own process must not hold. Resolved
+      # identically; declaring one here refuses `trigger.onRequest` on this job.
+      jobSecrets: { GH_APP_PEM: GH_APP_PEM }
       # Ambient variables this body inherits, by name. For values the platform injects at
       # runtime — EKS IRSA below; GKE and Azure workload identity present the same way.
       passthrough: [AWS_ROLE_ARN, AWS_WEB_IDENTITY_TOKEN_FILE, AWS_REGION]
 ```
+
+`jobSecrets` is a claim about where the value is mounted, not a second resolver — both maps
+resolve from the same directory list, and a deployment with one directory satisfies both.
+A target may hand `job run` a second one it does not give the gateway (`--job-secrets`; the
+Helm chart spells the mount `agents.<name>.jobSecrets`), and a ref living only there cannot
+resolve on the on-request path, which is the one that runs inside the gateway. Saying which
+refs moved is what lets that pairing be refused at load, by name, rather than on the run
+that meets it.
 
 A secret of the same name beats `env`, so a credential can never be silently downgraded to
 a hardcoded value; the `JOB_*` variables above beat everything, because a body that could
