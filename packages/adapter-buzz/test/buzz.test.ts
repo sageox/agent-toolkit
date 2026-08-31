@@ -217,13 +217,13 @@ describe("BuzzAdapter", () => {
   it("wakes the recipients a post names, and nobody else in the channel", async () => {
     const a = newAdapter({ channels: [{ id: "hive", reply: "private" }] });
     await a.start(() => {});
-    await settle();
 
     const channel = { surface: "buzz", id: "hive", isPublic: false } as const;
     const drone = getPublicKey(generateSecretKey());
     const forager = getPublicKey(generateSecretKey());
+    // No `settle` on either side: `publish` resolves on the relay's OK, which the fake
+    // sends after recording the event, so `published` is populated by the time this returns.
     await a.post(channel, { text: "roll call" }, undefined, [drone, nip19.npubEncode(forager)]);
-    await settle();
 
     // A `p` tag is the wake trigger, and the whole of it: every agent subscribed to `hive`
     // is delivered this event, and only the two named here normalize it to `mentionsMe`.
@@ -240,7 +240,6 @@ describe("BuzzAdapter", () => {
   it("refuses to address a post to a display name", async () => {
     const a = newAdapter({ channels: [{ id: "hive", reply: "private" }] });
     await a.start(() => {});
-    await settle();
 
     // The silent half of this failure: a name renders in the text and tags nothing, so the
     // post would go out looking addressed and wake nobody — which reads back as an empty
