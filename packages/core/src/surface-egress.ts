@@ -255,12 +255,17 @@ export class SurfaceEgress {
    * A message with no inbound context: the brain's explicit post, and a job's
    * status post. `threadRoot` threads the second kind under its own headline — the brain
    * has no way to name one, since the tool takes a surface, a channel, and text.
+   *
+   * `mentions` is the same shape of argument and reaches here from the same one caller: a
+   * probing job's `post_message`, which is the only kind of post that has to wake somebody.
+   * The brain's tool cannot reach it either — `PostArgs` has no such field.
    */
   async post(
     surface: string,
     channelId: string,
     msg: GuardedMessage,
     threadRoot?: EventRef,
+    mentions?: readonly string[],
   ): Promise<EventRef | undefined> {
     const adapter = this.byKind.get(surface);
     if (!adapter?.post || !adapter.postTargets) {
@@ -290,10 +295,13 @@ export class SurfaceEgress {
       throw new Error(`post refused by ${verdict.rule}: ${verdict.reason}`);
     }
 
-    const ref = await adapter.post(channel, msg, threadRoot);
+    const ref = await adapter.post(channel, msg, threadRoot, mentions);
     // The resolved id, not what was asked for: the audit line has to say where the
-    // message went, and those are now two different strings.
-    console.info(`post_message surface=${surface} channel=${channel.id} result=sent`);
+    // message went, and those are now two different strings. The recipient *count* and not
+    // the ids: how many were addressed is what separates a roll call that found silence
+    // from one that woke nobody, and a list would grow this line with the fleet.
+    const addressed = mentions?.length ? ` mentions=${mentions.length}` : "";
+    console.info(`post_message surface=${surface} channel=${channel.id}${addressed} result=sent`);
     return ref;
   }
 

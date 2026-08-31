@@ -1473,7 +1473,8 @@ function jobSwitches(manifest: AgentManifest): { slug: string; key: string }[] {
  * about which guard a status post clears.
  */
 function jobPoster(egress: SurfaceEgress): JobPoster {
-  return (to, text, threadRoot) => egress.post(to.surface, to.channel, { text }, threadRoot);
+  return (to, text, threadRoot, mentions) =>
+    egress.post(to.surface, to.channel, { text }, threadRoot, mentions);
 }
 
 /**

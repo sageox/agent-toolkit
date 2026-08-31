@@ -45,10 +45,15 @@ const speaker = (id: string): ThreadReply["author"] => ({
 describe("the job channel", () => {
   /** Every line this channel carried, and the ref each one was answered with. */
   const feed = (over: Partial<JobChannelOptions> = {}) => {
-    const posts: Array<{ channel: string; text: string; threadRoot?: EventRef }> = [];
+    const posts: Array<{
+      channel: string;
+      text: string;
+      threadRoot?: EventRef;
+      mentions?: readonly string[];
+    }> = [];
     const reads: Array<{ root: EventRef; limit?: number }> = [];
-    const post: JobPoster = async (report, text, threadRoot) => {
-      posts.push({ channel: `${report.surface}:${report.channel}`, text, threadRoot });
+    const post: JobPoster = async (report, text, threadRoot, mentions) => {
+      posts.push({ channel: `${report.surface}:${report.channel}`, text, threadRoot, mentions });
       return { surface: "console", nativeId: `e${posts.length}` };
     };
     const read: JobReader = async (root, limit) => {
@@ -83,7 +88,29 @@ describe("the job channel", () => {
     expect(await call(handle, "post_message", { text: "roll call", channel: "somewhere" })).toEqual(
       { posted: true, threadRoot: "e1" },
     );
-    expect(posts).toEqual([{ channel: "console:hive", text: "roll call", threadRoot: undefined }]);
+    expect(posts).toEqual([
+      { channel: "console:hive", text: "roll call", threadRoot: undefined, mentions: undefined },
+    ]);
+  });
+
+  it("carries the recipients a probe addresses, and refuses more than it may name", async () => {
+    const { posts, handle } = feed();
+    const roster = ["drone", "forager"];
+
+    await call(handle, "post_message", { text: "roll call", mentions: roster });
+    // Straight through to the surface, which is what renders them as its own addressing
+    // primitive. Nothing here knows what an id looks like — the adapter refuses a name.
+    expect(posts[0].mentions).toEqual(roster);
+
+    // A body may address whom it likes, and cannot turn one line into a broadcast to
+    // everyone the surface knows.
+    await expect(
+      call(handle, "post_message", {
+        text: "roll call",
+        mentions: Array.from({ length: 65 }, (_, i) => `agent-${i}`),
+      }),
+    ).rejects.toThrow();
+    expect(posts).toHaveLength(1);
   });
 
   it("threads a later line under a root this run posted", async () => {

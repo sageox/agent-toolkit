@@ -250,6 +250,7 @@ export class SlackAdapter implements SurfaceAdapter {
     channel: ChannelRef,
     msg: GuardedMessage,
     threadRoot?: EventRef,
+    mentions: readonly string[] = [],
   ): Promise<EventRef | undefined> {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before post()");
     this.assertChannel(channel);
@@ -265,7 +266,7 @@ export class SlackAdapter implements SurfaceAdapter {
 
     const ts = await this.api.postMessage({
       channel: channel.id,
-      text: msg.text,
+      text: address(mentions) + msg.text,
       threadTs: root?.ts,
     });
     return ts ? { surface: SLACK_SURFACE, nativeId: slackEventId(channel.id, ts) } : undefined;
@@ -583,6 +584,39 @@ function slackReactionName(emoji: string): string {
 
 /** Slack emoji names are lowercase and punctuation-poor; a character never matches one. */
 const SLACK_EMOJI_NAME = /^[a-z0-9_+'-]+$/;
+
+/**
+ * A Slack member id: `U…` for a person, `W…` on an Enterprise Grid, `B…` for a bot.
+ *
+ * Anchored and closed over the alphabet Slack actually issues, which is what makes the
+ * mention below safe to build by concatenation: a value carrying `>` would otherwise close
+ * the `<@…>` it was put inside and let the rest of it read as markup — `<!channel>` among
+ * the things it could then be, which is the broadcast `assertMessage` refuses in `text` and
+ * which must not have a second way in. The bound is generous; Slack ids are 9–11 characters.
+ */
+const SLACK_MEMBER_ID = /^[UWB][A-Z0-9]{1,31}$/;
+
+/**
+ * The recipients, as the prefix that wakes them — Slack's addressing primitive is in the
+ * text, so this is the whole of it.
+ *
+ * Every id is checked rather than the ones that look suspect: a mention list reaches here
+ * from a job body, and "a display name renders and pings nobody" is exactly the silent
+ * failure the caller is trying to avoid. Empty is the ordinary case and adds nothing —
+ * a status post is addressed to the channel.
+ */
+function address(mentions: readonly string[]): string {
+  if (!mentions.length) return "";
+  for (const id of mentions) {
+    if (!SLACK_MEMBER_ID.test(id)) {
+      throw new Error(
+        "a Slack post is addressed by member id (U…, W… or B…), and one recipient is " +
+          "neither — a display name renders but wakes nobody",
+      );
+    }
+  }
+  return `${mentions.map((id) => `<@${id}>`).join(" ")} `;
+}
 
 /**
  * `already_reacted` — the one `reactions.add` failure that means the call succeeded.
