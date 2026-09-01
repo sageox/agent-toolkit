@@ -199,6 +199,10 @@ Create a Slack app, enable **Socket Mode**, and create an app-level token with
 `connections:write`. Install the app with these bot scopes:
 
 - `app_mentions:read`, `chat:write`, and `reactions:write`
+- `users:read`, so a mention reads as a name. Slack puts mentions in message text as
+  `<@U0ALICE>`, which tells a brain that somebody was addressed and not who — it answers
+  about an id, or mistakes two mentions of one person for two people. Without the scope
+  every mention keeps rendering as its id, which is what it did before.
 - the matching history and read scopes for the conversations you configure
   (`channels:history`/`channels:read`, `groups:history`/`groups:read`,
   `im:history`/`im:read`, or `mpim:history`/`mpim:read`)

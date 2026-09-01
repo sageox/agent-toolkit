@@ -15,6 +15,7 @@ import {
   isDirectSlackChannel,
   parseSlackEventId,
   slackEventId,
+  slackMentionedMembers,
   toSlackInboundEvent,
   type SlackMessage,
 } from "./normalize.ts";
@@ -52,6 +53,8 @@ export interface SlackApiClient {
     oldest: string;
     cursor?: string;
   }): Promise<SlackHistoryPage>;
+  /** The name a person reads for a member id, or `undefined` when Slack will not say. */
+  userName(id: string): Promise<string | undefined>;
   /** Answers with the posted message's `ts`, when Slack reports one. */
   postMessage(args: {
     channel: string;
@@ -141,6 +144,28 @@ export class SlackAdapter implements SurfaceAdapter {
   /** One entry per channel, for a reply with no triggering event to thread onto. */
   private readonly lastByChannel = new Map<string, SlackInboundContext>();
   private readonly seen = new Set<string>();
+  /**
+   * Member id to name, filled as messages mention people and never expired.
+   *
+   * A miss costs one `users.info`; a rename goes unnoticed until restart. Both are the
+   * right trade for a directory that only decides how a mention reads — the alternative,
+   * pulling `users.list` at boot, spends a large workspace's whole member table to answer
+   * about the handful of people who actually speak.
+   */
+  private readonly memberNames = new Map<string, string>();
+  /** Ids Slack would not name, so a second message does not ask about them again. */
+  private readonly unnamed = new Set<string>();
+  /**
+   * Normalization runs one message at a time, in arrival order.
+   *
+   * Resolving a name is a network call, so `accept` has to be able to wait — and two
+   * messages waiting concurrently would be delivered in whichever order Slack answered
+   * about their mentions. `ChannelQueue` preserves the order it is submitted in, so that
+   * scrambling would reach the brain: the agent answers the second question first, and a
+   * reply with no inbound context threads onto the wrong message. After the first mention
+   * of a person every lookup is a cache hit, so this chain idles.
+   */
+  private chain: Promise<void> = Promise.resolve();
   private botUserId?: string;
   private botId?: string;
   private onEvent?: (event: InboundEvent) => void;
@@ -411,21 +436,42 @@ export class SlackAdapter implements SurfaceAdapter {
     }
   }
 
-  private readonly handleEnvelope = (payload: unknown): void => {
+  /**
+   * Answers when this envelope has been delivered, which Socket Mode ignores and a caller
+   * that needs to know an event has landed can await. The ack above is deliberately not
+   * part of it — Slack retries an envelope that waits, so it goes first and alone.
+   */
+  private readonly handleEnvelope = async (payload: unknown): Promise<void> => {
     const envelope = payload as SocketEnvelope;
     // Acknowledge before normalization or user code. Slack retries envelopes that wait.
     if (envelope.ack) void envelope.ack().catch(() => {});
     if (envelope.type !== "events_api" || !envelope.body?.event) return;
-    this.accept(envelope.body.event);
+    await this.enqueue(envelope.body.event);
   };
 
-  private accept(message: SlackMessage): void {
+  /**
+   * Normalizes and delivers one message, behind everything already queued.
+   *
+   * The returned promise settles when *this* message has been delivered, which is what
+   * lets a backfill wait for its own replay without a second ordering rule.
+   */
+  private enqueue(message: SlackMessage): Promise<void> {
+    // Errors are absorbed rather than left on the chain: one message nobody could
+    // normalize must not stop every message behind it.
+    this.chain = this.chain.then(() => this.accept(message)).catch(() => {});
+    return this.chain;
+  }
+
+  private async accept(message: SlackMessage): Promise<void> {
     if (!message.channel) return;
     // A DM cannot be addressed to anyone but this bot, and its conversation ID does not
     // exist until someone opens it — so it can never be configured ahead of time. The
     // app's `message.im` subscription is the switch; the guard still sees a DM as private.
     const direct = isDirectSlackChannel(message);
     if (!direct && !this.allowedChannels.has(message.channel)) return;
+    // Before normalizing, because the text is rendered there and a name that arrives after
+    // is a name the brain never saw.
+    await this.learnNames(message.text ?? "");
     const normalized = toSlackInboundEvent(message, this.normalizeOptions());
     if (!normalized) return;
 
@@ -447,7 +493,33 @@ export class SlackAdapter implements SurfaceAdapter {
       botId: this.botId,
       privateChannels: this.privateChannels,
       publicChannels: this.publicChannels,
+      memberNames: this.memberNames,
     };
+  }
+
+  /**
+   * Names the members a message mentions, so normalization can render them.
+   *
+   * Sequential rather than concurrent: a message mentions a handful of people at most, and
+   * every one after the first conversation is already cached. Slack rate-limits
+   * `users.info` per workspace, and a burst is what that limit is aimed at.
+   *
+   * A refusal is remembered as a refusal. Without `unnamed`, an id Slack will not name —
+   * no `users:read`, a deactivated account, someone in another Enterprise Grid workspace —
+   * would cost one failed call per message forever, and a channel that talks about that
+   * person often would spend the rate limit on an answer that never changes.
+   */
+  private async learnNames(text: string): Promise<void> {
+    for (const id of new Set(slackMentionedMembers(text))) {
+      if (id === this.botUserId || this.memberNames.has(id) || this.unnamed.has(id)) continue;
+      try {
+        const name = await this.api.userName(id);
+        if (name) this.memberNames.set(id, name);
+        else this.unnamed.add(id);
+      } catch {
+        this.unnamed.add(id);
+      }
+    }
   }
 
   /**
@@ -484,7 +556,7 @@ export class SlackAdapter implements SurfaceAdapter {
         .filter((message) => Number(message.ts ?? 0) > oldest)
         .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
       for (const message of replay) {
-        this.accept({
+        await this.enqueue({
           ...message,
           type: message.type ?? "message",
           channel,
@@ -672,6 +744,12 @@ export class WebSlackApi implements SlackApiClient {
       unfurl_media: false,
     });
     return response.ts;
+  }
+
+  /** `display_name` is what the workspace shows; the rest are Slack's own fallbacks. */
+  async userName(id: string): Promise<string | undefined> {
+    const user = (await this.client.users.info({ user: id })).user;
+    return user?.profile?.display_name || user?.profile?.real_name || user?.name;
   }
 
   async addReaction(args: { channel: string; timestamp: string; name: string }): Promise<void> {

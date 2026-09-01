@@ -30,8 +30,9 @@ class FakeSocket implements SlackSocketClient {
     this.disconnected = true;
   }
 
-  emit(event: Record<string, unknown>, ack = async () => {}): void {
-    this.listener?.({ type: "events_api", body: { event }, ack });
+  /** Answers when the adapter has finished with the envelope: delivery is not synchronous. */
+  emit(event: Record<string, unknown>, ack = async () => {}): unknown {
+    return this.listener?.({ type: "events_api", body: { event }, ack });
   }
 }
 
@@ -63,6 +64,12 @@ class FakeApi implements SlackApiClient {
   async replies(args: { channel: string; ts: string; oldest: string; cursor?: string }) {
     this.replyCalls.push(args);
     return this.threads.shift() ?? {};
+  }
+  names: Record<string, string> = {};
+  nameCalls: string[] = [];
+  async userName(id: string): Promise<string | undefined> {
+    this.nameCalls.push(id);
+    return this.names[id];
   }
   async postMessage(args: { channel: string; text: string; threadTs?: string }) {
     this.posts.push(args);
@@ -112,10 +119,10 @@ describe("SlackAdapter", () => {
     let acked = false;
     await instance.start((event) => got.push(event));
 
-    socket.emit(mention(), async () => {
+    await socket.emit(mention(), async () => {
       acked = true;
     });
-    socket.emit({ ...mention("1786761000.000200"), channel: "GOTHER" });
+    await socket.emit({ ...mention("1786761000.000200"), channel: "GOTHER" });
     await Promise.resolve();
 
     expect(acked).toBe(true);
@@ -127,7 +134,7 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention("1786761000.000200", { thread_ts: "1786760000.000001" }));
+    await socket.emit(mention("1786761000.000200", { thread_ts: "1786760000.000001" }));
 
     const acknowledged = await instance.react(got[0], "👀");
     await instance.send(got[0].channel, { text: "all green" });
@@ -148,8 +155,8 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention("1786761000.000100"));
-    socket.emit(mention("1786761000.000200"));
+    await socket.emit(mention("1786761000.000100"));
+    await socket.emit(mention("1786761000.000200"));
 
     await instance.send(got[0].channel, { text: "first reply" }, got[0]);
 
@@ -316,19 +323,80 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    // Slack delivers a mention of a third party as live markup and `normalizeSlackText`
-    // hands it to the brain as those characters, so quoting the message that woke the agent
-    // is enough to page whoever it named — through none of the screening `mentions` gets.
-    socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE> & <@U0BOB>" }));
+    // Quoting the message that woke the agent must not page whoever it named. Two
+    // independent things now stop it, and this asserts both: the mention reaches the brain
+    // as a name rather than markup, and what the brain sends is escaped regardless.
+    api.names = { U0ALICE: "alice" };
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE> & <@U0BOB>" }));
+    expect(got[0].text).toBe("ask @alice & @U0BOB");
 
     await instance.send(got[0].channel, { text: got[0].text }, got[0]);
-    expect(api.posts[0].text).toBe("ask &lt;@U0ALICE&gt; &amp; &lt;@U0BOB&gt;");
+    expect(api.posts[0].text).toBe("ask @alice &amp; @U0BOB");
 
     // The recipients the adapter builds from validated ids stay markup; the text beside
     // them does not, so the two ways to address somebody have not become one again.
     const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
     await instance.post(channel, { text: "who is <@U0ALICE>?" }, undefined, ["U0DRONE"]);
     expect(api.posts[1].text).toBe("<@U0DRONE> who is &lt;@U0ALICE&gt;?");
+  });
+
+  it("names the members a message mentions, and asks Slack about each one once", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    api.names = { U0ALICE: "alice", U0BOB: "bob" };
+    await instance.start((event) => got.push(event));
+
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE> and <@U0BOB>" }));
+    await socket.emit(mention("1786761000.000200", { text: "<@UBOT> and <@U0ALICE> again" }));
+
+    expect(got.map((event) => event.text)).toEqual(["ask @alice and @bob", "and @alice again"]);
+    // Each member once across both messages, and never the bot: its own mention is stripped.
+    expect(api.nameCalls).toEqual(["U0ALICE", "U0BOB"]);
+  });
+
+  it("keeps a mention Slack will not name, and stops asking about it", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    // No `users:read`, a deactivated account, another Grid workspace — all the same here.
+    api.userName = async (id: string) => {
+      api.nameCalls.push(id);
+      throw new Error("missing_scope");
+    };
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0GHOST>" }));
+    await socket.emit(mention("1786761000.000200", { text: "<@UBOT> ask <@U0GHOST> again" }));
+
+    // The mention still reads as a mention. Dropping it would lose the fact that somebody
+    // was named, which is worse than naming them by id.
+    expect(got.map((event) => event.text)).toEqual(["ask @U0GHOST", "ask @U0GHOST again"]);
+    // Asked once. A refusal that is not remembered spends the rate limit re-asking forever.
+    expect(api.nameCalls).toEqual(["U0GHOST"]);
+  });
+
+  it("delivers in arrival order even when the first message waits on a lookup", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    // The first message needs a name and the second does not. Without the chain the second
+    // overtakes it, `ChannelQueue` submits them reversed, and the agent answers backwards.
+    let release: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    api.userName = async (id: string) => {
+      await held;
+      return id === "U0ALICE" ? "alice" : undefined;
+    };
+    const first = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+    const second = socket.emit(mention("1786761000.000200", { text: "<@UBOT> second" }));
+
+    expect(got).toHaveLength(0);
+    release!();
+    await Promise.all([first, second]);
+
+    expect(got.map((event) => event.text)).toEqual(["ask @alice", "second"]);
   });
 
   it("refuses a top-level post to an unconfigured channel", async () => {
@@ -358,7 +426,7 @@ describe("SlackAdapter", () => {
       });
     };
     await instance.start((event) => got.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
 
     const adding = instance.react(got[0], "👀");
     // Nothing can be removed yet, and not because anything here is holding it back: the
@@ -377,7 +445,7 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
 
     const acknowledged = await instance.react(got[0], "👀");
     await instance.react(got[0], ":tada:");
@@ -405,7 +473,7 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
 
     const first = await instance.react(got[0], "👀");
     api.addReaction = async () => {
@@ -436,7 +504,7 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
 
     await instance.react(got[0], "rocket");
     await instance.react(got[0], ":sparkles:");
@@ -454,7 +522,7 @@ describe("SlackAdapter", () => {
     const got: InboundEvent[] = [];
 
     await instance.start((event) => got.push(event));
-    socket.emit(mention("1786761000.000200"));
+    await socket.emit(mention("1786761000.000200"));
 
     expect(socket.started).toBe(true);
     expect(api.historyCalls).toEqual([
@@ -586,7 +654,7 @@ describe("SlackAdapter", () => {
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
 
-    socket.emit({
+    await socket.emit({
       type: "message",
       channel: "D9001",
       channel_type: "im",
@@ -612,7 +680,7 @@ describe("SlackAdapter", () => {
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
 
-    socket.emit({
+    await socket.emit({
       type: "message",
       channel: "D9001",
       channel_type: "im",
@@ -633,10 +701,10 @@ describe("SlackAdapter", () => {
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
 
-    socket.emit(mention("1786761000.000001"));
+    await socket.emit(mention("1786761000.000001"));
     const acknowledged = await instance.react(got[0], "👀");
     for (let i = 2; i <= 2_100; i++) {
-      socket.emit(mention(`1786761000.${String(i).padStart(6, "0")}`));
+      await socket.emit(mention(`1786761000.${String(i).padStart(6, "0")}`));
     }
 
     await instance.send(got[0].channel, { text: "answer" }, got[0]);
@@ -656,11 +724,11 @@ describe("SlackAdapter", () => {
       const { instance, socket, api } = adapter();
       const got: InboundEvent[] = [];
       await instance.start((event) => got.push(event));
-      socket.emit(mention("1786761000.000001"));
+      await socket.emit(mention("1786761000.000001"));
       const acknowledged = await instance.react(got[0], "👀");
 
       vi.setSystemTime(Date.now() + 60 * 60_000);
-      socket.emit(mention("1786761000.000002"));
+      await socket.emit(mention("1786761000.000002"));
 
       await instance.send(got[0].channel, { text: "worth the wait" }, got[0]);
       await instance.unreact(acknowledged!.ref);
@@ -675,7 +743,7 @@ describe("SlackAdapter", () => {
     const { instance, socket } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
 
     await expect(
       instance.send({ surface: "slack", id: "GOTHER", isPublic: false }, { text: "hi" }),
@@ -728,7 +796,7 @@ describe("SlackAdapter", () => {
 
     const events: InboundEvent[] = [];
     await instance.start((event) => events.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
     await Promise.resolve();
 
     expect(events[0]?.channel.isPublic).toBe(true);
@@ -752,7 +820,7 @@ describe("SlackAdapter", () => {
 
     const events: InboundEvent[] = [];
     await instance.start((event) => events.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
     await Promise.resolve();
 
     expect(events[0]?.channel.isPublic).toBe(false);
