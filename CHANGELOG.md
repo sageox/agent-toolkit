@@ -65,11 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowlist`, and `respondTo`. The kind comes from that author's own `isAgent` and is not a
   field of the call, so `on-request` remains a trigger rather than an authorization — a
   sibling agent asking is automation and a parked job still refuses it, as it does when two
-  channels are mid-turn at once and no one person can be named. Either way the record now
-  names whoever asked, rather than the agent itself. The bypass answers only whether the
-  run starts: every gate governing what it may do is untouched, and it writes nothing, so a
-  parked job is still parked afterwards and the run carries `bypassedSwitch: true` for
-  whoever reads the record at 3am. Worst on a job with no schedule at all, where the switch
+  channels are mid-turn at once and no one person can be named. The record names that author
+  whichever kind it is — a sibling agent by its own id rather than by this agent's name — and
+  falls back to the brain only where there is no one turn to read it from. The bypass answers
+  only whether the run starts: every gate governing what it may do is untouched, and it
+  writes nothing, so a parked job is still parked afterwards and the run carries
+  `bypassedSwitch: true` for whoever reads the record at 3am. Worst on a job with no schedule at all, where the switch
   parked no clock and its only effect was to refuse the request it exists to permit; the
   workaround it replaces is arming a posture switch for one run and remembering to disarm it.
 

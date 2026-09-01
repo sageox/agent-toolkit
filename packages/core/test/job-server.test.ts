@@ -416,6 +416,15 @@ describe("provenance", () => {
   /** Fail-closed, so `never-set` parks it. `SHIFT` is fail-open and would not. */
   const CLOSED = SHIFT.replace("failDirection: open", "failDirection: closed");
 
+  /**
+   * The shape the refusal was worst on: no schedule at all, so the switch parks no clock and
+   * its only effect is on the request it exists to permit.
+   */
+  const SCHEDULELESS =
+    "{slug: sweep, archetype: sweep, description: 'A pass nothing but a person starts.', " +
+    "trigger: {onRequest: true}, killSwitch: {failDirection: closed}, " +
+    "budget: {wallClockMs: 4000}, run: {command: node, args: [runner/src/sweep.ts]}}";
+
   it("records the person the turn is answering, and runs their job though it is parked", async () => {
     const host = jobHost({ switchSource: parked });
     const asking = turnAuthor({ id: "npub1ryan" });
@@ -448,6 +457,33 @@ describe("provenance", () => {
     expect(argv()).toEqual([]);
     expect(runs[0].requestedBy).toEqual({ kind: "agent", id: "npub1monty" });
     expect(runs[0].bypassedSwitch).toBe(false);
+  });
+
+  it("runs a parked job that has no clock for the switch to park", async () => {
+    const host = jobHost({ switchSource: parked });
+    const asking = turnAuthor({ id: "npub1ryan" });
+    const declared = [withBody(jobs(SCHEDULELESS)[0], PROVES)];
+    const text = await call(declared, { job: "sweep" }, { host, asking });
+
+    expect(text).toContain("job sweep completed");
+    expect(argv()).toHaveLength(1);
+    expect(runs[0].requestedBy).toEqual({ kind: "human", id: "npub1ryan" });
+    expect(runs[0].bypassedSwitch).toBe(true);
+  });
+
+  it("carries the person through the shape that is started rather than waited for", async () => {
+    // A deadline past the turn takes `startRequest`, the tool's other call site for the
+    // requester — and the one that answers before the admission has been recorded.
+    const host = jobHost({ switchSource: parked });
+    const asking = turnAuthor({ id: "npub1ryan" });
+    const declared = [withBody(jobs(CLOSED)[0], PROVES)];
+    const text = await call(declared, { job: "shift" }, { host, asking, turnTimeoutMs: 1000 });
+
+    expect(text).toContain("job shift is running now");
+    await vi.waitFor(() => expect(runs).toHaveLength(1), { timeout: 5000 });
+    expect(runs[0].outcome).toBe("completed");
+    expect(runs[0].requestedBy).toEqual({ kind: "human", id: "npub1ryan" });
+    expect(runs[0].bypassedSwitch).toBe(true);
   });
 
   it("records the agent's own brain when the gateway can name no one turn", async () => {

@@ -348,12 +348,15 @@ describe("reacting to the message a turn is answering", () => {
     const first = egress.answers(event("buzz", "hive"));
     expect(egress.asking()).toMatchObject({ id: "npub1abc", isAgent: false });
 
-    const second = egress.answers(event("buzz", "town", false, "m2"));
+    // A different person in the second channel, so what comes back once one turn ends says
+    // which turn it was read from rather than repeating the only author in the test.
+    const inTown = event("buzz", "town", false, "m2");
+    const second = egress.answers({ ...inTown, author: { ...inTown.author, id: "npub1ryan" } });
     expect(egress.asking()).toBeNull();
 
-    second.close();
-    expect(egress.asking()).toMatchObject({ id: "npub1abc" });
     first.close();
+    expect(egress.asking()).toMatchObject({ id: "npub1ryan" });
+    second.close();
     expect(egress.asking()).toBeNull();
   });
 
