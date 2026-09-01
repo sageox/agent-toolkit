@@ -341,6 +341,15 @@ its conversation ID appears only once someone opens it — so DMs need no entry,
 address: inside one the bot answers without being tagged. Drop `message.im` from the
 event subscriptions if you do not want that.
 
+That same "no entry names it" is why `im:read` matters on restart. Socket Mode has no
+replay, so a restarted agent refills the gap from `conversations.history` — and it can only
+call that for conversations it can name. Channels come from `channels`; DMs come from
+`im:read`, which is what lets it ask Slack which DMs it has open. Without the scope the
+channels still backfill and a DM sent while the agent was down is simply lost, which reads
+from the other side as an agent that ignored a question. Asking is not permission to speak:
+a DM still earns a reply by having sent something, so one with nothing in the gap is
+enumerated and left alone.
+
 The author gate is the second thing `surface slack` settles with you. You are one person
 with one id per surface, and an id is only ever matched against the surface it arrived
 from — so an agent that is `owner-only` with only an npub answers nobody on Slack. When

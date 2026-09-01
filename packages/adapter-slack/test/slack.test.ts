@@ -46,8 +46,12 @@ class FakeApi implements SlackApiClient {
   async authTest() {
     return { userId: "UBOT", botId: "BBOT" };
   }
+  openDms: string[] = [];
   async channelIsPrivate(channel: string) {
     return channel.startsWith("G");
+  }
+  async openDirectChannels() {
+    return this.openDms;
   }
   async history(args: { channel: string; oldest: string; cursor?: string }) {
     this.historyCalls.push(args);
@@ -486,6 +490,48 @@ describe("SlackAdapter", () => {
       "GENG:1786761000.000300",
       "GENG:1786761000.000400",
     ]);
+  });
+
+  it("backfills the DMs it has open, which no config could have named", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    api.openDms = ["DALICE", "DQUIET"];
+    api.histories.push(
+      { messages: [] }, // GENG
+      // A history result carries no `channel_type`; the `D` prefix is what says "DM" here.
+      { messages: [{ type: "message", user: "U123", text: "did the sweep finish?", ts: "1786761000.000100" }] },
+      { messages: [] }, // DQUIET — open, but nothing arrived while the agent was away
+    );
+    const got: InboundEvent[] = [];
+
+    await instance.start((event) => got.push(event));
+
+    expect(api.historyCalls.map((call) => call.channel)).toEqual(["GENG", "DALICE", "DQUIET"]);
+    expect(got.map((event) => event.id.nativeId)).toEqual(["DALICE:1786761000.000100"]);
+    // A DM is private and is itself a direct address, whichever door it came in through.
+    expect(got[0].channel.isPublic).toBe(false);
+    expect(got[0].mentionsMe).toBe(true);
+
+    // Reading a DM is not permission to speak in one. DALICE spoke in the gap and may be
+    // answered; DQUIET was only ever enumerated, so it is still a conversation this
+    // adapter must not open.
+    await instance.send({ surface: "slack", id: "DALICE", isPublic: false }, { text: "yes" });
+    await expect(
+      instance.send({ surface: "slack", id: "DQUIET", isPublic: false }, { text: "hello" }),
+    ).rejects.toThrow(/DQUIET is not configured/);
+  });
+
+  it("still backfills its channels when it may not ask which DMs are open", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    // No `im:read`. A channel-only agent must not be taken down by a scope it never needs.
+    api.openDirectChannels = async () => {
+      throw new Error("missing_scope");
+    };
+    api.histories.push({ messages: [mention("1786761000.000100")] });
+    const got: InboundEvent[] = [];
+
+    await instance.start((event) => got.push(event));
+
+    expect(got.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000100"]);
   });
 
   it("asks for replies only in threads that moved after the cursor", async () => {

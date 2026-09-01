@@ -35,6 +35,8 @@ export interface SlackHistoryPage {
 export interface SlackApiClient {
   authTest(): Promise<{ userId?: string; botId?: string }>;
   channelIsPrivate(channel: string): Promise<boolean | undefined>;
+  /** Every DM conversation this bot has open — the ids no configuration could name. */
+  openDirectChannels(): Promise<string[]>;
   history(args: { channel: string; oldest: string; cursor?: string }): Promise<SlackHistoryPage>;
   replies(args: {
     channel: string;
@@ -453,7 +455,7 @@ export class SlackAdapter implements SurfaceAdapter {
    * moved in a period — only the replies of a thread you can already name.
    */
   private async backfill(oldest: number): Promise<void> {
-    for (const channel of this.allowedChannels) {
+    for (const channel of [...this.allowedChannels, ...(await this.directChannels())]) {
       const parents = await this.collect((cursor) =>
         this.api.history({ channel, oldest: String(oldest), cursor }),
       );
@@ -481,6 +483,33 @@ export class SlackAdapter implements SurfaceAdapter {
           channel_type: this.privateChannels.has(channel) ? "group" : "channel",
         });
       }
+    }
+  }
+
+  /**
+   * The DMs a backfill has to cover, which no configuration could have named.
+   *
+   * `channels` never holds a DM — its conversation id does not exist until someone opens
+   * it — and `dmChannels` is populated by `accept`, so at startup it is empty. Between
+   * them that left a DM sent while the agent was down in neither set: nothing enumerated
+   * it, nothing replayed it, and the cursor moved past it the moment any channel message
+   * was accepted. The message was gone, and a person who had asked something in a DM got
+   * silence back from an agent that looked healthy.
+   *
+   * **Read, never granted.** These ids are backfilled and nothing else. A DM still earns
+   * the right to be answered by having spoken, which `accept` is what records — so a
+   * conversation with nothing in the gap stays one this adapter may not post into, and
+   * enumerating open DMs cannot become a way to open one.
+   *
+   * A failed lookup costs the backfill, not the launch. Without `im:read` there is nothing
+   * to enumerate, and taking a working channel-only agent down over it would be refusing
+   * the wrong thing.
+   */
+  private async directChannels(): Promise<string[]> {
+    try {
+      return await this.api.openDirectChannels();
+    } catch {
+      return [];
     }
   }
 
@@ -569,6 +598,22 @@ export class WebSlackApi implements SlackApiClient {
 
   async channelIsPrivate(channel: string): Promise<boolean | undefined> {
     return privacyOf((await this.client.conversations.info({ channel })).channel);
+  }
+
+  /** `users.conversations` rather than `conversations.list`: the bot's own DMs, not the workspace's. */
+  async openDirectChannels(): Promise<string[]> {
+    const ids: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const response = await this.client.users.conversations({
+        types: "im",
+        exclude_archived: true,
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const channel of response.channels ?? []) if (channel.id) ids.push(channel.id);
+      cursor = response.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+    return ids;
   }
 
   async history(args: { channel: string; oldest: string; cursor?: string }): Promise<SlackHistoryPage> {

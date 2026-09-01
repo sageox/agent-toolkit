@@ -54,6 +54,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A DM sent to a Slack agent while it was down is answered when it comes back.**
+  The backfill walked the configured `channels` and nothing else, so it could never reach a
+  DM: a DM's conversation id does not exist until someone opens it, which is why no entry
+  names one, and the adapter's live set of them is empty until an event arrives. A DM in
+  that gap was therefore in neither set — nothing enumerated it, nothing replayed it, and
+  the resume cursor moved past it the moment any channel message was accepted. The message
+  was gone for good, and the person who sent it got silence from an agent that looked
+  healthy. `users.conversations` now supplies the open DMs at backfill time, which is what
+  `im:read` — already in the setup guide's scope list — is for. **Reading one is not
+  permission to speak in one:** a DM still earns a reply by having sent something, so a
+  conversation with nothing in the gap is enumerated and stays one the adapter may not post
+  into. A workspace that withholds `im:read` loses the DM backfill and keeps everything
+  else, rather than failing the launch over a scope a channel-only agent never needs.
+
 - **A Slack message says what the brain wrote, and addresses only whom `mentions` names.**
   The adapter escapes `&`, `<` and `>` in the brain's text, so `<@U0ALICE>` renders as those
   characters instead of notifying that member. Slack's addressing primitive is in-band —
