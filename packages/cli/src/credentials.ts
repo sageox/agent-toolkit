@@ -331,11 +331,19 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
   // calling process was given, and a `jobSecrets` ref is the one a deployment keeps out of
   // the gateway's. Listing it would refuse the launch of every agent that split a credential
   // out. `job run` resolves it per run and fails by name.
+  //
+  // The hint names that field here, where the refusal is read, because the two remedies
+  // this error otherwise offers — mount the file here, add it to `.env` — are both the
+  // arrangement the split was for.
   manifest.jobs.forEach((job, index) => {
     for (const [envVar, ref] of Object.entries(job.run.secrets)) {
       declared.push({
         ...spawnedSecretSpec(ref, envVar, "the job body"),
         where: `jobs[${index}].run.secrets.${envVar} (job "${job.slug}")`,
+        hint:
+          `if ${ref} is mounted only in a directory this process is not given, it belongs ` +
+          `in jobs[${index}].run.jobSecrets — this check leaves that map out, and ` +
+          "`sageox-agent job run` resolves it per run and fails by name",
       });
     }
   });

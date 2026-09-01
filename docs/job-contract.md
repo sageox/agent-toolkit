@@ -36,7 +36,8 @@ jobs:
       # environment, and refused at startup if it does not resolve.
       secrets: { GH_TOKEN: GH_TOKEN, ANTHROPIC_API_KEY: ANTHROPIC_API_KEY }
       # The same, for a credential the gateway's own process must not hold. Resolved
-      # identically; declaring one here refuses `trigger.onRequest` on this job.
+      # identically, but left out of the startup check — that is what lets the gateway
+      # start without it. Declaring one here refuses `trigger.onRequest` on this job.
       jobSecrets: { GH_APP_PEM: GH_APP_PEM }
       # Ambient variables this body inherits, by name. For values the platform injects at
       # runtime — EKS IRSA below; GKE and Azure workload identity present the same way.

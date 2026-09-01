@@ -338,6 +338,29 @@ describe("declared secretRefs", () => {
     expect(requireDeclaredSecrets(declared, { dir: secretsDir })).toEqual([]);
   });
 
+  it("names run.jobSecrets when the ref that did not resolve is a job's own", () => {
+    // The arrangement above, spelled wrong: a credential moved to the mount only the job's
+    // Pods take, but left in `run.secrets`. The launch is refused — nothing here can tell
+    // that from a typo, and the whole surface goes down for a credential nothing read — so
+    // the message has to name the field that both isolates it and lets the agent start.
+    // The other two remedies it offers are "put it back on the gateway's mount".
+    for (const name of ["DEMO_NSEC", "DEMO_SLACK_BOT", "DEMO_SLACK_APP", "DEMO_TRACKER_KEY"]) {
+      writeFileSync(join(secretsDir, name), "value");
+    }
+    writeFileSync(join(secretsDir, "GITHUB_TOKEN"), "ghp_x");
+    const declared = declaredSecrets(loadManifest(FLEET), parseReposConf(PRIVATE_REPO));
+
+    let message = "";
+    try {
+      requireDeclaredSecrets(declared, { dir: secretsDir });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/1 declared secret\(s\) did not resolve/);
+    expect(message).toContain('jobs[0].run.secrets.GH_TOKEN (job "nightly")');
+    expect(message).toContain("jobs[0].run.jobSecrets");
+  });
+
   it("names every missing ref at once, with where it is declared and how to get one", () => {
     const declared = declaredSecrets(loadManifest(FLEET), parseReposConf(PRIVATE_REPO));
     let message = "";
