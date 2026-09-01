@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A probing job can read its thread back on Slack, so a roll call there has an answer.**
+  `SlackAdapter.readThread` walks `conversations.replies` under a root the run posted and
+  hands back the replies oldest first. Only Buzz implemented the verb, so a probe on a
+  Slack-only agent posted its roll call, waited, and then died on *"the slack surface cannot
+  read a thread back"* — the fleet-liveness job, unable to run on one of the two surfaces
+  the toolkit ships. The endpoint was already in the adapter's API seam, used by backfill.
+  Replies are normalized through the same `toSlackInboundEvent` a turn is, so a join notice
+  or a hidden message is no more a reply than it is a turn, and the thread parent Slack
+  returns is dropped by `ts` — it is not in its own thread. Every failure throws and none
+  answers `[]`: an unstarted adapter, a root naming another surface, and a root in a
+  conversation this agent does not serve are all findings a probe must not read as silence.
+
 - **A probing job body can address its post, so the agents it names actually wake.**
   `post_message` takes `mentions`, and the adapter renders them as its surface's addressing
   primitive — a `p` tag on Buzz, `<@id>` on Slack. Without it a probe posted into a channel
@@ -60,6 +72,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whoever reads the record at 3am. Worst on a job with no schedule at all, where the switch
   parked no clock and its only effect was to refuse the request it exists to permit; the
   workaround it replaces is arming a posture switch for one run and remembering to disarm it.
+
+- **A DM sent to a Slack agent while it was down is answered when it comes back.**
+  The backfill walked the configured `channels` and nothing else, so it could never reach a
+  DM: a DM's conversation id does not exist until someone opens it, which is why no entry
+  names one, and the adapter's live set of them is empty until an event arrives. A DM in
+  that gap was therefore in neither set — nothing enumerated it, nothing replayed it, and
+  the resume cursor moved past it the moment any channel message was accepted. The message
+  was gone for good, and the person who sent it got silence from an agent that looked
+  healthy. `users.conversations` now supplies the open DMs at backfill time, which is what
+  `im:read` — already in the setup guide's scope list — is for. **Reading one is not
+  permission to speak in one:** a DM still earns a reply by having sent something, so a
+  conversation with nothing in the gap is enumerated and stays one the adapter may not post
+  into. A workspace that withholds `im:read` loses the DM backfill and keeps everything
+  else, rather than failing the launch over a scope a channel-only agent never needs.
 
 - **A Slack message says what the brain wrote, and addresses only whom `mentions` names.**
   The adapter escapes `&`, `<` and `>` in the brain's text, so `<@U0ALICE>` renders as those
