@@ -1,4 +1,4 @@
-<!-- ox-hash: 31dd5815b853 ver: 0.12.0 -->
+<!-- ox-hash: 22568b2f4841 ver: 0.14.3 -->
 # SageOx Commands Reference
 
 Essential ox commands for team context:
@@ -45,6 +45,37 @@ Record agent sessions to the project ledger for team visibility.
 ox doctor
 ```
 Run diagnostic checks on SageOx configuration and integrations.
+
+## Search Code, History, PRs
+
+`ox code` queries the local CodeDB index. Reach for it before grep/ripgrep on this repo.
+
+Verb-mode (preferred):
+
+```bash
+ox code defs <name>                       # where is <name> defined?
+ox code callers <name>                    # who calls <name>? (resolved call graph)
+ox code callees <name> --depth 2          # what <name> calls (transitive)
+ox code refs <name> [--lang go]           # text references
+ox code log <path> [--author X --after YYYY-MM-DD]  # commits touching path
+ox code prs --sort stalled                # PR triage
+ox code activity --since 7d               # recent GitHub events
+ox code insights                          # hotspots, contention, open PRs/issues
+ox code status                            # index health
+```
+
+DSL-mode (when verbs don't fit):
+
+```bash
+ox code search "<text>" type:pr                   # indexed PR titles/bodies/comments
+ox code search "<text>" type:comment ckind:todo   # source comments by kind
+ox code search "<text>" author:<n> after:<date>   # git history + content together
+ox code search "/<regex>/"                        # forced regex
+```
+
+DSL: `type:{code,symbol,diff,commit,comment,pr,issue}`, `repo:`, `file:`, `lang:`, `author:`, `before:`/`after:`, `message:`, `calls:`/`calledby:`, `depth:`, `confidence:{extracted,inferred,ambiguous}`, `ckind:`, `state:`, `OR`, `/regex/`. Negate any filter with `-` prefix.
+
+Fall back to grep only for exact-string matches in a known file or when `ox code` returns 0 results.
 
 ---
 Run `ox --help` for full command list.
