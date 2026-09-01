@@ -331,6 +331,42 @@ describe("SlackAdapter", () => {
     expect(api.posts[1].text).toBe("<@U0DRONE> who is &lt;@U0ALICE&gt;?");
   });
 
+  it("escapes a broadcast in the brain's text and logs it, rather than killing the turn", async () => {
+    const logged: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((line) => void logged.push(String(line)));
+    try {
+      const { instance, socket, api } = adapter();
+      const got: InboundEvent[] = [];
+      await instance.start((event) => got.push(event));
+      // Somebody used `@channel`, which Slack delivers as live markup.
+      socket.emit(mention("1786761000.000100", { text: "<@UBOT> <!channel> deploy now" }));
+      // Somebody typed those characters, which Slack escapes on the wire and
+      // `normalizeSlackText` un-escapes — so the brain reads a broadcast nobody sent.
+      socket.emit(mention("1786761000.000200", { text: "<@UBOT> what does &lt;!channel&gt; do?" }));
+      expect(got.map((event) => event.text)).toEqual([
+        "<!channel> deploy now",
+        "what does <!channel> do?",
+      ]);
+
+      // Quoting either one answers. Refusing threw out of `SurfaceEgress.reply`, which does
+      // not catch around `send`, so the turn ended and the channel saw the acknowledgement
+      // appear and vanish with no reply.
+      for (const event of got) await instance.send(event.channel, { text: event.text }, event);
+      expect(api.posts.map((post) => post.text)).toEqual([
+        "&lt;!channel&gt; deploy now",
+        "what does &lt;!channel&gt; do?",
+      ]);
+
+      // Still one line per attempt, naming a rule, which is what an operator acts on.
+      expect(logged).toEqual([
+        expect.stringContaining("egress_escaped surface=slack channel=GENG rule=slackBroadcast"),
+        expect.stringContaining("egress_escaped surface=slack channel=GENG rule=slackBroadcast"),
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("refuses a top-level post to an unconfigured channel", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});
@@ -338,12 +374,6 @@ describe("SlackAdapter", () => {
     await expect(
       instance.post({ surface: "slack", id: "GOTHER", isPublic: false }, { text: "no" }),
     ).rejects.toThrow(/not configured/i);
-    await expect(
-      instance.post(
-        { surface: "slack", id: "GENG", isPublic: false },
-        { text: "hello <!channel>" },
-      ),
-    ).rejects.toThrow(/bulk mentions/i);
     expect(api.posts).toHaveLength(0);
   });
 
@@ -671,11 +701,9 @@ describe("SlackAdapter", () => {
     }
   });
 
-  it("refuses unconfigured channels and Slack-native bulk mentions", async () => {
-    const { instance, socket } = adapter();
-    const got: InboundEvent[] = [];
-    await instance.start((event) => got.push(event));
-    socket.emit(mention());
+  it("refuses unconfigured channels", async () => {
+    const { instance } = adapter();
+    await instance.start(() => {});
 
     await expect(
       instance.send({ surface: "slack", id: "GOTHER", isPublic: false }, { text: "hi" }),
@@ -684,9 +712,6 @@ describe("SlackAdapter", () => {
     await expect(
       instance.send({ surface: "slack", id: "D404", isPublic: false }, { text: "hi" }),
     ).rejects.toThrow(/not configured/);
-    await expect(instance.send(got[0].channel, { text: "hello <!channel>" })).rejects.toThrow(
-      /bulk mentions/,
-    );
   });
 
   it("disconnects cleanly", async () => {
