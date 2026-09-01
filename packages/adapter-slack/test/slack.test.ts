@@ -498,6 +498,79 @@ describe("SlackAdapter", () => {
     expect(api.posts[0].threadTs).toBe("1786761000.000300");
   });
 
+  it("drops a queued event when the start that heard it fails", async () => {
+    const { instance, socket, api } = adapter();
+    const first: InboundEvent[] = [];
+    let release: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The lookup is what holds the message past the failure. Without one it settles while
+    // `onEvent` is still cleared, and nothing about the run it belongs to is ever tested.
+    api.userName = async () => {
+      await held;
+      return "alice";
+    };
+    // The listener is registered before the connection is up, so an envelope can already be
+    // queued when the start fails.
+    let queued: unknown;
+    socket.start = async () => {
+      queued = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+      throw new Error("socket mode unavailable");
+    };
+
+    await expect(instance.start((event) => first.push(event))).rejects.toThrow(/unavailable/);
+
+    const second: InboundEvent[] = [];
+    socket.start = async () => {};
+    await instance.start((event) => second.push(event));
+    release!();
+    await queued;
+
+    // It belongs to the run that heard it, and that run never came up.
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+  });
+
+  it("abandons a replay when the adapter is stopped mid-backfill", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    const first: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inHistory = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    api.histories.push({ messages: [mention("1786761000.000100")] });
+    const pages = api.history.bind(api);
+    // Held *before* the replay is queued, which is the window that matters: a stop landing
+    // here means the messages this page turns into were never queued by a live run.
+    api.history = async (args) => {
+      entered();
+      await held;
+      return pages(args);
+    };
+
+    const starting = instance.start((event) => first.push(event));
+    await inHistory;
+    await instance.stop();
+
+    // The restart backfills nothing of its own, so anything the second run hears came from
+    // the replay the first run abandoned.
+    const second: InboundEvent[] = [];
+    api.history = async () => ({});
+    await instance.start((event) => second.push(event));
+    release!();
+    await starting;
+
+    // The replay belongs to the run that asked for it. Delivering it into the next run
+    // would answer a message from before the restart, and thread onto it afterwards.
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+  });
+
   it("refuses a top-level post to an unconfigured channel", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});

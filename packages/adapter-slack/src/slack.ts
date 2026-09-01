@@ -248,17 +248,23 @@ export class SlackAdapter implements SurfaceAdapter {
     if (!onEvent) return;
 
     const resumeFrom = this.since;
+    // The run every message from here belongs to. The listener is registered before the
+    // connection is up, so an event can already be queued when the start below fails.
+    const session = this.generation;
     this.socket.on("slack_event", this.handleEnvelope);
     try {
       await this.socket.start();
       this.listening = true;
       // Socket Mode has no replay. Connect first, then fill the earlier gap; deduplication
       // makes overlap safe and avoids a new gap between the history call and the socket.
-      if (resumeFrom !== undefined) await this.backfill(resumeFrom);
+      if (resumeFrom !== undefined) await this.backfill(resumeFrom, session);
     } catch (error) {
       this.started = false;
       this.socket.off?.("slack_event", this.handleEnvelope);
       this.onEvent = undefined;
+      // As on `stop`: a start that failed leaves no run for queued work to belong to, and
+      // without this it would belong to whichever run starts next.
+      this.invalidate();
       await this.socket.disconnect().catch(() => {});
       throw error;
     }
@@ -455,9 +461,21 @@ export class SlackAdapter implements SurfaceAdapter {
       this.started = false;
       this.onEvent = undefined;
       // Whatever is mid-lookup belongs to the run being stopped, and to nothing after it.
-      this.generation++;
-      this.chains.clear();
+      this.invalidate();
     }
+  }
+
+  /**
+   * Ends the run that queued work belongs to.
+   *
+   * Every asynchronous producer here — a live envelope waiting on a lookup, a replay still
+   * paging history — stamps the run it started in, and `accept` drops anything stamped with
+   * a run that has ended. Both ways a run ends go through this, because the stamp is only
+   * worth anything if nothing can outlive it unstamped.
+   */
+  private invalidate(): void {
+    this.generation++;
+    this.chains.clear();
   }
 
   /**
@@ -479,9 +497,9 @@ export class SlackAdapter implements SurfaceAdapter {
    * The returned promise settles when *this* message has been delivered, which is what
    * lets a backfill wait for its own replay without a second ordering rule.
    */
-  private enqueue(message: SlackMessage): Promise<void> {
+  private enqueue(message: SlackMessage, session = this.generation): Promise<void> {
     const conversation = message.channel ?? "";
-    const generation = this.generation;
+    const generation = session;
     // Errors are absorbed rather than left on the chain: one message nobody could
     // normalize must not stop every message behind it in the same conversation.
     const next = (this.chains.get(conversation) ?? Promise.resolve())
@@ -571,8 +589,11 @@ export class SlackAdapter implements SurfaceAdapter {
    * outside the history window, and Slack offers no way to enumerate the threads that
    * moved in a period — only the replies of a thread you can already name.
    */
-  private async backfill(oldest: number): Promise<void> {
+  private async backfill(oldest: number, session: number): Promise<void> {
     for (const channel of [...this.allowedChannels, ...(await this.directChannels())]) {
+      // A replay outlives a `stop` that lands mid-page otherwise, and goes on spending
+      // history calls on a run that has ended.
+      if (session !== this.generation) return;
       const parents = await this.collect((cursor) =>
         this.api.history({ channel, oldest: String(oldest), cursor }),
       );
@@ -598,7 +619,7 @@ export class SlackAdapter implements SurfaceAdapter {
           type: message.type ?? "message",
           channel,
           channel_type: this.privateChannels.has(channel) ? "group" : "channel",
-        });
+        }, session);
       }
     }
   }
