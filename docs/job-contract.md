@@ -212,7 +212,13 @@ const call = async (name, args) =>
 
 const { threadRoot } = await call("post_message", { text: rollCall, mentions: roster });
 // … wait, on a schedule this body owns …
-const { replies } = await call("thread_read", { root: threadRoot });
+
+// `null` means the surface named no id, so there is no thread to read. Report that gate
+// `{executed: false}` rather than reading `null` or counting an empty roll call as a pass:
+// "nobody replied" and "this surface cannot tell you" are different findings.
+const replies = threadRoot
+  ? (await call("thread_read", { root: threadRoot })).replies
+  : null;
 ```
 
 **What it is bounded to.** `post_message` reaches the channel `report` names and there is no
