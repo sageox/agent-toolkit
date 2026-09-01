@@ -195,9 +195,8 @@ function secretsDirFrom(argv: string[]): string | undefined {
  * its status post or its switch.
  *
  * A run started on request is served from the gateway, which passes no such directory, so a
- * ref that lives only in the job mount does not resolve there and the run fails by name. A
- * prompt-injected turn therefore cannot reach a job-only credential through a job it is
- * allowed to ask for.
+ * prompt-injected turn cannot reach a job-only credential through a job it is allowed to
+ * ask for. `run.jobSecrets` beside `trigger.onRequest` is refused at load for that reason.
  */
 function jobSecretDirs(argv: string[], secretsDir?: string): string | string[] | undefined {
   const named = flag(argv, "job-secrets");

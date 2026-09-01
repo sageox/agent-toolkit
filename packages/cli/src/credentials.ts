@@ -326,6 +326,11 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
   // A job resolves its refs per run rather than at startup, so `run` and `doctor` are the
   // only places a missing one can be reported before the job is due. Left out here, the
   // first report is a crashed 3am tick in a channel.
+  //
+  // `run.secrets` and not `run.jobSecrets`: this is checked against the one directory the
+  // calling process was given, and a `jobSecrets` ref is the one a deployment keeps out of
+  // the gateway's. Listing it would refuse the launch of every agent that split a credential
+  // out. `job run` resolves it per run and fails by name.
   manifest.jobs.forEach((job, index) => {
     for (const [envVar, ref] of Object.entries(job.run.secrets)) {
       declared.push({

@@ -371,9 +371,9 @@ opinion about what a job may read.
 ### A credential only the job may hold
 
 `jobSecrets` is a second secret source, mounted by this agent's **CronJob** Pods alongside
-`secrets` and searched ahead of it when a job body resolves its `run.secrets`. It takes the
-same two shapes `secrets` does, and the chart creates a `SecretProviderClass` for each source
-that names a `provider`.
+`secrets` and searched ahead of it when a job body resolves a ref. It takes the same two
+shapes `secrets` does, and the chart creates a `SecretProviderClass` for each source that
+names a `provider`.
 
 ```yaml
 agents:
@@ -410,11 +410,18 @@ Two consequences worth knowing before you split a credential out:
 
 - **It reaches scheduled runs only.** A run started on request — from chat, or by hand —
   executes inside the gateway's own process, in the Deployment Pod, which is passed no second
-  directory. A body needing a `jobSecrets`-only ref fails there with `secretRef … did not
-  resolve`, by name and before it does any work. That is the boundary working, not a gap in
-  it: it is also what stops a prompt-injected turn reaching a write credential through a job
-  it may ask for. Give such a job a schedule and no `onRequest`, or keep the credential in
-  `secrets` and take the weaker guarantee knowingly.
+  directory. That is the boundary working, not a gap in it: it is also what stops a
+  prompt-injected turn reaching a write credential through a job it may ask for. So the
+  bundle has to name which refs moved — `run.jobSecrets` on the job — and a job declaring
+  one may not arm `trigger.onRequest`. Give such a job a schedule and no `onRequest`, keep
+  the credential in `secrets` and take the weaker guarantee knowingly, or give the
+  credentialed work a job of its own that nothing may ask for.
+
+  Naming them there is also what lets the Deployment start. `sageox-agent run` resolves every
+  `run.secrets` ref against its own mount before it opens a socket and refuses the launch on
+  one that does not, so a credential that moved here but stayed spelled `secrets` is a
+  crashlooping agent rather than a quietly weaker one. `run.jobSecrets` is left out of that
+  inventory.
 - **The render refuses `jobSecrets` on an agent with no schedule**, because no Pod would then
   mount it and the field would read as though it had moved a credential it had not.
 
