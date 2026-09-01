@@ -355,9 +355,16 @@ export class SlackAdapter implements SurfaceAdapter {
     // Sorted on the Slack `ts` rather than the ISO string it becomes: `ts` carries
     // microseconds and the ISO form is truncated to milliseconds, so two replies inside one
     // millisecond would tie and come back in whatever order the pages happened to arrive.
-    const replies = messages
+    const ordered = messages
       .filter((message) => message.ts !== at.ts)
-      .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0))
+      .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
+    // The same directory the inbound path fills, filled the same way before rendering.
+    // Sharing the map without sharing the lookup is what makes one mention read two ways
+    // depending on which door it came through — and a probe tallying replies is exactly
+    // the caller that would then disagree with the channel it is reading.
+    for (const message of ordered) await this.learnNames(message.text ?? "");
+
+    const replies = ordered
       .flatMap((message) => {
         const event = toSlackInboundEvent(
           { ...message, type: message.type ?? "message", channel: at.channel },

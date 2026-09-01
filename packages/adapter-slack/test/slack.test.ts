@@ -275,6 +275,29 @@ describe("SlackAdapter", () => {
     expect(await instance.readThread!(root!, 0)).toEqual([]);
   });
 
+  it("names mentions in a thread read the same way the inbound path does", async () => {
+    const { instance, api } = adapter();
+    api.names = { U0ALICE: "alice" };
+    await instance.start(() => {});
+    const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
+    const root = await instance.post(channel, { text: "roll call" }, undefined, ["U0DRONE"]);
+
+    api.threads = [
+      {
+        messages: [
+          { type: "message", user: "UBOT", text: "roll call", ts: "1786761001.000200" },
+          { type: "message", user: "U0DRONE", text: "ask <@U0ALICE>", ts: "1786761003.000000" },
+        ],
+      },
+    ];
+
+    // A probe tallying replies must not read a mention differently from the channel it is
+    // reading — sharing the directory without filling it is what made the two disagree.
+    const replies = await instance.readThread!(root!);
+    expect(replies.map((reply) => reply.text)).toEqual(["ask @alice"]);
+    expect(api.nameCalls).toEqual(["U0ALICE"]);
+  });
+
   it("refuses a thread read it cannot answer, rather than reporting an empty thread", async () => {
     const { instance, api } = adapter();
     const root = { surface: "slack", nativeId: "GENG:1786761001.000200" } as const;
