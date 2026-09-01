@@ -107,15 +107,28 @@ let posts: string[];
  * Who the gateway says this agent is answering. With no argument it answers `null`, which is
  * what the gateway itself hands over when no turn is live or when two channels are mid-turn
  * at once — and is what every call below that is not about provenance gets.
+ *
+ * `isAgent: false` by default, because that is what Buzz reports for everyone but this agent
+ * itself — the flag is a false negative there, which is why `owner` and not this decides who
+ * a person is.
  */
 const turnAuthor = (by?: Partial<ActorRef>) => (): ActorRef | null =>
   by ? { surface: "buzz", id: "npub1abc", isSelf: false, isAgent: false, ...by } : null;
+
+/** The one person this agent's manifest names. Every other author is automation. */
+const OWNER = ["npub1ryan"];
 
 /** Calls the tool the way the brain does, and returns the text it reads back. */
 const call = async (
   declared: readonly JobConfig[],
   args: Record<string, unknown>,
-  { policy = ALLOWED, turnTimeoutMs = PATIENT_TURN, host = jobHost(), asking = turnAuthor() } = {},
+  {
+    policy = ALLOWED,
+    turnTimeoutMs = PATIENT_TURN,
+    host = jobHost(),
+    asking = turnAuthor(),
+    owner = OWNER,
+  } = {},
 ): Promise<string> => {
   const handle = jobHandler({
     jobs: declared,
@@ -123,6 +136,7 @@ const call = async (
     host,
     agentName: "whittle",
     asking,
+    owner,
     turnTimeoutMs,
   });
   const result = await handle({
@@ -444,18 +458,37 @@ describe("provenance", () => {
     expect(runs[0].switch).toEqual({ state: "off", origin: "never-set" });
   });
 
-  it("still refuses a parked job when the one asking is another agent", async () => {
+  it("refuses a parked job for an author the manifest does not name as an owner", async () => {
+    // The hole a `!isAgent` reading of the author would leave. Buzz sets `isAgent` for this
+    // agent's own pubkey and nobody else's — recognising a sibling needs a roster the relay
+    // does not serve — so a sibling agent arrives here indistinguishable from a stranger,
+    // and neither is the person §6.3 rule 2 reserves the bypass for.
     const host = jobHost({ switchSource: parked });
-    const asking = turnAuthor({ id: "npub1monty", isAgent: true });
+    const asking = turnAuthor({ id: "npub1monty" });
     const declared = [withBody(jobs(CLOSED)[0], SILENT)];
     const text = await call(declared, { job: "shift" }, { host, asking });
+
+    expect(text).toContain("job shift denied-switch");
+    expect(text).toContain("this run did not count as an owner's request");
+    expect(argv()).toEqual([]);
+    expect(runs[0].requestedBy).toEqual({ kind: "agent", id: "npub1monty" });
+    expect(runs[0].bypassedSwitch).toBe(false);
+  });
+
+  it("still refuses a parked job when the surface does say the author is an agent", async () => {
+    const host = jobHost({ switchSource: parked });
+    // Named as an owner *and* flagged an agent: where a surface can tell the two apart, the
+    // flag it sets is real evidence and only ever narrows this.
+    const asking = turnAuthor({ id: "npub1bot", isAgent: true });
+    const declared = [withBody(jobs(CLOSED)[0], SILENT)];
+    const text = await call(declared, { job: "shift" }, { host, asking, owner: ["npub1bot"] });
 
     // `on-request` is a trigger, not an authorization — a sibling asking is automation.
     expect(text).toContain("job shift denied-switch");
     expect(text).toContain("only a human's on-request run bypasses a parked job");
-    expect(text).toContain("this run counted as automation");
+    expect(text).toContain("this run did not count as an owner's request");
     expect(argv()).toEqual([]);
-    expect(runs[0].requestedBy).toEqual({ kind: "agent", id: "npub1monty" });
+    expect(runs[0].requestedBy).toEqual({ kind: "agent", id: "npub1bot" });
     expect(runs[0].bypassedSwitch).toBe(false);
   });
 

@@ -61,13 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ever classified as one. A `tools/call` carries this server's bearer token and the tool
   arguments and nothing at all about the turn that produced it, so the author is read off the
   gateway instead: the same live-turn registry the reaction tool reads to mark "the message
-  you are answering", holding an author the manifest already admitted through `owner`,
-  `allowlist`, and `respondTo`. The kind comes from that author's own `isAgent` and is not a
-  field of the call, so `on-request` remains a trigger rather than an authorization — a
-  sibling agent asking is automation and a parked job still refuses it, as it does when two
-  channels are mid-turn at once and no one person can be named. The record names that author
-  whichever kind it is — a sibling agent by its own id rather than by this agent's name — and
-  falls back to the brain only where there is no one turn to read it from. The bypass answers
+  you are answering". **A person is an author the manifest names in `owner`**, not one whose
+  `isAgent` flag is false — only a surface can tell an agent from a person, and Buzz cannot
+  yet: `toActorRef` flags this agent's own pubkey and nobody else's, because recognising a
+  sibling needs a roster the relay does not serve, so a bypass keyed on that flag would reach
+  every sibling in a fleet. Everyone else is automation for the purpose of the switch,
+  including an allowlisted colleague — an allowlist says who may speak to this agent, and a
+  fleet's names siblings — and so is a call arriving while two channels are mid-turn at once,
+  where no one person can be named. `on-request` remains a trigger rather than an
+  authorization. The record names the turn's author whichever kind it is, rather than this
+  agent's name, and falls back to the brain only where there is no one turn to read it from. The bypass answers
   only whether the run starts: every gate governing what it may do is untouched, and it
   writes nothing, so a parked job is still parked afterwards and the run carries
   `bypassedSwitch: true` for whoever reads the record at 3am. Worst on a job with no schedule at all, where the switch

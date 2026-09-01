@@ -76,10 +76,11 @@ export interface JobToolOptions {
    *
    * An {@link ActorRef} the gateway resolved from an inbound event, never a
    * {@link JobRequester}: a caller that could pass the kind could pass `human`, and the kind
-   * is what decides whether a parked job runs. It is derived here from `isAgent`, which only
-   * the surface that received the message sets.
+   * is what decides whether a parked job runs.
    */
   asking?: () => ActorRef | null;
+  /** `manifest.owner`, normalized. The whole of what {@link requester} calls a person. */
+  owner?: readonly string[];
   /**
    * `limits.turnTimeoutMs` — the clock this tool's answer has to fit inside, and the whole
    * of what picks between {@link describeRun} and {@link describeStart}. Both numbers are
@@ -94,24 +95,36 @@ export interface JobToolOptions {
  *
  * A hosted MCP server is process-level — `tools/call` arrives carrying this server's bearer
  * token and the tool arguments, and nothing at all about the turn that produced it — so the
- * author is not on the call and is read off the gateway instead. That is the same
- * live-turn registry the reaction tool reads to put a glyph on "the message you are
- * answering", and it is the author the manifest already admitted through `owner`,
- * `allowlist`, and `respondTo`.
+ * author is not on the call and is read off the gateway instead. That is the same live-turn
+ * registry the reaction tool reads to put a glyph on "the message you are answering".
  *
- * The kind comes from the author's own `isAgent`, set by the surface that received the
- * message. Nothing said inside the turn reaches it, so this is still not the run naming its
- * own provenance: `on-request` remains a trigger rather than an authorization, and a sibling
- * agent asking is automation exactly as a clock tick is.
+ * **`human` is `owner`, and it is not `!isAgent`.** Only the surface can tell an agent from a
+ * person, and Buzz cannot yet: `toActorRef` sets `isAgent` for this agent's own pubkey and
+ * nobody else's, because recognising siblings needs a roster the relay does not serve. So on
+ * that surface `isAgent: false` means *not known to be an agent*, and reading it as evidence
+ * of a person would hand every sibling in a fleet the bypass §6.3 rule 2 reserves for a
+ * human. `owner` is the manifest's own list of the people this deployment answers to — the
+ * one positive signal, written by an operator, that no surface has to compute — and
+ * `isAgent` is kept alongside it because when a surface *can* say so it is real evidence,
+ * and it can only narrow this.
+ *
+ * Everyone else is automation for the purpose of the switch, and that includes an
+ * allowlisted colleague: an allowlist says who may speak to this agent, and a fleet's names
+ * siblings. `on-request` is still a trigger rather than an authorization.
  *
  * With no turn to name — none live, or two channels mid-turn at once, which names nobody —
  * the requester is this agent's brain. That is what is left that is true, and it is the safe
  * direction: it does not bypass a parked job.
  */
-function requester(agentName: string, asking: JobToolOptions["asking"]): JobRequester {
+function requester(
+  agentName: string,
+  asking: JobToolOptions["asking"],
+  owner: readonly string[],
+): JobRequester {
   const author = asking?.() ?? null;
   if (!author) return { kind: "agent", id: agentName };
-  return { kind: author.isAgent ? "agent" : "human", id: author.id };
+  const person = !author.isAgent && owner.includes(author.id);
+  return { kind: person ? "human" : "agent", id: author.id };
 }
 
 const JobArgs = z.object({
@@ -206,9 +219,10 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
         "that proved nothing did not pass. A job whose budget is longer than a turn is " +
         "started rather than waited for, and the answer says only that it is running and " +
         "where its result will be posted: there is no verdict in it, so say it is running " +
-        "and report the result when it lands. A parked job runs when the person you are " +
-        "answering is the one who asked, because they are waiting on the result; it refuses " +
-        "when another agent is asking, and nothing in this call lets you claim otherwise. " +
+        "and report the result when it lands. A parked job runs when the message you are " +
+        "answering came from one of this agent's owners, because they are waiting on the " +
+        "result; it refuses for anyone else, and nothing in this call lets you claim " +
+        "otherwise. " +
         "A job listed below with params takes a target — which issue, which document, " +
         "which environment — under `params`. No parameter changes what a job does: if the ask " +
         "is for different behaviour, it is a different job and a different slug.\n" +
@@ -267,7 +281,7 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
  * difference between an attempt somebody can find at 3am and one that never happened.
  */
 export function jobHandler(opts: JobToolOptions): McpHandler {
-  const { jobs, policy, host, agentName, asking, turnTimeoutMs } = opts;
+  const { jobs, policy, host, agentName, asking, owner = [], turnTimeoutMs } = opts;
   return mcpToolServer({
     name: JOB_SERVER,
     tools: () => tools(jobs, turnTimeoutMs),
@@ -302,10 +316,10 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
       // could disagree with either number. A job that fits inside a turn is waited for and
       // quoted; one that cannot is started, and answers where it declared it would.
       if (jobDeadlineMs(job) > turnTimeoutMs) {
-        const start = await host.startRequest(job, requester(agentName, asking), params);
+        const start = await host.startRequest(job, requester(agentName, asking, owner), params);
         return start.refused ? describeRun(start.refused) : describeStart(job, start);
       }
-      return describeRun(await host.request(job, requester(agentName, asking), params));
+      return describeRun(await host.request(job, requester(agentName, asking, owner), params));
     },
   });
 }
@@ -319,8 +333,8 @@ function describeRun(run: JobRun): string {
     // explain the refusal to whoever asked, and which side of the bypass this run fell on
     // is the part of it they can act on.
     (parked
-      ? "  this run counted as automation rather than a person's request, so it did not " +
-        "bypass a parked job\n"
+      ? "  this run did not count as an owner's request, so it did not bypass a parked " +
+        "job\n"
       : "")
   );
 }
