@@ -800,6 +800,13 @@ const JobSchema = z
          */
         secrets: z.record(EnvVarName, SecretRef).default({}),
         /**
+         * The same map, for a credential the gateway's own process must not hold. Resolved
+         * exactly as `secrets` is — the split is a claim about where the value is mounted,
+         * not a second resolver, and a one-directory deployment satisfies both from it.
+         * Declaring one refuses `trigger.onRequest` on the same job.
+         */
+        jobSecrets: z.record(EnvVarName, SecretRef).default({}),
+        /**
          * Ambient variables this body inherits, by name. See `passthroughEnv`: a value the
          * platform injects at runtime cannot be written into `env`, so its name is written
          * here instead and the grant stays readable.
@@ -1072,6 +1079,43 @@ const ManifestSchema = z
       path: ["jobs"],
     },
   )
+  // A `jobSecrets` ref is one a deployment keeps out of the gateway's own secrets directory,
+  // and `onRequest` is the only trigger the gateway serves: every other one enters through
+  // `sageox-agent job run`, a separate process the target may hand a second directory. So a
+  // job arming both resolves that ref on every tick and cannot on the one path a person
+  // uses. Refused where the pairing is written, because nothing the run can see differs —
+  // only which process the deployment started it in.
+  .superRefine((m, ctx) => {
+    for (const job of m.jobs) {
+      const moved = Object.values(job.run.jobSecrets);
+      if (!moved.length || !job.trigger.onRequest) continue;
+      ctx.addIssue({
+        code: "custom",
+        message:
+          `job "${job.slug}" arms trigger.onRequest and declares ${moved.join(", ")} in ` +
+          "run.jobSecrets — an on-request run executes in the gateway's own process, which " +
+          "is not given that directory, so it would fail on that ref. Drop onRequest, move " +
+          "the ref to run.secrets and take the weaker guarantee knowingly, or give the " +
+          "credentialed work a job of its own that nothing may ask for",
+        path: ["jobs"],
+      });
+    }
+  })
+  // `envelope` merges the two maps, so a name in both would silently take whichever landed
+  // last — and which map a ref is in is what the rule above reads.
+  .superRefine((m, ctx) => {
+    for (const job of m.jobs) {
+      const both = Object.keys(job.run.jobSecrets).filter((name) => name in job.run.secrets);
+      if (!both.length) continue;
+      ctx.addIssue({
+        code: "custom",
+        message:
+          `job "${job.slug}" declares ${both.join(", ")} in both run.secrets and ` +
+          "run.jobSecrets — one variable comes from one place",
+        path: ["jobs"],
+      });
+    }
+  })
   // The soft switch is a value in the agent's memory, resolved through a brain it already
   // declares rather than a bespoke transport. With no brain there is nothing to read, so
   // the switch would silently be the fail-direction and nothing else.

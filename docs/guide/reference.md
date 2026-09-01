@@ -83,7 +83,12 @@ refuses when no job has armed that door — the tool is served for those jobs an
 so allowing it first writes a permission for something that will never exist. The reverse,
 a job that declares `trigger.onRequest` while the policy denies the tool, is a `doctor`
 failure: nothing could ask for it, and the agent reads as one that cannot run its own jobs
-rather than one not allowed to.
+rather than one not allowed to. A job that declares `run.jobSecrets` may not arm this door
+at all — a run started here executes in the gateway's own process, which is not given the
+directory such a ref lives in, so `loadManifest` refuses the pair and names the ref. That is
+the one credential decision that has to be made before the trigger: a job holding a
+credential the gateway must not hold is a job no conversation can start. A clock, a webhook,
+and an operator running `sageox-agent job run` at the host all still can.
 
 `memory add` and `mcp add` write these for you. Reach for this table only when editing a
 policy by hand — and `doctor` will tell you if you get it wrong.

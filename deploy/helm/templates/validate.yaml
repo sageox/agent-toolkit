@@ -59,11 +59,14 @@ agent with no schedule mounts it nowhere. Refused rather than rendered: the whol
 the field is to move a credential off the Pod that runs the brain, and one set on an agent
 whose only Pod is the Deployment has moved nothing while reading as though it had.
 
-A schedule and not a job, because a schedule is what renders the Pod. A job declaring only
-`onRequest` renders no CronJob, and a run started that way executes inside the gateway's own
-process, in the Deployment Pod, with no second directory to search — so a ref that lives only
-here fails to resolve and the run fails by name. That is the boundary holding rather than a
-gap in it, and it is why the count here is of schedules.
+A schedule and not a job, because a schedule is what renders the Pod. A run started on
+request executes inside the gateway's own process, in the Deployment Pod, with no second
+directory to search, so a ref that lives only here cannot resolve there — which is why the
+count is of schedules and not of jobs.
+
+Which refs live only here is settled in the bundle: a job naming one in `run.jobSecrets` may
+not arm `trigger.onRequest`, and `loadManifest` refuses the pair. Not checkable here — an
+agent's values carry a job's slug, schedules and budget, and nothing about its credentials.
 */}}
 {{- if kindIs "map" $agent.jobSecrets -}}
 {{- $scheduled := 0 -}}
