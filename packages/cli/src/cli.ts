@@ -381,6 +381,16 @@ async function buildBrain(
         turnTimeoutMs: manifest.limits.turnTimeoutMs,
         host: jobs,
         agentName: manifest.name,
+        // Who the run record says asked. A `tools/call` carries nothing about the turn that
+        // produced it, and the gateway is what knows — the same live turn the reaction tool
+        // marks. Without it every request is automation, including the ones a person is
+        // waiting on, and a parked job could only be run by arming the switch and
+        // remembering to disarm it.
+        asking: egress && (() => egress.asking()),
+        // Who that author has to be for the run to count as a person's. `owner` and not
+        // `respondTo`: an allowlist says who may speak to this agent, and a fleet's names
+        // siblings.
+        owner: manifest.owner ?? [],
       },
       serveAt,
     );

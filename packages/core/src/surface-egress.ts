@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { SurfaceAdapter } from "./adapter.ts";
 import type {
+  ActorRef,
   ChannelRef,
   EventRef,
   GuardedMessage,
@@ -158,6 +159,22 @@ export class SurfaceEgress {
         if (this.answering.get(key) === turn) this.answering.delete(key);
       },
     };
+  }
+
+  /**
+   * Who sent the message this agent is answering, when exactly one turn is live.
+   *
+   * The registry {@link react} reads, and the same ambiguity rule: a channel runs its turns
+   * one at a time, so one live turn names its author exactly and two at once name nobody.
+   * `null` rather than a guess — the job door reads it as automation, which is the safe
+   * direction there.
+   *
+   * The author is the surface's, from an event this gateway received. Nothing the brain
+   * says during the turn reaches it.
+   */
+  asking(): ActorRef | null {
+    const live = [...this.answering.values()];
+    return live.length === 1 ? live[0].event.author : null;
   }
 
   /**

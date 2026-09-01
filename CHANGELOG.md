@@ -54,6 +54,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A job a person asks for runs, even when its kill switch is parked.** `job_run` records
+  the author of the message the agent is answering, so a request that arrives through a chat
+  surface is the human on-request run the host has always described — it has refused with
+  *"only a human's on-request run bypasses a parked job"* since jobs shipped, and nothing was
+  ever classified as one. A `tools/call` carries this server's bearer token and the tool
+  arguments and nothing at all about the turn that produced it, so the author is read off the
+  gateway instead: the same live-turn registry the reaction tool reads to mark "the message
+  you are answering". **A person is an author the manifest names in `owner`**, not one whose
+  `isAgent` flag is false — only a surface can tell an agent from a person, and Buzz cannot
+  yet: `toActorRef` flags this agent's own pubkey and nobody else's, because recognising a
+  sibling needs a roster the relay does not serve, so a bypass keyed on that flag would reach
+  every sibling in a fleet. Everyone else is automation for the purpose of the switch,
+  including an allowlisted colleague — an allowlist says who may speak to this agent, and a
+  fleet's names siblings — and so is a call arriving while two channels are mid-turn at once,
+  where no one person can be named. `on-request` remains a trigger rather than an
+  authorization. The record names the turn's author whichever kind it is, rather than this
+  agent's name, and falls back to the brain only where there is no one turn to read it from. The bypass answers
+  only whether the run starts: every gate governing what it may do is untouched, and it
+  writes nothing, so a parked job is still parked afterwards and the run carries
+  `bypassedSwitch: true` for whoever reads the record at 3am. Worst on a job with no schedule at all, where the switch
+  parked no clock and its only effect was to refuse the request it exists to permit; the
+  workaround it replaces is arming a posture switch for one run and remembering to disarm it.
+
 - **A DM sent to a Slack agent while it was down is answered when it comes back.**
   The backfill walked the configured `channels` and nothing else, so it could never reach a
   DM: a DM's conversation id does not exist until someone opens it, which is why no entry
