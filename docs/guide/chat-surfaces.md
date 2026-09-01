@@ -392,10 +392,11 @@ nobody, which is indistinguishable from a broken agent.
 Socket Mode does not replay missed events. On restart the adapter connects first and then
 pulls `conversations.history` from its saved cursor, deduplicating any overlap with live
 events. Because history returns thread parents but not their replies, it also pulls
-`conversations.replies` for every thread that moved during the gap. Two gaps remain: a
-reply under a parent older than the cursor stays missed — that parent is outside the
-history window, and Slack cannot enumerate the threads that moved in a period — and DMs
-are not backfilled at all, since the adapter has no list of them until they speak.
+`conversations.replies` for every thread that moved during the gap, and asks `im:read`
+which DMs are open so it can do the same for those. Two gaps remain: a reply under a parent
+older than the cursor stays missed — that parent is outside the history window, and Slack
+cannot enumerate the threads that moved in a period — and, without `im:read`, every DM,
+since the adapter then has no list of them until they speak.
 
 ### Publish its face on Slack
 

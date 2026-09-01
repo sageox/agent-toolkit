@@ -4,6 +4,7 @@ import {
   SlackAdapter,
   privacyOf,
   type SlackApiClient,
+  type SlackDirectPage,
   type SlackHistoryPage,
   type SlackSocketClient,
 } from "../src/slack.ts";
@@ -46,12 +47,14 @@ class FakeApi implements SlackApiClient {
   async authTest() {
     return { userId: "UBOT", botId: "BBOT" };
   }
-  openDms: string[] = [];
+  dms: SlackDirectPage[] = [];
+  dmCalls: Array<string | undefined> = [];
   async channelIsPrivate(channel: string) {
     return channel.startsWith("G");
   }
-  async openDirectChannels() {
-    return this.openDms;
+  async openDirectChannels(cursor?: string) {
+    this.dmCalls.push(cursor);
+    return this.dms.shift() ?? {};
   }
   async history(args: { channel: string; oldest: string; cursor?: string }) {
     this.historyCalls.push(args);
@@ -266,7 +269,7 @@ describe("SlackAdapter", () => {
   });
 
   it("refuses a thread read it cannot answer, rather than reporting an empty thread", async () => {
-    const { instance } = adapter();
+    const { instance, api } = adapter();
     const root = { surface: "slack", nativeId: "GENG:1786761001.000200" } as const;
 
     // Each of these would mint a verdict naming every agent silent if it answered `[]`.
@@ -281,6 +284,13 @@ describe("SlackAdapter", () => {
     await expect(
       instance.readThread!({ surface: "slack", nativeId: "nonsense" }),
     ).rejects.toThrow(/conversation this agent serves/);
+
+    // The one that would not announce itself: a root this adapter does serve, refused by
+    // Slack. Swallowing it into `[]` is how a probe comes to report a live fleet silent.
+    api.replies = async () => {
+      throw new Error("ratelimited");
+    };
+    await expect(instance.readThread!(root)).rejects.toThrow(/ratelimited/);
   });
 
   it("addresses a post to the members it names, and refuses anything that is not one", async () => {
@@ -494,7 +504,8 @@ describe("SlackAdapter", () => {
 
   it("backfills the DMs it has open, which no config could have named", async () => {
     const { instance, api } = adapter({ since: 1786760000 });
-    api.openDms = ["DALICE", "DQUIET"];
+    // Paged, so the cursor has to be carried back or the second DM is never enumerated.
+    api.dms = [{ ids: ["DALICE"], nextCursor: "page2" }, { ids: ["DQUIET"] }];
     api.histories.push(
       { messages: [] }, // GENG
       // A history result carries no `channel_type`; the `D` prefix is what says "DM" here.
@@ -505,6 +516,7 @@ describe("SlackAdapter", () => {
 
     await instance.start((event) => got.push(event));
 
+    expect(api.dmCalls).toEqual([undefined, "page2"]);
     expect(api.historyCalls.map((call) => call.channel)).toEqual(["GENG", "DALICE", "DQUIET"]);
     expect(got.map((event) => event.id.nativeId)).toEqual(["DALICE:1786761000.000100"]);
     // A DM is private and is itself a direct address, whichever door it came in through.

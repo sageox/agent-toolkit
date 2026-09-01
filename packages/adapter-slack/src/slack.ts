@@ -31,12 +31,20 @@ export interface SlackHistoryPage {
   nextCursor?: string;
 }
 
+export interface SlackDirectPage {
+  ids?: string[];
+  nextCursor?: string;
+}
+
 /** Narrow API seam: production wraps WebClient and tests never touch the network. */
 export interface SlackApiClient {
   authTest(): Promise<{ userId?: string; botId?: string }>;
   channelIsPrivate(channel: string): Promise<boolean | undefined>;
-  /** Every DM conversation this bot has open — the ids no configuration could name. */
-  openDirectChannels(): Promise<string[]>;
+  /**
+   * One page of the DM conversations this bot has open — the ids no configuration names.
+   * Paged like `history` and `replies`, so the walk stays on the tested side of this seam.
+   */
+  openDirectChannels(cursor?: string): Promise<SlackDirectPage>;
   history(args: { channel: string; oldest: string; cursor?: string }): Promise<SlackHistoryPage>;
   replies(args: {
     channel: string;
@@ -506,11 +514,19 @@ export class SlackAdapter implements SurfaceAdapter {
    * the wrong thing.
    */
   private async directChannels(): Promise<string[]> {
+    const ids: string[] = [];
     try {
-      return await this.api.openDirectChannels();
+      let cursor: string | undefined;
+      do {
+        const page = await this.api.openDirectChannels(cursor);
+        ids.push(...(page.ids ?? []));
+        cursor = page.nextCursor || undefined;
+      } while (cursor);
     } catch {
-      return [];
+      // Whatever paged in before the failure is still worth refilling. Without `im:read`
+      // that is nothing, which is the case this catch is really here for.
     }
+    return ids;
   }
 
   /** Drains one cursor-paged endpoint. Slack pages backwards in time; the caller sorts. */
@@ -601,19 +617,16 @@ export class WebSlackApi implements SlackApiClient {
   }
 
   /** `users.conversations` rather than `conversations.list`: the bot's own DMs, not the workspace's. */
-  async openDirectChannels(): Promise<string[]> {
-    const ids: string[] = [];
-    let cursor: string | undefined;
-    do {
-      const response = await this.client.users.conversations({
-        types: "im",
-        exclude_archived: true,
-        ...(cursor ? { cursor } : {}),
-      });
-      for (const channel of response.channels ?? []) if (channel.id) ids.push(channel.id);
-      cursor = response.response_metadata?.next_cursor || undefined;
-    } while (cursor);
-    return ids;
+  async openDirectChannels(cursor?: string): Promise<SlackDirectPage> {
+    const response = await this.client.users.conversations({
+      types: "im",
+      exclude_archived: true,
+      ...(cursor ? { cursor } : {}),
+    });
+    return {
+      ids: response.channels?.flatMap((channel) => (channel.id ? [channel.id] : [])),
+      nextCursor: response.response_metadata?.next_cursor,
+    };
   }
 
   async history(args: { channel: string; oldest: string; cursor?: string }): Promise<SlackHistoryPage> {
