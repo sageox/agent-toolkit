@@ -532,6 +532,32 @@ describe("SlackAdapter", () => {
     ).rejects.toThrow(/DQUIET is not configured/);
   });
 
+  it("keeps the DMs it paged in when the lookup fails partway", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    api.dms = [{ ids: ["DALICE"], nextCursor: "page2" }];
+    const pages = api.openDirectChannels.bind(api);
+    // Page two never arrives. Discarding page one on that basis would drop a DM the agent
+    // was told about, and take the configured channels down with it.
+    api.openDirectChannels = async (cursor?: string) => {
+      if (!cursor) return pages(cursor);
+      api.dmCalls.push(cursor);
+      throw new Error("ratelimited");
+    };
+    api.histories.push(
+      { messages: [mention("1786761000.000100")] },
+      { messages: [{ type: "message", user: "U123", text: "ping", ts: "1786761000.000200" }] },
+    );
+    const got: InboundEvent[] = [];
+
+    await instance.start((event) => got.push(event));
+
+    expect(api.dmCalls).toEqual([undefined, "page2"]);
+    expect(got.map((event) => event.id.nativeId)).toEqual([
+      "GENG:1786761000.000100",
+      "DALICE:1786761000.000200",
+    ]);
+  });
+
   it("still backfills its channels when it may not ask which DMs are open", async () => {
     const { instance, api } = adapter({ since: 1786760000 });
     // No `im:read`. A channel-only agent must not be taken down by a scope it never needs.
