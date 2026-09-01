@@ -8,6 +8,7 @@ import type {
   InboundEvent,
   ReactionResult,
   SurfaceAdapter,
+  ThreadReply,
 } from "@sageox/agent-toolkit-core";
 import {
   SLACK_SURFACE,
@@ -270,6 +271,54 @@ export class SlackAdapter implements SurfaceAdapter {
     return ts ? { surface: SLACK_SURFACE, nativeId: slackEventId(channel.id, ts) } : undefined;
   }
 
+  /**
+   * Replies beneath a thread root this adapter posted — one `conversations.replies` walk.
+   *
+   * Every way this can fail throws, and none of them answers `[]`. A probe mints a verdict
+   * from what comes back, so "nobody replied" has to stay distinguishable from "this read
+   * did not happen" — see {@link SurfaceAdapter.readThread}.
+   *
+   * `oldest: "0"` because a thread read is not a backfill: the caller wants everything
+   * under the root, not what arrived after some cursor. Slack returns the parent whatever
+   * `oldest` says, and the parent is not in its own thread — dropped by `ts` rather than by
+   * position, since a page boundary promises nothing about which message comes first.
+   *
+   * Normalized through `toSlackInboundEvent`, so a join notice or a hidden message is no
+   * more a reply here than it is a turn. One answer to "what counts as a message" rather
+   * than a second one that drifts.
+   */
+  async readThread(root: EventRef, limit?: number): Promise<readonly ThreadReply[]> {
+    if (!this.started) throw new Error("SlackAdapter.start() must be called before readThread()");
+    if (root.surface !== SLACK_SURFACE) {
+      throw new Error(`a ${root.surface} thread root names no Slack thread`);
+    }
+    const at = this.locate(root);
+    if (!at) {
+      throw new Error(
+        "a Slack thread root must name a message in a conversation this agent serves",
+      );
+    }
+
+    const messages = await this.collect((cursor) =>
+      this.api.replies({ channel: at.channel, ts: at.ts, oldest: "0", cursor }),
+    );
+
+    // Sorted on the Slack `ts` rather than the ISO string it becomes: `ts` carries
+    // microseconds and the ISO form is truncated to milliseconds, so two replies inside one
+    // millisecond would tie and come back in whatever order the pages happened to arrive.
+    const replies = messages
+      .filter((message) => message.ts !== at.ts)
+      .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0))
+      .flatMap((message) => {
+        const event = toSlackInboundEvent(
+          { ...message, type: message.type ?? "message", channel: at.channel },
+          this.normalizeOptions(),
+        );
+        return event ? [{ author: event.author, text: event.text, ts: event.ts }] : [];
+      });
+    return limit === undefined ? replies : replies.slice(0, limit);
+  }
+
   async react(target: InboundEvent, emoji: string): Promise<ReactionResult | undefined> {
     if (!this.started) return undefined;
     const at = this.locate(target.id);
@@ -367,12 +416,7 @@ export class SlackAdapter implements SurfaceAdapter {
     // app's `message.im` subscription is the switch; the guard still sees a DM as private.
     const direct = isDirectSlackChannel(message);
     if (!direct && !this.allowedChannels.has(message.channel)) return;
-    const normalized = toSlackInboundEvent(message, {
-      botUserId: this.botUserId!,
-      botId: this.botId,
-      privateChannels: this.privateChannels,
-      publicChannels: this.publicChannels,
-    });
+    const normalized = toSlackInboundEvent(message, this.normalizeOptions());
     if (!normalized) return;
 
     const key = normalized.id.nativeId;
@@ -384,6 +428,16 @@ export class SlackAdapter implements SurfaceAdapter {
     this.since = Math.max(this.since ?? 0, Number(message.ts));
     this.lastByChannel.set(normalized.channel.id, contextOf(normalized));
     this.onEvent?.(normalized);
+  }
+
+  /** What the privacy answers resolved at startup amount to. Only valid once `started`. */
+  private normalizeOptions() {
+    return {
+      botUserId: this.botUserId!,
+      botId: this.botId,
+      privateChannels: this.privateChannels,
+      publicChannels: this.publicChannels,
+    };
   }
 
   /**

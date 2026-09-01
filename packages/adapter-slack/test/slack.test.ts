@@ -220,6 +220,65 @@ describe("SlackAdapter", () => {
     expect(api.posts).toHaveLength(2);
   });
 
+  it("reads back the replies to a post of its own, oldest first and without the parent", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
+    const root = await instance.post(channel, { text: "roll call" }, undefined, ["U0DRONE"]);
+
+    // Slack hands back the parent whatever `oldest` says, pages a long thread, and does not
+    // promise the order — and a join notice is no more a reply than it is a turn.
+    api.threads = [
+      {
+        messages: [
+          { type: "message", user: "UBOT", text: "roll call", ts: "1786761001.000200" },
+          { type: "message", user: "U0DRONE", text: "<@UBOT> awake", ts: "1786761003.000000" },
+        ],
+        nextCursor: "page2",
+      },
+      {
+        messages: [
+          { type: "message", subtype: "channel_join", user: "U0LATE", text: "", ts: "1786761004.000000" },
+          { type: "message", user: "U0FORAGER", text: "here", ts: "1786761002.000000" },
+        ],
+      },
+    ];
+
+    const replies = await instance.readThread!(root!);
+    expect(api.replyCalls).toEqual([
+      { channel: "GENG", ts: "1786761001.000200", oldest: "0", cursor: undefined },
+      { channel: "GENG", ts: "1786761001.000200", oldest: "0", cursor: "page2" },
+    ]);
+    expect(replies.map((reply) => [reply.author.id, reply.text])).toEqual([
+      ["U0FORAGER", "here"],
+      ["U0DRONE", "awake"],
+    ]);
+    expect(replies[0].ts).toBe(new Date(1786761002_000).toISOString());
+    // The bot's own reply is its own, so a tally can tell an answer from an echo.
+    expect(replies.map((reply) => reply.author.isSelf)).toEqual([false, false]);
+
+    api.threads = [{ messages: [{ type: "message", user: "U0A", text: "1", ts: "1786761005.000000" }] }];
+    expect(await instance.readThread!(root!, 0)).toEqual([]);
+  });
+
+  it("refuses a thread read it cannot answer, rather than reporting an empty thread", async () => {
+    const { instance } = adapter();
+    const root = { surface: "slack", nativeId: "GENG:1786761001.000200" } as const;
+
+    // Each of these would mint a verdict naming every agent silent if it answered `[]`.
+    await expect(instance.readThread!(root)).rejects.toThrow(/must be called before readThread/);
+    await instance.start(() => {});
+    await expect(
+      instance.readThread!({ surface: "buzz", nativeId: "abc" }),
+    ).rejects.toThrow(/buzz thread root names no Slack thread/);
+    await expect(
+      instance.readThread!({ surface: "slack", nativeId: "GOPS:1786761001.000200" }),
+    ).rejects.toThrow(/conversation this agent serves/);
+    await expect(
+      instance.readThread!({ surface: "slack", nativeId: "nonsense" }),
+    ).rejects.toThrow(/conversation this agent serves/);
+  });
+
   it("addresses a post to the members it names, and refuses anything that is not one", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A probing job can read its thread back on Slack, so a roll call there has an answer.**
+  `SlackAdapter.readThread` walks `conversations.replies` under a root the run posted and
+  hands back the replies oldest first. Only Buzz implemented the verb, so a probe on a
+  Slack-only agent posted its roll call, waited, and then died on *"the slack surface cannot
+  read a thread back"* — the fleet-liveness job, unable to run on one of the two surfaces
+  the toolkit ships. The endpoint was already in the adapter's API seam, used by backfill.
+  Replies are normalized through the same `toSlackInboundEvent` a turn is, so a join notice
+  or a hidden message is no more a reply than it is a turn, and the thread parent Slack
+  returns is dropped by `ts` — it is not in its own thread. Every failure throws and none
+  answers `[]`: an unstarted adapter, a root naming another surface, and a root in a
+  conversation this agent does not serve are all findings a probe must not read as silence.
+
 - **A probing job body can address its post, so the agents it names actually wake.**
   `post_message` takes `mentions`, and the adapter renders them as its surface's addressing
   primitive — a `p` tag on Buzz, `<@id>` on Slack. Without it a probe posted into a channel
