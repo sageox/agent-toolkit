@@ -63,11 +63,10 @@ scheduled run is lost.
   command: ["/bin/sh", "-ceu"]
   args:
     - |
-      # Staged so that a stage running beside it cannot be observed half-done. One claim
-      # carries the agent and every job of that agent, so two Pods can stage the same
-      # bundle at once — a nightly tick beside a rollout, or two jobs on one cron. Copy
-      # aside, then land each file by rename, which is atomic: a reader sees the whole old
-      # file or the whole new one, and the two are the same bytes from the same source.
+      # Staged so that a stage running beside it cannot be observed half-done. Copy aside,
+      # then land each file by rename, which is atomic: a reader sees the whole old file or
+      # the whole new one. `persistence.existingClaim` is the operator's own volume, so this
+      # stage cannot assume it is the only thing writing where it lands.
       install -d -m 0700 /agents/{{ .name }}
       stage=$(mktemp -d /agents/.stage.XXXXXX)
       cp -LR /config/. "$stage/"
@@ -164,6 +163,15 @@ from under the `Read(//mnt/secrets-store/**)` deny rule's sibling without the re
 {{- define "agent.jobSecretsMountPath" -}}/mnt/job-secrets-store{{- end -}}
 
 {{/*
+`/agents` is the agent's claim in the Deployment Pod and an `emptyDir` in a job Pod. The
+claim is `ReadWriteOnce`, which binds it to one node: a job Pod the scheduler placed on any
+other node could not attach it, and sat in `Init:0/1` behind a `Multi-Attach` event until
+`activeDeadlineSeconds` killed it — with nothing in the job's own logs, because the body
+never started. A scheduled run needs nothing that is on the claim: it stages its own bundle
+from `/config`, reads its kill switch through the relay, and writes its verdict under the
+container's own tmpdir. Durable state a job body does share with the agent goes on a
+`sharedVolumes` claim, which the operator backs with an access mode that allows it.
+
 The bundle arrives on whatever volume the consumer named, passed through verbatim: a
 ConfigMap, an image, a claim, a CSI volume. The chart's contract is the directory at
 `/config`, never the object behind it, so nothing here branches on which source it is.
@@ -172,8 +180,12 @@ No volume at all is the case where the bundle rides inside `bundle.stageImage` i
 */}}
 {{- define "agent.podVolumes" -}}
 - name: agent-data
+{{- if .job }}
+  emptyDir: {}
+{{- else }}
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}
+{{- end }}
 {{- with .agent.bundle.volume }}
 - name: config
   {{- toYaml . | nindent 2 }}
