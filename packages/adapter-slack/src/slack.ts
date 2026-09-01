@@ -224,9 +224,7 @@ export class SlackAdapter implements SurfaceAdapter {
     const target = inReplyTo ? contextOf(inReplyTo) : this.lastByChannel.get(channel.id);
     if (!target) throw new Error(`no inbound context for Slack channel ${channel.id}`);
 
-    // The message type cannot represent a broadcast. Reject Slack's native encodings as
-    // well, otherwise text such as <!channel> would smuggle one through that type boundary.
-    this.assertMessage(msg);
+    const text = this.outboundText(msg);
 
     // In a channel, threading the answer onto the question is what keeps the channel
     // readable. A 1:1 DM has nothing to keep tidy, and a threaded answer there hides
@@ -234,7 +232,7 @@ export class SlackAdapter implements SurfaceAdapter {
     // question asked inside a thread is still answered in that thread.
     const threadTs =
       target.threadTs ?? (this.dmChannels.has(channel.id) ? undefined : target.eventTs);
-    await this.api.postMessage({ channel: channel.id, text: msg.text, threadTs });
+    await this.api.postMessage({ channel: channel.id, text, threadTs });
   }
 
   postTargets(): ChannelRef[] {
@@ -254,7 +252,7 @@ export class SlackAdapter implements SurfaceAdapter {
   ): Promise<EventRef | undefined> {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before post()");
     this.assertChannel(channel);
-    this.assertMessage(msg);
+    const text = this.outboundText(msg);
 
     // A Slack `ts` is unique only within a conversation, so an anchor from a different
     // channel names a real message somewhere else — and `thread_ts` pointing at one starts
@@ -266,7 +264,7 @@ export class SlackAdapter implements SurfaceAdapter {
 
     const ts = await this.api.postMessage({
       channel: channel.id,
-      text: address(mentions) + msg.text,
+      text: address(mentions) + text,
       threadTs: root?.ts,
     });
     return ts ? { surface: SLACK_SURFACE, nativeId: slackEventId(channel.id, ts) } : undefined;
@@ -453,10 +451,29 @@ export class SlackAdapter implements SurfaceAdapter {
     }
   }
 
-  private assertMessage(msg: GuardedMessage): void {
+  /**
+   * The brain's text, screened and then written as Slack's encoding of those same
+   * characters. Both outbound paths go through it, so neither can screen without encoding.
+   *
+   * A broadcast is refused rather than encoded. `GuardedMessage` cannot represent one, and
+   * `<!channel>` in text is the way back through that boundary; waking every member of the
+   * channel is worth failing the turn over rather than delivering as literal text.
+   *
+   * The rest is escaped, which is the half of `normalizeSlackText` that was missing. That
+   * function un-escapes `&lt;`, `&gt;` and `&amp;` on the way in, so the brain reads
+   * characters and never Slack's encoding — but with no encoder on the way out the round
+   * trip is not symmetric, and text that reached the brain carrying `<@U0ALICE>` went back
+   * out as live markup and notified that member. Quoting the message that woke the agent is
+   * ordinary and must not be an act of addressing. Addressing is `mentions`, whose ids
+   * {@link address} validates and whose count the `post_message` audit line carries.
+   *
+   * `&` is replaced first, or it escapes the ampersands the other two introduce.
+   */
+  private outboundText(msg: GuardedMessage): string {
     if (/<!\s*(?:channel|here|everyone)(?:\^[^>]*)?>/i.test(msg.text)) {
       throw new Error("Slack bulk mentions are not supported");
     }
+    return msg.text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   }
 
 }
@@ -591,8 +608,10 @@ const SLACK_EMOJI_NAME = /^[a-z0-9_+'-]+$/;
  * Anchored and closed over the alphabet Slack actually issues, which is what makes the
  * mention below safe to build by concatenation: a value carrying `>` would otherwise close
  * the `<@…>` it was put inside and let the rest of it read as markup — `<!channel>` among
- * the things it could then be, which is the broadcast `assertMessage` refuses in `text` and
- * which must not have a second way in. The bound is generous; Slack ids are 9–11 characters.
+ * the things it could then be, which is the broadcast `outboundText` refuses in `text` and
+ * which must not have a second way in. This prefix is the one part of an outbound message
+ * the adapter builds itself, so it is the one part that is not escaped. The bound is
+ * generous; Slack ids are 9–11 characters.
  */
 const SLACK_MEMBER_ID = /^[UWB][A-Z0-9]{1,31}$/;
 

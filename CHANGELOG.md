@@ -40,6 +40,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that moved but stayed spelled `secrets` refuses the launch, not just the run. Nothing that
   loads today stops loading — the key is new, and `run` was already `.strict()`.
 
+### Fixed
+
+- **A Slack message says what the brain wrote, and addresses only whom `mentions` names.**
+  The adapter escapes `&`, `<` and `>` in the brain's text, so `<@U0ALICE>` renders as those
+  characters instead of notifying that member. Slack's addressing primitive is in-band —
+  `<@id>` written into the text *is* the mention — while every other surface addresses in a
+  field of its own, so `GuardedMessage`'s inability to represent a recipient was a claim the
+  Slack surface did not keep. Inbound text is already un-escaped for the brain and a mention
+  of a third party reaches it as live markup, which made quoting the message that woke the
+  agent enough to page whoever it named: through none of the id validation `mentions` gets,
+  and recorded on the audit line as `mentions=0`. The recipients the adapter builds from
+  `mentions` are still markup — the one part of an outbound message it constructs itself.
+  The bulk-mention refusal is unchanged: `<!channel>` is refused, not rendered.
+
 ## [0.1.0] - 2026-08-31
 
 First full release of 0.1.0. It is `v0.1.0-rc.2` plus the two entries below —

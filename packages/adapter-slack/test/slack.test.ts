@@ -239,6 +239,25 @@ describe("SlackAdapter", () => {
     expect(api.posts).toHaveLength(1);
   });
 
+  it("renders the brain's own text literally, so only `mentions` addresses anyone", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    // Slack delivers a mention of a third party as live markup and `normalizeSlackText`
+    // hands it to the brain as those characters, so quoting the message that woke the agent
+    // is enough to page whoever it named — through none of the screening `mentions` gets.
+    socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE> & <@U0BOB>" }));
+
+    await instance.send(got[0].channel, { text: got[0].text }, got[0]);
+    expect(api.posts[0].text).toBe("ask &lt;@U0ALICE&gt; &amp; &lt;@U0BOB&gt;");
+
+    // The recipients the adapter builds from validated ids stay markup; the text beside
+    // them does not, so the two ways to address somebody have not become one again.
+    const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
+    await instance.post(channel, { text: "who is <@U0ALICE>?" }, undefined, ["U0DRONE"]);
+    expect(api.posts[1].text).toBe("<@U0DRONE> who is &lt;@U0ALICE&gt;?");
+  });
+
   it("refuses a top-level post to an unconfigured channel", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});

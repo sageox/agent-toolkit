@@ -480,7 +480,9 @@ not a guess worth making on your behalf.
 
 The requested message is posted top-level in the destination, and the agent's ordinary
 response confirms the result back in the conversation where the request originated.
-Unknown channels, unconsented public channels, and Slack bulk mentions are refused.
+Unknown channels, unconsented public channels, and Slack bulk mentions are refused. Slack
+mention markup written into the text is neither refused nor honoured: it renders as the
+characters the agent typed, so a cross-post notifies nobody it names.
 Cross-posts never reuse an unrelated message as a fake thread parent.
 
 ### Let the agent react with an emoji
