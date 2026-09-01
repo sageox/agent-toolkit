@@ -158,15 +158,21 @@ function normalizeSlackText(
   );
   // Everyone else stays, named. `<@U0ALICE>` is Slack's wire encoding, not something a
   // person reads — a brain handed it can see that somebody was addressed and not who, so
-  // it answers about an id. The label Slack itself supplies is preferred where there is
-  // one, then the directory, then the raw id: a mention nobody could name still has to
-  // read as a mention rather than vanish.
+  // it answers about an id.
+  //
+  // The directory outranks the label, because the label is whatever the sending client
+  // embedded and the id is who Slack says was addressed. `<@U0ALICE|bob>` renders as
+  // alice: the two disagree after a rename, and on the reading that a label decides, the
+  // brain is told a different person was named than the one who will be notified.
+  // The label is still better than nothing where there is no directory — no `users:read`,
+  // or an id Slack would not name — and an id nobody could name still reads as a mention
+  // rather than vanishing.
   //
   // Rendered as `@name`, which is text and not markup. Quoting it back cannot address
   // anyone — the same property `SlackAdapter.outboundText` keeps by escaping.
   const named = withoutMention.replace(
     SLACK_MENTION,
-    (_whole, id: string, label?: string) => `@${label || memberNames?.get(id) || id}`,
+    (_whole, id: string, label?: string) => `@${memberNames?.get(id) || label || id}`,
   );
   return named
     .replaceAll("&lt;", "<")

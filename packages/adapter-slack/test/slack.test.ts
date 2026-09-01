@@ -399,6 +399,82 @@ describe("SlackAdapter", () => {
     expect(got.map((event) => event.text)).toEqual(["ask @alice", "second"]);
   });
 
+  it("believes the directory over a label the sending client embedded", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    api.names = { U0ALICE: "alice" };
+    await instance.start((event) => got.push(event));
+
+    // The two disagree after a rename. On the reading that a label decides, the brain is
+    // told a different person was named than the one Slack will actually notify.
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE|bob>" }));
+    // With nothing in the directory the label is still better than the bare id.
+    await socket.emit(mention("1786761000.000200", { text: "<@UBOT> and <@U0CAROL|carol>" }));
+
+    expect(got.map((event) => event.text)).toEqual(["ask @alice", "and @carol"]);
+  });
+
+  it("does not let one conversation's lookups hold up another's", async () => {
+    const { instance, socket, api } = adapter({
+      channels: [
+        { id: "GENG", reply: "private" },
+        { id: "GOPS", reply: "private" },
+      ],
+    });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    let release: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    api.userName = async () => {
+      await held;
+      return "alice";
+    };
+    // GENG is stuck on a lookup. GOPS mentions nobody and must not wait behind it —
+    // ordering is what `ChannelQueue` needs per channel, and it runs channels in parallel.
+    const stuck = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+    await socket.emit({ ...mention("1786761000.000200"), channel: "GOPS" });
+
+    expect(got.map((event) => event.channel.id)).toEqual(["GOPS"]);
+    release!();
+    await stuck;
+    expect(got.map((event) => event.channel.id)).toEqual(["GOPS", "GENG"]);
+  });
+
+  it("drops a message still resolving when the adapter is stopped", async () => {
+    const { instance, socket, api } = adapter();
+    const first: InboundEvent[] = [];
+    await instance.start((event) => first.push(event));
+
+    let release: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    api.userName = async () => {
+      await held;
+      return "alice";
+    };
+    const inFlight = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+
+    // Stopped and restarted while that lookup is outstanding. The queued message belongs to
+    // the run that heard it: delivering it to the new session's callback would answer a
+    // question from before the restart, and leave its reply target behind in `lastByChannel`.
+    await instance.stop();
+    const second: InboundEvent[] = [];
+    await instance.start((event) => second.push(event));
+    release!();
+    await inFlight;
+
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+    // The new run still works, and threads onto its own message rather than the dropped one.
+    await socket.emit(mention("1786761000.000300"));
+    await instance.send({ surface: "slack", id: "GENG", isPublic: false }, { text: "ok" });
+    expect(api.posts[0].threadTs).toBe("1786761000.000300");
+  });
+
   it("refuses a top-level post to an unconfigured channel", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});

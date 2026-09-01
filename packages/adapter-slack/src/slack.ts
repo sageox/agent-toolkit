@@ -156,16 +156,30 @@ export class SlackAdapter implements SurfaceAdapter {
   /** Ids Slack would not name, so a second message does not ask about them again. */
   private readonly unnamed = new Set<string>();
   /**
-   * Normalization runs one message at a time, in arrival order.
+   * Normalization runs one message at a time per conversation, in arrival order.
    *
    * Resolving a name is a network call, so `accept` has to be able to wait — and two
    * messages waiting concurrently would be delivered in whichever order Slack answered
    * about their mentions. `ChannelQueue` preserves the order it is submitted in, so that
    * scrambling would reach the brain: the agent answers the second question first, and a
-   * reply with no inbound context threads onto the wrong message. After the first mention
-   * of a person every lookup is a cache hit, so this chain idles.
+   * reply with no inbound context threads onto the wrong message.
+   *
+   * Per conversation and not one chain for the adapter, because that is the whole of what
+   * ordering means here — `ChannelQueue` serializes a channel and runs channels in
+   * parallel, so a single chain would impose a stricter order than anything downstream
+   * asks for and let one message's lookups delay every other conversation. A chain is
+   * dropped once it drains, so this holds an entry per conversation in flight rather than
+   * one per conversation ever seen.
    */
-  private chain: Promise<void> = Promise.resolve();
+  private readonly chains = new Map<string, Promise<void>>();
+  /**
+   * Which run of this adapter queued work belongs to.
+   *
+   * `stop()` bumps it, so a message still waiting on a lookup is discarded rather than
+   * finishing into a later `start()` — delivering an event the previous session heard to
+   * the callback the new one installed, and dragging its reply target along with it.
+   */
+  private generation = 0;
   private botUserId?: string;
   private botId?: string;
   private onEvent?: (event: InboundEvent) => void;
@@ -433,6 +447,9 @@ export class SlackAdapter implements SurfaceAdapter {
       this.listening = false;
       this.started = false;
       this.onEvent = undefined;
+      // Whatever is mid-lookup belongs to the run being stopped, and to nothing after it.
+      this.generation++;
+      this.chains.clear();
     }
   }
 
@@ -456,13 +473,23 @@ export class SlackAdapter implements SurfaceAdapter {
    * lets a backfill wait for its own replay without a second ordering rule.
    */
   private enqueue(message: SlackMessage): Promise<void> {
+    const conversation = message.channel ?? "";
+    const generation = this.generation;
     // Errors are absorbed rather than left on the chain: one message nobody could
-    // normalize must not stop every message behind it.
-    this.chain = this.chain.then(() => this.accept(message)).catch(() => {});
-    return this.chain;
+    // normalize must not stop every message behind it in the same conversation.
+    const next = (this.chains.get(conversation) ?? Promise.resolve())
+      .then(() => this.accept(message, generation))
+      .catch(() => {});
+    this.chains.set(conversation, next);
+    // Only if nothing has queued behind it, or the entry dropped here is one another
+    // message is already waiting on.
+    void next.then(() => {
+      if (this.chains.get(conversation) === next) this.chains.delete(conversation);
+    });
+    return next;
   }
 
-  private async accept(message: SlackMessage): Promise<void> {
+  private async accept(message: SlackMessage, generation: number): Promise<void> {
     if (!message.channel) return;
     // A DM cannot be addressed to anyone but this bot, and its conversation ID does not
     // exist until someone opens it — so it can never be configured ahead of time. The
@@ -472,6 +499,9 @@ export class SlackAdapter implements SurfaceAdapter {
     // Before normalizing, because the text is rendered there and a name that arrives after
     // is a name the brain never saw.
     await this.learnNames(message.text ?? "");
+    // The lookup above is the one place this can lose the thread of its own lifecycle.
+    // Checked after it and before anything is recorded or delivered.
+    if (generation !== this.generation) return;
     const normalized = toSlackInboundEvent(message, this.normalizeOptions());
     if (!normalized) return;
 

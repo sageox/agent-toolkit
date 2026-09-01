@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-band, so a mention of a third party arrived as `<@U0ALICE>` — which tells a brain that
   somebody was addressed and not who. It answered about an id, and could not tell that two
   mentions of one person were one person. The adapter now resolves member ids through
-  `users.info` and renders them as `@alice`, preferring the label Slack supplies where there
-  is one. Needs the **`users:read`** scope; without it every mention keeps rendering as its
+  `users.info` and renders them as `@alice`. The directory outranks any label the sending
+  client embedded — `<@U0ALICE|bob>` reads as alice, because the two disagree after a rename
+  and the id is who Slack will actually notify. Needs the **`users:read`** scope; without it
+  the label is used where there is one, and otherwise every mention keeps rendering as its
   id, which is what it did before, and a refusal is remembered so a name Slack will not give
   is asked for once rather than once per message. An unnamed mention still reads as a
   mention: dropping it would lose the fact that somebody was named.
@@ -23,10 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `outboundText` already kept by escaping, now held one step earlier as well.
 
   **Inbound delivery is asynchronous as a result.** Resolving a name is a network call, so
-  the adapter normalizes one message at a time in arrival order rather than concurrently:
+  the adapter normalizes one message at a time *per conversation*, in arrival order:
   `ChannelQueue` preserves the order it is submitted in, so two messages racing on their
   lookups would have the agent answer the second question first, and a reply with no inbound
-  context thread onto the wrong message. After the first mention of a person every lookup is
+  context thread onto the wrong message. Ordering is kept per conversation rather than
+  adapter-wide, since that is all `ChannelQueue` asks for and one message's lookups must not
+  delay another channel. A message still resolving when `stop()` runs is discarded rather
+  than finishing into a later `start()`. After the first mention of a person every lookup is
   a cache hit.
 
 - **A probing job can read its thread back on Slack, so a roll call there has an answer.**
