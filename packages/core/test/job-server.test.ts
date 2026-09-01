@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { JobHost, type JobRun } from "../src/job-host.ts";
-import type { EventRef } from "../src/events.ts";
+import type { ActorRef, EventRef } from "../src/events.ts";
 import type { SwitchSource } from "../src/kill-switch.ts";
 import { jobHandler, JOB_RUN_TOOL, JOB_RUN_TOOL_NAME } from "../src/job-server.ts";
 import { loadManifest, type JobConfig } from "../src/manifest.ts";
@@ -103,13 +103,28 @@ let marker: string;
 let runs: JobRun[];
 let posts: string[];
 
+/**
+ * Who the gateway says this agent is answering. With no argument it answers `null`, which is
+ * what the gateway itself hands over when no turn is live or when two channels are mid-turn
+ * at once — and is what every call below that is not about provenance gets.
+ */
+const turnAuthor = (by?: Partial<ActorRef>) => (): ActorRef | null =>
+  by ? { surface: "buzz", id: "npub1abc", isSelf: false, isAgent: false, ...by } : null;
+
 /** Calls the tool the way the brain does, and returns the text it reads back. */
 const call = async (
   declared: readonly JobConfig[],
   args: Record<string, unknown>,
-  { policy = ALLOWED, turnTimeoutMs = PATIENT_TURN, host = jobHost() } = {},
+  { policy = ALLOWED, turnTimeoutMs = PATIENT_TURN, host = jobHost(), asking = turnAuthor() } = {},
 ): Promise<string> => {
-  const handle = jobHandler({ jobs: declared, policy, host, agentName: "whittle", turnTimeoutMs });
+  const handle = jobHandler({
+    jobs: declared,
+    policy,
+    host,
+    agentName: "whittle",
+    asking,
+    turnTimeoutMs,
+  });
   const result = await handle({
     id: 1,
     method: "tools/call",
@@ -392,21 +407,59 @@ describe("a job that needs a target", () => {
 });
 
 describe("provenance", () => {
-  it("records the agent's own brain as the requester, never the human in the channel", async () => {
-    await call([withBody(jobs(SHIFT)[0], PROVES)], { job: "shift" });
-    expect(runs[0].requestedBy).toEqual({ kind: "agent", id: "whittle" });
+  /**
+   * The switch nobody has set, on a job that does not run on one it cannot read — the
+   * issue's repro, and the state a fail-closed job is in before anyone touches it.
+   */
+  const parked: SwitchSource = async () => ({ origin: "never-set" });
+
+  /** Fail-closed, so `never-set` parks it. `SHIFT` is fail-open and would not. */
+  const CLOSED = SHIFT.replace("failDirection: open", "failDirection: closed");
+
+  it("records the person the turn is answering, and runs their job though it is parked", async () => {
+    const host = jobHost({ switchSource: parked });
+    const asking = turnAuthor({ id: "npub1ryan" });
+    const declared = [withBody(jobs(CLOSED)[0], PROVES)];
+    const text = await call(declared, { job: "shift" }, { host, asking });
+
+    // They asked, they are waiting on the answer, and they can stop it: not the unattended
+    // work a kill switch parks.
+    expect(text).toContain("job shift completed");
+    expect(text).toContain("PROVEN: ci passed");
+    expect(argv()).toHaveLength(1);
+    expect(runs[0].requestedBy).toEqual({ kind: "human", id: "npub1ryan" });
     expect(runs[0].trigger).toBe("on-request");
+    // Greppable at 3am, and the posture is exactly as it was found: the run reads the
+    // switch and never writes it.
+    expect(runs[0].bypassedSwitch).toBe(true);
+    expect(runs[0].switch).toEqual({ state: "off", origin: "never-set" });
   });
 
-  it("does not bypass a parked job, and says whose job that is instead", async () => {
-    const [shift] = jobs(SHIFT.replace("archetype: shift", "archetype: shift, suspend: true"));
-    const text = await call([withBody(shift, SILENT)], { job: "shift" });
+  it("still refuses a parked job when the one asking is another agent", async () => {
+    const host = jobHost({ switchSource: parked });
+    const asking = turnAuthor({ id: "npub1monty", isAgent: true });
+    const declared = [withBody(jobs(CLOSED)[0], SILENT)];
+    const text = await call(declared, { job: "shift" }, { host, asking });
 
-    expect(text).toContain("job shift denied-suspend");
+    // `on-request` is a trigger, not an authorization — a sibling asking is automation.
+    expect(text).toContain("job shift denied-switch");
     expect(text).toContain("only a human's on-request run bypasses a parked job");
-    expect(text).toContain("a run asked for through this tool is `agent`");
+    expect(text).toContain("this run counted as automation");
     expect(argv()).toEqual([]);
+    expect(runs[0].requestedBy).toEqual({ kind: "agent", id: "npub1monty" });
     expect(runs[0].bypassedSwitch).toBe(false);
+  });
+
+  it("records the agent's own brain when the gateway can name no one turn", async () => {
+    // Two channels mid-turn at once, or none: the gateway answers `null` rather than
+    // guessing which person a call belongs to, and the safe reading of that is automation.
+    const host = jobHost({ switchSource: parked });
+    const text = await call([withBody(jobs(CLOSED)[0], SILENT)], { job: "shift" }, { host });
+
+    expect(text).toContain("job shift denied-switch");
+    expect(argv()).toEqual([]);
+    expect(runs[0].requestedBy).toEqual({ kind: "agent", id: "whittle" });
+    expect(runs[0].trigger).toBe("on-request");
   });
 });
 

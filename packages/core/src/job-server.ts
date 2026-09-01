@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ActorRef } from "./events.ts";
 import type { JobRequester } from "./kill-switch.ts";
 import {
   describeJobRun,
@@ -66,11 +67,19 @@ export interface JobToolOptions {
   /** Shared with nothing else in this process, so single-flight per slug actually holds. */
   host: JobHost;
   /**
-   * This agent's name, which is the whole of the requester this surface can honestly
-   * report. Taken as a name rather than a {@link JobRequester} on purpose: a caller that
-   * could pass the kind could pass `human`, and that is the one claim nothing here may make.
+   * This agent's name, which is the requester when no one turn can be named — see
+   * {@link requester}.
    */
   agentName: string;
+  /**
+   * Who this agent is answering, or `null` when the gateway cannot name one person.
+   *
+   * An {@link ActorRef} the gateway resolved from an inbound event, never a
+   * {@link JobRequester}: a caller that could pass the kind could pass `human`, and the kind
+   * is what decides whether a parked job runs. It is derived here from `isAgent`, which only
+   * the surface that received the message sets.
+   */
+  asking?: () => ActorRef | null;
   /**
    * `limits.turnTimeoutMs` — the clock this tool's answer has to fit inside, and the whole
    * of what picks between {@link describeRun} and {@link describeStart}. Both numbers are
@@ -81,25 +90,28 @@ export interface JobToolOptions {
 }
 
 /**
- * Who the run record says asked, and why it is never `human`.
+ * Who the run record says asked: the author of the turn this call is inside.
  *
- * A hosted MCP server is process-level: `tools/call` arrives carrying this server's bearer
- * token and the tool arguments, and nothing at all about the turn that produced it. The
- * inbound author the manifest already classifies through `owner`, `allowlist`, and
- * `respondTo` is therefore unreadable from in here, and inventing a per-request author is a
- * change to the whole tool surface rather than to this one tool.
+ * A hosted MCP server is process-level — `tools/call` arrives carrying this server's bearer
+ * token and the tool arguments, and nothing at all about the turn that produced it — so the
+ * author is not on the call and is read off the gateway instead. That is the same
+ * live-turn registry the reaction tool reads to put a glyph on "the message you are
+ * answering", and it is the author the manifest already admitted through `owner`,
+ * `allowlist`, and `respondTo`.
  *
- * What *is* readable is what actually called: this agent's own brain, mid-turn. So that is
- * what gets recorded. Reporting it as the human in the channel would be the run naming its
- * own provenance, which is exactly what §6.3 forbids and what the host's three separate
- * entry points exist to prevent.
+ * The kind comes from the author's own `isAgent`, set by the surface that received the
+ * message. Nothing said inside the turn reaches it, so this is still not the run naming its
+ * own provenance: `on-request` remains a trigger rather than an authorization, and a sibling
+ * agent asking is automation exactly as a clock tick is.
  *
- * The consequence is deliberate and it is the safe direction: this tool does not bypass a
- * parked job. `on-request` is a trigger, not an authorization — an agent asking is
- * automation, and automation is what a kill switch parks.
+ * With no turn to name — none live, or two channels mid-turn at once, which names nobody —
+ * the requester is this agent's brain. That is what is left that is true, and it is the safe
+ * direction: it does not bypass a parked job.
  */
-function requester(agentName: string): JobRequester {
-  return { kind: "agent", id: agentName };
+function requester(agentName: string, asking: JobToolOptions["asking"]): JobRequester {
+  const author = asking?.() ?? null;
+  if (!author) return { kind: "agent", id: agentName };
+  return { kind: author.isAgent ? "agent" : "human", id: author.id };
 }
 
 const JobArgs = z.object({
@@ -194,9 +206,10 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
         "that proved nothing did not pass. A job whose budget is longer than a turn is " +
         "started rather than waited for, and the answer says only that it is running and " +
         "where its result will be posted: there is no verdict in it, so say it is running " +
-        "and report the result when it lands. A parked job refuses: a run asked for " +
-        "through a tool is automation, and only a human running the job directly bypasses " +
-        "that. A job listed below with params takes a target — which issue, which document, " +
+        "and report the result when it lands. A parked job runs when the person you are " +
+        "answering is the one who asked, because they are waiting on the result; it refuses " +
+        "when another agent is asking, and nothing in this call lets you claim otherwise. " +
+        "A job listed below with params takes a target — which issue, which document, " +
         "which environment — under `params`. No parameter changes what a job does: if the ask " +
         "is for different behaviour, it is a different job and a different slug.\n" +
         `Jobs this agent will run on request: ${
@@ -254,7 +267,7 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
  * difference between an attempt somebody can find at 3am and one that never happened.
  */
 export function jobHandler(opts: JobToolOptions): McpHandler {
-  const { jobs, policy, host, agentName, turnTimeoutMs } = opts;
+  const { jobs, policy, host, agentName, asking, turnTimeoutMs } = opts;
   return mcpToolServer({
     name: JOB_SERVER,
     tools: () => tools(jobs, turnTimeoutMs),
@@ -289,10 +302,10 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
       // could disagree with either number. A job that fits inside a turn is waited for and
       // quoted; one that cannot is started, and answers where it declared it would.
       if (jobDeadlineMs(job) > turnTimeoutMs) {
-        const start = await host.startRequest(job, requester(agentName), params);
+        const start = await host.startRequest(job, requester(agentName, asking), params);
         return start.refused ? describeRun(start.refused) : describeStart(job, start);
       }
-      return describeRun(await host.request(job, requester(agentName), params));
+      return describeRun(await host.request(job, requester(agentName, asking), params));
     },
   });
 }
@@ -303,10 +316,10 @@ function describeRun(run: JobRun): string {
   return (
     describeJobRun(run) +
     // Named here rather than left to the reason line, because the brain is about to
-    // explain the refusal to whoever asked, and "you have to do it yourself" is the
-    // part of it they can act on.
+    // explain the refusal to whoever asked, and which side of the bypass this run fell on
+    // is the part of it they can act on.
     (parked
-      ? "  a run asked for through this tool is `agent`, not a human, so it does not " +
+      ? "  this run counted as automation rather than a person's request, so it did not " +
         "bypass a parked job\n"
       : "")
   );
