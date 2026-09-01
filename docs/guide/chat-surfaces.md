@@ -341,6 +341,15 @@ its conversation ID appears only once someone opens it — so DMs need no entry,
 address: inside one the bot answers without being tagged. Drop `message.im` from the
 event subscriptions if you do not want that.
 
+That same "no entry names it" is why `im:read` matters on restart. Socket Mode has no
+replay, so a restarted agent refills the gap from `conversations.history` — and it can only
+call that for conversations it can name. Channels come from `channels`; DMs come from
+`im:read`, which is what lets it ask Slack which DMs it has open. Without the scope the
+channels still backfill and a DM sent while the agent was down is simply lost, which reads
+from the other side as an agent that ignored a question. Asking is not permission to speak:
+a DM still earns a reply by having sent something, so one with nothing in the gap is
+enumerated and left alone.
+
 The author gate is the second thing `surface slack` settles with you. You are one person
 with one id per surface, and an id is only ever matched against the surface it arrived
 from — so an agent that is `owner-only` with only an npub answers nobody on Slack. When
@@ -383,10 +392,11 @@ nobody, which is indistinguishable from a broken agent.
 Socket Mode does not replay missed events. On restart the adapter connects first and then
 pulls `conversations.history` from its saved cursor, deduplicating any overlap with live
 events. Because history returns thread parents but not their replies, it also pulls
-`conversations.replies` for every thread that moved during the gap. Two gaps remain: a
-reply under a parent older than the cursor stays missed — that parent is outside the
-history window, and Slack cannot enumerate the threads that moved in a period — and DMs
-are not backfilled at all, since the adapter has no list of them until they speak.
+`conversations.replies` for every thread that moved during the gap, and asks `im:read`
+which DMs are open so it can do the same for those. Two gaps remain: a reply under a parent
+older than the cursor stays missed — that parent is outside the history window, and Slack
+cannot enumerate the threads that moved in a period — and, without `im:read`, every DM,
+since the adapter then has no list of them until they speak.
 
 ### Publish its face on Slack
 
