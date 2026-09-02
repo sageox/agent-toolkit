@@ -357,11 +357,18 @@ describe("SlackAdapter", () => {
         "what does &lt;!channel&gt; do?",
       ]);
 
+      // `post` lost the same throw, and it is the path where the recipients the adapter
+      // builds sit unescaped beside the brain's text — so the broadcast has to stay escaped
+      // next to live markup, and reach exactly the one member `mentions` names.
+      await instance.post(got[0].channel, { text: "shipped <!channel>" }, undefined, ["U0DRONE"]);
+      expect(api.posts[2].text).toBe("<@U0DRONE> shipped &lt;!channel&gt;");
+
       // Still one line per attempt, naming a rule, which is what an operator acts on.
-      expect(logged).toEqual([
-        expect.stringContaining("egress_escaped surface=slack channel=GENG rule=slackBroadcast"),
-        expect.stringContaining("egress_escaped surface=slack channel=GENG rule=slackBroadcast"),
-      ]);
+      expect(logged).toEqual(
+        Array(3).fill(
+          expect.stringContaining("egress_escaped surface=slack channel=GENG rule=slackBroadcast"),
+        ),
+      );
     } finally {
       warn.mockRestore();
     }
