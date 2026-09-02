@@ -564,6 +564,78 @@ describe("SlackAdapter", () => {
     expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000200"]);
   });
 
+  it("does not let a stale start open the gate of the run that replaced it", async () => {
+    const { instance, socket } = adapter();
+    const gate = (signal: { at: () => void; release: Promise<void> }) => async () => {
+      signal.at();
+      await signal.release;
+    };
+    const make = () => {
+      let at!: () => void;
+      let go!: () => void;
+      const arrived = new Promise<void>((r) => (at = r));
+      const release = new Promise<void>((r) => (go = r));
+      return { at, go, arrived, release };
+    };
+
+    const one = make();
+    const two = make();
+    socket.start = gate(one);
+    const first: InboundEvent[] = [];
+    const starting = instance.start((event) => first.push(event));
+    await one.arrived;
+    await instance.stop();
+
+    socket.start = gate(two);
+    const second: InboundEvent[] = [];
+    const restarting = instance.start((event) => second.push(event));
+    await two.arrived;
+    const queued = socket.emit(mention("1786761000.000100"));
+
+    // The first run connects late. Its `releaseSocket` is the field the second run just
+    // overwrote, so without a check it opens a gate belonging to a connection that is
+    // still pending.
+    one.go();
+    await starting;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(second).toEqual([]);
+
+    two.go();
+    await restarting;
+    await queued;
+    expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000100"]);
+  });
+
+  it("does not let a stale start tear down the run that replaced it", async () => {
+    const { instance, socket } = adapter();
+    let failFirst!: (error: Error) => void;
+    const firstConnect = new Promise<void>((_resolve, reject) => (failFirst = reject));
+    let arrived!: () => void;
+    const atFirstConnect = new Promise<void>((r) => (arrived = r));
+    socket.start = async () => {
+      arrived();
+      await firstConnect;
+    };
+
+    const first: InboundEvent[] = [];
+    const starting = instance.start((event) => first.push(event));
+    await atFirstConnect;
+    await instance.stop();
+
+    socket.start = async () => {};
+    const second: InboundEvent[] = [];
+    await instance.start((event) => second.push(event));
+
+    // The first run fails after the second is up. Its cleanup would otherwise unsubscribe
+    // the listener, clear the callback, invalidate the generation and disconnect — all of
+    // them the second run's.
+    failFirst(new Error("socket mode unavailable"));
+    await expect(starting).rejects.toThrow(/unavailable/);
+
+    await socket.emit(mention("1786761000.000200"));
+    expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000200"]);
+  });
+
   it("abandons a replay when the adapter is stopped mid-backfill", async () => {
     const { instance, api } = adapter({ since: 1786760000 });
     const first: InboundEvent[] = [];

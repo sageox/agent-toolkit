@@ -253,19 +253,25 @@ export class SlackAdapter implements SurfaceAdapter {
     this.socket.on("slack_event", this.handleEnvelope);
     try {
       await this.socket.start();
+      // A `stop` and a fresh `start` can both have happened while that was pending. The
+      // gate, the listener and `onEvent` are single fields, so touching any of them now
+      // would be reaching into a run this one does not own.
+      if (session !== this.generation) return;
       this.listening = true;
       this.releaseSocket(); // before the backfill, which enqueues through the same gate
       // Socket Mode has no replay. Connect first, then fill the earlier gap; deduplication
       // makes overlap safe and avoids a new gap between the history call and the socket.
       if (resumeFrom !== undefined) await this.backfill(resumeFrom, session);
     } catch (error) {
-      this.started = false;
-      this.socket.off?.("slack_event", this.handleEnvelope);
-      this.onEvent = undefined;
-      // As on `stop`: a start that failed leaves no run for queued work to belong to, and
-      // without this it would belong to whichever run starts next.
-      this.invalidate();
-      await this.socket.disconnect().catch(() => {});
+      // Same rule on the way out: a late failure must not unsubscribe, disconnect or
+      // invalidate a run that replaced this one. Still thrown — the caller asked this one.
+      if (session === this.generation) {
+        this.started = false;
+        this.socket.off?.("slack_event", this.handleEnvelope);
+        this.onEvent = undefined;
+        this.invalidate();
+        await this.socket.disconnect().catch(() => {});
+      }
       throw error;
     }
   }
