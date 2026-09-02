@@ -521,11 +521,15 @@ export class SlackAdapter implements SurfaceAdapter {
     // app's `message.im` subscription is the switch; the guard still sees a DM as private.
     const direct = isDirectSlackChannel(message);
     if (!direct && !this.allowedChannels.has(message.channel)) return;
+    // Twice around the lookup, and both matter. Before, because a message already stale
+    // when it reaches the front of its chain must not spend a `users.info` — the chain is
+    // per conversation, so that lookup would hold up the run that is actually serving it.
+    // After, because the run can end while the lookup is outstanding, which is the window
+    // the stamp exists for.
+    if (generation !== this.generation) return;
     // Before normalizing, because the text is rendered there and a name that arrives after
     // is a name the brain never saw.
     await this.learnNames(message.text ?? "");
-    // The lookup above is the one place this can lose the thread of its own lifecycle.
-    // Checked after it and before anything is recorded or delivered.
     if (generation !== this.generation) return;
     const normalized = toSlackInboundEvent(message, this.normalizeOptions());
     if (!normalized) return;
@@ -594,16 +598,20 @@ export class SlackAdapter implements SurfaceAdapter {
       // A replay outlives a `stop` that lands mid-page otherwise, and goes on spending
       // history calls on a run that has ended.
       if (session !== this.generation) return;
-      const parents = await this.collect((cursor) =>
-        this.api.history({ channel, oldest: String(oldest), cursor }),
+      const live = () => session === this.generation;
+      const parents = await this.collect(
+        (cursor) => this.api.history({ channel, oldest: String(oldest), cursor }),
+        live,
       );
 
       const missed = [...parents];
       for (const parent of parents) {
+        if (!live()) return;
         if (!hasRepliesSince(parent, oldest)) continue;
         missed.push(
-          ...(await this.collect((cursor) =>
-            this.api.replies({ channel, ts: parent.ts!, oldest: String(oldest), cursor }),
+          ...(await this.collect(
+            (cursor) => this.api.replies({ channel, ts: parent.ts!, oldest: String(oldest), cursor }),
+            live,
           )),
         );
       }
@@ -659,15 +667,24 @@ export class SlackAdapter implements SurfaceAdapter {
     return ids;
   }
 
-  /** Drains one cursor-paged endpoint. Slack pages backwards in time; the caller sorts. */
-  private async collect(page: (cursor?: string) => Promise<SlackHistoryPage>): Promise<SlackMessage[]> {
+  /**
+   * Drains one cursor-paged endpoint. Slack pages backwards in time; the caller sorts.
+   *
+   * `live` is asked between pages, so a walk started by a run that has since ended stops
+   * rather than paging to the end of the gap on its behalf. A backfill passes it; a thread
+   * read does not, being a caller's own request rather than a run's background work.
+   */
+  private async collect(
+    page: (cursor?: string) => Promise<SlackHistoryPage>,
+    live: () => boolean = () => true,
+  ): Promise<SlackMessage[]> {
     const messages: SlackMessage[] = [];
     let cursor: string | undefined;
     do {
       const result = await page(cursor);
       messages.push(...(result.messages ?? []));
       cursor = result.nextCursor || undefined;
-    } while (cursor);
+    } while (cursor && live());
     return messages;
   }
 

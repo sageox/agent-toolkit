@@ -571,6 +571,79 @@ describe("SlackAdapter", () => {
     expect(second).toEqual([]);
   });
 
+  it("stops paging and starting reply walks once the run it belongs to has ended", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    const first: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inHistory = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const requested: Array<string | undefined> = [];
+    api.history = async (args) => {
+      requested.push(args.cursor);
+      if (args.cursor) return {};
+      entered();
+      await held;
+      // A page with more behind it, held until the run that asked for it has ended.
+      return {
+        messages: [
+          mention("1786761000.000100", {
+            text: "<@UBOT> ask <@U0ALICE>",
+            thread_ts: "1786761000.000100",
+            latest_reply: "1786761000.000300",
+          }),
+        ],
+        nextCursor: "page2",
+      };
+    };
+
+    const starting = instance.start((event) => first.push(event));
+    await inHistory;
+    await instance.stop();
+    release!();
+    await starting;
+
+    // Paging to the end of a gap on behalf of a run that has ended is work nobody asked
+    // for, against a rate limit the next run needs.
+    expect(requested).toEqual([undefined]);
+    // Nor is a reply walk started for a thread that moved: the page said so, but the run
+    // that would have read it is over.
+    expect(api.replyCalls).toEqual([]);
+    expect(first).toEqual([]);
+  });
+
+  it("spends no lookup on a message already stale when its turn comes", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    const looked: string[] = [];
+    let release: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    api.userName = async (id: string) => {
+      looked.push(id);
+      if (id === "U0ALICE") await held;
+      return id.toLowerCase();
+    };
+    await instance.start((event) => got.push(event));
+
+    // Same conversation, so the second waits behind the first. By the time its turn comes
+    // the run is over — and a chain is per conversation, so a lookup it spends is one the
+    // run actually serving that conversation waits behind.
+    const a = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+    const b = socket.emit(mention("1786761000.000200", { text: "<@UBOT> ask <@U0BOB>" }));
+    await instance.stop();
+    release!();
+    await Promise.all([a, b]);
+
+    expect(looked).toEqual(["U0ALICE"]);
+    expect(got).toEqual([]);
+  });
+
   it("refuses a top-level post to an unconfigured channel", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});
