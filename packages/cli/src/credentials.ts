@@ -219,10 +219,26 @@ export async function requireCredential(
   return value;
 }
 
-/** A `secretRef` the bundle declares, with the line that declares it. */
-export interface DeclaredSecret extends CredentialSpec {
+/** One place a bundle asks for a ref, and the advice that belongs to *that* place. */
+export interface Declaration {
   /** Where the bundle asks for it, so an operator knows which line to fix. */
   where: string;
+  /**
+   * What to do about it here.
+   *
+   * Per declaration and not per ref, because advice is about one feature: a job's
+   * `run.jobSecrets` remedy is wrong for the `private` checkout reading the same
+   * `GITHUB_TOKEN`, and the checkout's fine-grained-token advice says nothing about the job.
+   * A ref two features share has two answers, and an operator needs the one beside the line
+   * it belongs to.
+   */
+  hint?: string;
+}
+
+/** A `secretRef` the bundle declares, with every line that declares it. */
+export interface DeclaredSecret extends Omit<CredentialSpec, "hint"> {
+  /** Never empty. More than one means several features read the same file. */
+  declaredBy: Declaration[];
   /**
    * What still works without it.
    *
@@ -234,6 +250,29 @@ export interface DeclaredSecret extends CredentialSpec {
   degraded?: string;
 }
 
+/** One declaration, taking the spec's own advice as that declaration's. */
+function declaredAt(spec: CredentialSpec, where: string, degraded?: string): DeclaredSecret {
+  const { hint, ...rest } = spec;
+  return { ...rest, declaredBy: [{ where, hint }], degraded };
+}
+
+/** Every place a ref is declared, as one phrase. */
+export function declaredWhere(secret: DeclaredSecret): string {
+  return secret.declaredBy.map((decl) => decl.where).join(" and ");
+}
+
+/**
+ * The advice across every declaration, each stated once.
+ *
+ * Two jobs sharing a ref share a remedy, and saying it twice reads as two instructions.
+ */
+export function declaredHints(secret: DeclaredSecret): string[] {
+  const hints = secret.declaredBy
+    .map((decl) => decl.hint)
+    .filter((hint): hint is string => hint !== undefined);
+  return [...new Set(hints)];
+}
+
 /**
  * One entry per `secretRef`, however many features read it.
  *
@@ -243,17 +282,13 @@ export interface DeclaredSecret extends CredentialSpec {
  * as "2 declared secret(s) did not resolve" and prompted for twice, which reads as two
  * problems and is one.
  *
- * The merged entry names every place, and is **fatal if any declaration is fatal**: a
+ * The merged entry keeps every declaration, and is **fatal if any declaration is fatal**: a
  * feature that degrades gracefully without the credential does not make the one that cannot
  * start without it any less broken.
  *
- * It keeps a hint only where every declaration gives the same one, under the same reasoning:
- * a remedy is advice about one feature, and the other feature sharing the ref may be the one
- * it is wrong for. Moving a `GITHUB_TOKEN` that a job and a `private` checkout both read into
- * `run.jobSecrets` leaves the clone's declaration unresolved and the launch still refused —
- * so that hint must not survive the merge that proves the gateway needs the value. Two jobs
- * sharing a ref do give the same hint, which is why it does not name their indices: `where`
- * already names every line, and a remedy true of both should read as one remedy.
+ * Keeping them all is what lets each carry its own advice. A single `hint` on the merged
+ * entry could only be one declaration's, so it was either wrong for the others or dropped;
+ * neither states what an operator facing two features and one file actually needs.
  */
 function mergeByRef(declared: DeclaredSecret[]): DeclaredSecret[] {
   const byRef = new Map<string, DeclaredSecret>();
@@ -265,9 +300,8 @@ function mergeByRef(declared: DeclaredSecret[]): DeclaredSecret[] {
     }
     byRef.set(secret.name, {
       ...seen,
-      where: `${seen.where} and ${secret.where}`,
+      declaredBy: [...seen.declaredBy, ...secret.declaredBy],
       degraded: seen.degraded && secret.degraded ? seen.degraded : undefined,
-      hint: seen.hint === secret.hint ? seen.hint : undefined,
     });
   }
   return [...byRef.values()];
@@ -285,50 +319,53 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
   manifest.surfaces.forEach((surface, index) => {
     const at = `surfaces[${index}]`;
     if (surface.kind === "buzz" && typeof surface.identity === "string") {
-      declared.push({ ...buzzNsecSpec(surface.identity), where: `${at}.identity (buzz)` });
+      declared.push(declaredAt(buzzNsecSpec(surface.identity), `${at}.identity (buzz)`));
     }
     if (surface.kind === "slack") {
       if (typeof surface.identity === "string") {
-        declared.push({ ...slackBotTokenSpec(surface.identity), where: `${at}.identity (slack)` });
+        declared.push(declaredAt(slackBotTokenSpec(surface.identity), `${at}.identity (slack)`));
       }
       if (typeof surface.appToken === "string") {
-        declared.push({ ...slackAppTokenSpec(surface.appToken), where: `${at}.appToken (slack)` });
+        declared.push(declaredAt(slackAppTokenSpec(surface.appToken), `${at}.appToken (slack)`));
       }
     }
   });
 
   manifest.brains.forEach((brain, index) => {
     if ((brain.preset === "local" || brain.preset === "shared") && brain.age) {
-      declared.push({
-        ...ageIdentitySpec(brain.age.identitySecret, brain.age.recipient),
-        where: `brains[${index}].age.identitySecret`,
-        degraded:
+      declared.push(
+        declaredAt(
+          ageIdentitySpec(brain.age.identitySecret, brain.age.recipient),
+          `brains[${index}].age.identitySecret`,
           "plaintext vault files stay readable; every `*.md.age` slice is denied on read and on write",
-      });
+        ),
+      );
     }
     if (brain.preset === "team") {
       const ref = brain.token ?? DEFAULT_OX_TOKEN_SECRET;
-      declared.push({
-        ...SAGEOX_TOKEN_SPEC,
-        name: ref,
-        where: `brains[${index}].token${brain.token ? "" : ` (defaulted to ${ref})`}`,
-        // The one credential with a second source: `ox login` writes an auth.json that
-        // authenticates just as well, which is why a workstation legitimately has no
-        // token. A deployment mounts neither, and every team_search fails.
-        degraded:
+      declared.push(
+        declaredAt(
+          { ...SAGEOX_TOKEN_SPEC, name: ref },
+          `brains[${index}].token${brain.token ? "" : ` (defaulted to ${ref})`}`,
+          // The one credential with a second source: `ox login` writes an auth.json that
+          // authenticates just as well, which is why a workstation legitimately has no
+          // token. A deployment mounts neither, and every team_search fails.
           "an `ox login` auth.json authenticates instead where one exists; a deployment " +
           "with neither fails every team_search",
-      });
+        ),
+      );
     }
   });
 
   manifest.mcpServers.forEach((decl, index) => {
     const server = resolveMcpServer(decl);
     for (const [envVar, ref] of Object.entries(server.secrets)) {
-      declared.push({
-        ...spawnedSecretSpec(ref, envVar, "the server"),
-        where: `mcpServers[${index}].secrets.${envVar} (server "${server.name}")`,
-      });
+      declared.push(
+        declaredAt(
+          spawnedSecretSpec(ref, envVar, "the server"),
+          `mcpServers[${index}].secrets.${envVar} (server "${server.name}")`,
+        ),
+      );
     }
   });
 
@@ -346,14 +383,18 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
   // arrangement the split was for.
   manifest.jobs.forEach((job, index) => {
     for (const [envVar, ref] of Object.entries(job.run.secrets)) {
-      declared.push({
-        ...spawnedSecretSpec(ref, envVar, "the job body"),
-        where: `jobs[${index}].run.secrets.${envVar} (job "${job.slug}")`,
-        hint:
-          `if ${ref} is mounted only in a directory this process is not given, it belongs ` +
-          "in run.jobSecrets rather than run.secrets — this check leaves that map out, and " +
-          "`sageox-agent job run` resolves it per run and fails by name",
-      });
+      declared.push(
+        declaredAt(
+          {
+            ...spawnedSecretSpec(ref, envVar, "the job body"),
+            hint:
+              `if ${ref} is mounted only in a directory this process is not given, it ` +
+              "belongs in run.jobSecrets rather than run.secrets — this check leaves that " +
+              "map out, and `sageox-agent job run` resolves it per run and fails by name",
+          },
+          `jobs[${index}].run.secrets.${envVar} (job "${job.slug}")`,
+        ),
+      );
     }
   });
 
@@ -361,13 +402,43 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
   // after warmup has already started, which is late and on a background path.
   const priv = repos.filter((repo) => repo.private);
   if (priv.length) {
-    declared.push({
-      ...GITHUB_TOKEN_SPEC,
-      where: `repos.conf (private: ${priv.map((repo) => repo.name).join(", ")})`,
-    });
+    declared.push(
+      declaredAt(
+        GITHUB_TOKEN_SPEC,
+        `repos.conf (private: ${priv.map((repo) => repo.name).join(", ")})`,
+      ),
+    );
   }
 
   return mergeByRef(declared);
+}
+
+/**
+ * One entry of the "did not resolve" list: the ref, where it is declared, and what to do.
+ *
+ * A ref declared once keeps the one-line form it has always had. Several declarations get a
+ * line each, because they are separate lines in separate files to go and fix — and each
+ * carries the advice belonging to it, since a remedy for one feature can be the wrong move
+ * for the other reading the same file. Declarations that share a remedy are listed together
+ * above it, so it is stated once.
+ */
+function describeDeclared(secret: DeclaredSecret): string {
+  const [only] = secret.declaredBy;
+  if (secret.declaredBy.length === 1) {
+    return `  ${secret.name} — declared by ${only.where}` + (only.hint ? `\n      ${only.hint}` : "");
+  }
+  const groups = declaredHints(secret).map((hint) => ({
+    hint,
+    wheres: secret.declaredBy.filter((decl) => decl.hint === hint).map((decl) => decl.where),
+  }));
+  const unadvised = secret.declaredBy.filter((decl) => !decl.hint).map((decl) => decl.where);
+  const blocks = [
+    ...unadvised.map((where) => `      ${where}`),
+    ...groups.map(
+      (group) => group.wheres.map((where) => `      ${where}`).join("\n") + `\n          ${group.hint}`,
+    ),
+  ];
+  return `  ${secret.name} — declared by:\n${blocks.join("\n")}`;
 }
 
 /**
@@ -391,13 +462,7 @@ export function requireDeclaredSecrets(
   const degraded = missing.filter((secret) => secret.degraded);
 
   if (fatal.length) {
-    const list = fatal
-      .map(
-        (secret) =>
-          `  ${secret.name} — declared by ${secret.where}` +
-          (secret.hint ? `\n      ${secret.hint}` : ""),
-      )
-      .join("\n\n");
+    const list = fatal.map(describeDeclared).join("\n\n");
     throw new Error(
       `${fatal.length} declared secret(s) did not resolve, so this agent cannot do what it ` +
         `is configured to do. Each is read from ${dir}/<name>, then from the environment:\n\n` +

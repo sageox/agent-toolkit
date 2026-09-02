@@ -90,6 +90,8 @@ import {
   GITHUB_TOKEN_SPEC,
   SAGEOX_TOKEN_SPEC,
   declaredSecrets,
+  declaredHints,
+  declaredWhere,
   spawnedSecretSpec,
   requireCredential,
   requireDeclaredSecrets,
@@ -1305,7 +1307,7 @@ async function runCmd(argv: string[]): Promise<void> {
   const declared = declaredSecrets(manifest, repos);
   for (const secret of requireDeclaredSecrets(declared, { dir: secretsDir })) {
     process.stdout.write(
-      `  note: ${secret.where}: ${secret.name} does not resolve — ${secret.degraded}\n`,
+      `  note: ${declaredWhere(secret)}: ${secret.name} does not resolve — ${secret.degraded}\n`,
     );
   }
 
@@ -1978,15 +1980,15 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
     // a launch that dies on a missing secret.
     for (const secret of declaredSecrets(manifest, repos)) {
       if (resolveSecret(secret.name, { dir: secretsDir })) {
-        ok.push(`${secret.where}: secretRef ${secret.name} resolves`);
+        ok.push(`${declaredWhere(secret)}: secretRef ${secret.name} resolves`);
       } else if (secret.degraded) {
         warnings.push(
-          `${secret.where}: secretRef ${secret.name} does not resolve — ${secret.degraded}`,
+          `${declaredWhere(secret)}: secretRef ${secret.name} does not resolve — ${secret.degraded}`,
         );
       } else {
         problems.push(
-          `${secret.where}: secretRef ${secret.name} does not resolve` +
-            (secret.hint ? ` — ${secret.hint}` : ""),
+          `${declaredWhere(secret)}: secretRef ${secret.name} does not resolve` +
+            (declaredHints(secret).length ? ` — ${declaredHints(secret).join("; ")}` : ""),
         );
       }
     }

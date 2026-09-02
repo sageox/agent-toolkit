@@ -90,6 +90,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `secretRef` two features share now carries both their remedies, each under the line it
+  belongs to.** `mergeByRef` collapses every declaration of one ref into a single entry — a
+  bundle's GitHub MCP server and a `private` `repos.conf` checkout both reading `GITHUB_TOKEN`
+  is the ordinary shape — but that entry could hold only one `hint`. So advice about one
+  feature either read as advice about the ref, which is wrong for the other feature sharing
+  it, or was dropped. Dropping was the safe half of that choice and is what shipped: it cost
+  every agent with this shape the `GITHUB_TOKEN` guidance it used to print. Declarations are
+  plural all the way through now — `DeclaredSecret.declaredBy` is a list of `{ where, hint }`,
+  and each place states its own answer, which is strictly more than either surviving-hint rule
+  could offer. A ref declared once keeps the one-line message it has always had. Two or more
+  get a line each, with the declarations that share a remedy listed together above it, so one
+  instruction is stated once rather than repeated per line. `doctor` appends every distinct
+  hint instead of the first. The hint-equality rule is gone, having been a workaround for the
+  singular field rather than a rule about credentials.
+
 - **A broadcast in a Slack message is escaped and logged instead of throwing, so the turn
   ends in an answer.** `SlackAdapter.outboundText` refused `<!channel>` by throwing, and
   `SurfaceEgress.reply` does not catch around `send` — so the throw left `drive`, ended the

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { loadManifest } from "@sageox/agent-toolkit-core";
 import {
   declaredSecrets,
+  declaredWhere,
   spawnedSecretSpec,
   requireCredential,
   requireDeclaredSecrets,
@@ -312,11 +313,11 @@ describe("declared secretRefs", () => {
       "GITHUB_TOKEN", // repos.conf's private clone
     ]);
     // Every one names the line that declares it, not just the ref.
-    expect(declared.map((secret) => secret.where)).toContain("surfaces[1].appToken (slack)");
-    expect(declared.map((secret) => secret.where)).toContain(
+    expect(declared.map(declaredWhere)).toContain("surfaces[1].appToken (slack)");
+    expect(declared.map(declaredWhere)).toContain(
       'mcpServers[0].secrets.TRACKER_API_KEY (server "tracker")',
     );
-    expect(declared.map((secret) => secret.where)).toContain(
+    expect(declared.map(declaredWhere)).toContain(
       'jobs[0].run.secrets.GH_TOKEN (job "nightly")',
     );
   });
@@ -383,20 +384,25 @@ jobs:
     const declared = declaredSecrets(shared, parseReposConf(PRIVATE_REPO));
 
     expect(declared).toHaveLength(1);
-    expect(declared[0].where).toBe(
+    expect(declaredWhere(declared[0])).toBe(
       'jobs[0].run.secrets.GH_TOKEN (job "nightly") and repos.conf (private: service)',
     );
-    expect(declared[0].hint).toBeUndefined();
-    expect(() => requireDeclaredSecrets(declared, { dir: secretsDir })).toThrow(
-      /GITHUB_TOKEN/,
-    );
+
     let message = "";
     try {
       requireDeclaredSecrets(declared, { dir: secretsDir });
     } catch (error) {
       message = (error as Error).message;
     }
-    expect(message).not.toContain("jobSecrets");
+    // Both remedies, each under the line it is true of. The job's is still stated — it is
+    // correct advice about the job — but it can no longer read as advice about the ref,
+    // because the checkout is named right beside it with its own answer.
+    expect(message).toContain(
+      '      jobs[0].run.secrets.GH_TOKEN (job "nightly")\n          if GITHUB_TOKEN is mounted only',
+    );
+    expect(message).toContain(
+      "      repos.conf (private: service)\n          Use a fine-grained token",
+    );
   });
 
   it("keeps that remedy for a ref two jobs share, since it is true of both", () => {
@@ -425,7 +431,7 @@ jobs:
     const declared = declaredSecrets(twoJobs, []);
 
     expect(declared).toHaveLength(1);
-    expect(declared[0].where).toBe(
+    expect(declaredWhere(declared[0])).toBe(
       'jobs[0].run.secrets.GH_TOKEN (job "nightly") and jobs[1].run.secrets.GH_TOKEN (job "weekly")',
     );
     let message = "";
@@ -434,7 +440,14 @@ jobs:
     } catch (error) {
       message = (error as Error).message;
     }
-    expect(message).toContain("run.jobSecrets rather than run.secrets");
+    // Both lines listed, then the remedy once beneath them: it is one instruction, and
+    // repeating it under each would read as two different things to go and do.
+    expect(message).toContain(
+      '      jobs[0].run.secrets.GH_TOKEN (job "nightly")\n' +
+        '      jobs[1].run.secrets.GH_TOKEN (job "weekly")\n' +
+        "          if DEMO_JOB_TOKEN is mounted only",
+    );
+    expect(message.match(/run\.jobSecrets rather than run\.secrets/g)).toHaveLength(1);
     // No index, or it would be advice about one of the two lines it names.
     expect(message).not.toContain("jobs[0].run.jobSecrets");
   });
@@ -504,7 +517,7 @@ mcpServers:
 
     expect(both).toHaveLength(1);
     expect(both[0].name).toBe("GITHUB_TOKEN");
-    expect(both[0].where).toBe(
+    expect(declaredWhere(both[0])).toBe(
       'mcpServers[0].secrets.GITHUB_TOKEN (server "github") and ' +
         "repos.conf (private: service)",
     );
@@ -558,12 +571,12 @@ brains:
   - { preset: team, team: team_jihjpfkt8b${token} }
 `;
     const defaulted = declaredSecrets(loadManifest(team("")), []);
-    expect(defaulted.map((s) => [s.name, s.where])).toEqual([
+    expect(defaulted.map((s) => [s.name, declaredWhere(s)])).toEqual([
       ["SAGEOX_TOKEN", "brains[0].token (defaulted to SAGEOX_TOKEN)"],
     ]);
 
     const named = declaredSecrets(loadManifest(team(", token: DROVER_OX_TOKEN")), []);
-    expect(named.map((s) => [s.name, s.where])).toEqual([
+    expect(named.map((s) => [s.name, declaredWhere(s)])).toEqual([
       ["DROVER_OX_TOKEN", "brains[0].token"],
     ]);
 
