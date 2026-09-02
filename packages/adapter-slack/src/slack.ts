@@ -15,6 +15,7 @@ import {
   isDirectSlackChannel,
   parseSlackEventId,
   slackEventId,
+  slackMentionedMembers,
   toSlackInboundEvent,
   type SlackMessage,
 } from "./normalize.ts";
@@ -52,6 +53,8 @@ export interface SlackApiClient {
     oldest: string;
     cursor?: string;
   }): Promise<SlackHistoryPage>;
+  /** The name a person reads for a member id, or `undefined` when Slack will not say. */
+  userName(id: string): Promise<string | undefined>;
   /** Answers with the posted message's `ts`, when Slack reports one. */
   postMessage(args: {
     channel: string;
@@ -132,6 +135,8 @@ export class SlackAdapter implements SurfaceAdapter {
   private readonly socket: SlackSocketClient;
   private readonly allowedChannels: Set<string>;
   private readonly privateChannels: Set<string>;
+  /** `reply: private` as configured — what a lookup that cannot answer falls back to. */
+  private readonly configuredPrivate: ReadonlySet<string>;
   /** Display names as configured, so a cross-post can be asked for by the name people say. */
   private readonly channelNames: Map<string, string>;
   /** Channels Slack answered `is_private: false` for. Outranks the ID-prefix guess. */
@@ -141,6 +146,38 @@ export class SlackAdapter implements SurfaceAdapter {
   /** One entry per channel, for a reply with no triggering event to thread onto. */
   private readonly lastByChannel = new Map<string, SlackInboundContext>();
   private readonly seen = new Set<string>();
+  /**
+   * Member id to name, filled as messages mention people and never expired. A rename goes
+   * unnoticed until restart — the alternative, `users.list` at boot, spends a whole
+   * workspace's member table to answer about the few people who speak.
+   */
+  private readonly memberNames = new Map<string, string>();
+  /** Ids Slack would not name, so a second message does not ask about them again. */
+  private readonly unnamed = new Set<string>();
+  /**
+   * One message at a time per conversation, in arrival order.
+   *
+   * Resolving a name is a network call, and `ChannelQueue` preserves the order it is
+   * submitted in — so two messages racing on their lookups would have the agent answer the
+   * second question first. Per conversation, not adapter-wide, because that queue
+   * serializes a channel and runs channels in parallel. Dropped once drained.
+   */
+  private readonly chains = new Map<string, Promise<void>>();
+  /**
+   * Which run of this adapter queued work belongs to. Ending a run bumps it, so a message
+   * still waiting on a lookup is discarded rather than delivered into a later `start()`.
+   */
+  private generation = 0;
+  /**
+   * Resolves once this run's socket has settled — connected, or failed to.
+   *
+   * The listener is registered before `socket.start()`, because Socket Mode delivers from
+   * the moment it connects. Delivery still waits: a start that then fails throws out of
+   * `start`, and a turn already spent answering would make that a lie. Held rather than
+   * dropped — it is a real message either way.
+   */
+  private socketSettled: Promise<void> = Promise.resolve();
+  private releaseSocket: () => void = () => {};
   private botUserId?: string;
   private botId?: string;
   private onEvent?: (event: InboundEvent) => void;
@@ -152,9 +189,10 @@ export class SlackAdapter implements SurfaceAdapter {
 
   constructor(opts: SlackAdapterOptions) {
     this.allowedChannels = new Set(opts.channels.map((channel) => channel.id));
-    this.privateChannels = new Set(
+    this.configuredPrivate = new Set(
       opts.channels.filter((channel) => channel.reply === "private").map((channel) => channel.id),
     );
+    this.privateChannels = new Set(this.configuredPrivate);
     this.channelNames = new Map(
       opts.channels.flatMap((channel) => (channel.name ? [[channel.id, channel.name]] : [])),
     );
@@ -169,9 +207,14 @@ export class SlackAdapter implements SurfaceAdapter {
 
   async start(onEvent?: (event: InboundEvent) => void): Promise<void> {
     if (this.started) throw new Error("SlackAdapter is already started");
+    // Before the first await, not after the last: a `stop` during either lookup below ends
+    // this run, and capturing afterwards would read the replacement's stamp and pass every
+    // ownership check downstream as though this were the live run.
+    const session = this.generation;
 
     const identity = await this.api.authTest();
     if (!identity.userId) throw new Error("Slack auth.test did not return the bot user id");
+    if (session !== this.generation) return;
     this.botUserId = identity.userId;
     this.botId = identity.botId;
     this.onEvent = onEvent;
@@ -179,28 +222,35 @@ export class SlackAdapter implements SurfaceAdapter {
     // Slack Connect and shared channels do not always follow an ID-prefix privacy rule.
     // A failed lookup is not trusted as private: the configured assertion remains, and
     // everything else stays public so the egress guard fails closed.
-    await Promise.all(
+    const privacy = await Promise.all(
       [...this.allowedChannels].map(async (channel) => {
         try {
-          const isPrivate = await this.api.channelIsPrivate(channel);
-          if (isPrivate) this.privateChannels.add(channel);
-          // Recorded, not merely "not added": normalization otherwise falls back to the
-          // ID prefix and calls a public G-prefixed channel private, which is the one
-          // case where the guard would let workspace-visible output through.
-          //
-          // The configured assertion is dropped in the same step, because Slack answering
-          // "public" outranks it. Leaving it in place kept `postTargets` reporting the
-          // channel private off the configured entries alone, so the guard never saw a
-          // public channel to refuse and a cross-surface post reached the whole workspace.
-          else if (isPrivate === false) {
-            this.publicChannels.add(channel);
-            this.privateChannels.delete(channel);
-          }
+          return { channel, isPrivate: await this.api.channelIsPrivate(channel) };
         } catch {
           // Missing channels:read/groups:read must not widen egress.
+          return { channel, isPrivate: undefined };
         }
       }),
     );
+    if (session !== this.generation) return;
+    // From configuration plus this run's answers, and nothing earlier. Both sets outlive a
+    // `stop`, so a previous run's answer would decide a lookup that fails now — and in the
+    // direction where it once said "private", the guard would allow a reply into a channel
+    // configured public.
+    this.privateChannels.clear();
+    for (const channel of this.configuredPrivate) this.privateChannels.add(channel);
+    this.publicChannels.clear();
+    for (const { channel, isPrivate } of privacy) {
+      if (isPrivate) this.privateChannels.add(channel);
+      // Recorded, not merely "not added": normalization otherwise falls back to the ID
+      // prefix and calls a public G-prefixed channel private, the one case where the guard
+      // would let workspace-visible output through. The configured assertion is dropped in
+      // the same step, because Slack answering "public" outranks it.
+      else if (isPrivate === false) {
+        this.publicChannels.add(channel);
+        this.privateChannels.delete(channel);
+      }
+    }
 
     // Everything `post` and the egress guard rely on is now in place. Saying so before the
     // socket is what lets a caller with nothing to listen for stop here — and it is why an
@@ -209,18 +259,33 @@ export class SlackAdapter implements SurfaceAdapter {
     if (!onEvent) return;
 
     const resumeFrom = this.since;
+    // The listener goes on before the connection is up, so an envelope can already be
+    // queued when the start below fails.
+    this.socketSettled = new Promise((resolve) => {
+      this.releaseSocket = resolve;
+    });
     this.socket.on("slack_event", this.handleEnvelope);
     try {
       await this.socket.start();
+      // A `stop` and a fresh `start` can both have happened while that was pending. The
+      // gate, the listener and `onEvent` are single fields, so touching any of them now
+      // would be reaching into a run this one does not own.
+      if (session !== this.generation) return;
       this.listening = true;
+      this.releaseSocket(); // before the backfill, which enqueues through the same gate
       // Socket Mode has no replay. Connect first, then fill the earlier gap; deduplication
       // makes overlap safe and avoids a new gap between the history call and the socket.
-      if (resumeFrom !== undefined) await this.backfill(resumeFrom);
+      if (resumeFrom !== undefined) await this.backfill(resumeFrom, session);
     } catch (error) {
-      this.started = false;
-      this.socket.off?.("slack_event", this.handleEnvelope);
-      this.onEvent = undefined;
-      await this.socket.disconnect().catch(() => {});
+      // Same rule on the way out: a late failure must not unsubscribe, disconnect or
+      // invalidate a run that replaced this one. Still thrown — the caller asked this one.
+      if (session === this.generation) {
+        this.started = false;
+        this.socket.off?.("slack_event", this.handleEnvelope);
+        this.onEvent = undefined;
+        this.invalidate();
+        await this.socket.disconnect().catch(() => {});
+      }
       throw error;
     }
   }
@@ -284,18 +349,11 @@ export class SlackAdapter implements SurfaceAdapter {
   /**
    * Replies beneath a thread root this adapter posted — one `conversations.replies` walk.
    *
-   * Every way this can fail throws, and none of them answers `[]`. A probe mints a verdict
-   * from what comes back, so "nobody replied" has to stay distinguishable from "this read
-   * did not happen" — see {@link SurfaceAdapter.readThread}.
-   *
-   * `oldest: "0"` because a thread read is not a backfill: the caller wants everything
-   * under the root, not what arrived after some cursor. Slack returns the parent whatever
-   * `oldest` says, and the parent is not in its own thread — dropped by `ts` rather than by
-   * position, since a page boundary promises nothing about which message comes first.
-   *
-   * Normalized through `toSlackInboundEvent`, so a join notice or a hidden message is no
-   * more a reply here than it is a turn. One answer to "what counts as a message" rather
-   * than a second one that drifts.
+   * Every failure throws and none answers `[]`, per {@link SurfaceAdapter.readThread}.
+   * `oldest: "0"` because a thread read wants the whole thread, not what followed a cursor.
+   * Slack returns the parent whatever `oldest` says and it is not in its own thread, so it
+   * is dropped by `ts` — a page boundary promises nothing about order. Normalized through
+   * `toSlackInboundEvent`, so a join notice is no more a reply here than it is a turn.
    */
   async readThread(root: EventRef, limit?: number): Promise<readonly ThreadReply[]> {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before readThread()");
@@ -316,9 +374,16 @@ export class SlackAdapter implements SurfaceAdapter {
     // Sorted on the Slack `ts` rather than the ISO string it becomes: `ts` carries
     // microseconds and the ISO form is truncated to milliseconds, so two replies inside one
     // millisecond would tie and come back in whatever order the pages happened to arrive.
-    const replies = messages
+    const ordered = messages
       .filter((message) => message.ts !== at.ts)
-      .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0))
+      .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
+    // The same directory the inbound path fills, filled the same way before rendering.
+    // Sharing the map without sharing the lookup is what makes one mention read two ways
+    // depending on which door it came through — and a probe tallying replies is exactly
+    // the caller that would then disagree with the channel it is reading.
+    for (const message of ordered) await this.learnNames(message.text ?? "");
+
+    const replies = ordered
       .flatMap((message) => {
         const event = toSlackInboundEvent(
           { ...message, type: message.type ?? "message", channel: at.channel },
@@ -408,24 +473,77 @@ export class SlackAdapter implements SurfaceAdapter {
       this.listening = false;
       this.started = false;
       this.onEvent = undefined;
+      // Whatever is mid-lookup belongs to the run being stopped, and to nothing after it.
+      this.invalidate();
     }
   }
 
-  private readonly handleEnvelope = (payload: unknown): void => {
+  /**
+   * Ends the run that queued work belongs to.
+   *
+   * Every asynchronous producer here — a live envelope waiting on a lookup, a replay still
+   * paging history — stamps the run it started in, and `accept` drops anything stamped with
+   * a run that has ended. Both ways a run ends go through this, because the stamp is only
+   * worth anything if nothing can outlive it unstamped.
+   */
+  private invalidate(): void {
+    this.generation++;
+    this.chains.clear();
+    this.releaseSocket(); // parked work wakes to a moved generation; without this it hangs
+  }
+
+  /**
+   * Answers when this envelope has been delivered, which Socket Mode ignores and a caller
+   * that needs to know an event has landed can await. The ack above is deliberately not
+   * part of it — Slack retries an envelope that waits, so it goes first and alone.
+   */
+  private readonly handleEnvelope = async (payload: unknown): Promise<void> => {
     const envelope = payload as SocketEnvelope;
     // Acknowledge before normalization or user code. Slack retries envelopes that wait.
     if (envelope.ack) void envelope.ack().catch(() => {});
     if (envelope.type !== "events_api" || !envelope.body?.event) return;
-    this.accept(envelope.body.event);
+    await this.enqueue(envelope.body.event);
   };
 
-  private accept(message: SlackMessage): void {
+  /**
+   * Normalizes and delivers one message, behind everything already queued.
+   *
+   * The returned promise settles when *this* message has been delivered, which is what
+   * lets a backfill wait for its own replay without a second ordering rule.
+   */
+  private enqueue(message: SlackMessage, session = this.generation): Promise<void> {
+    const conversation = message.channel ?? "";
+    const generation = session;
+    // Errors are absorbed rather than left on the chain: one message nobody could
+    // normalize must not stop every message behind it in the same conversation.
+    const next = (this.chains.get(conversation) ?? Promise.resolve())
+      .then(() => this.accept(message, generation))
+      .catch(() => {});
+    this.chains.set(conversation, next);
+    // Only if nothing has queued behind it, or the entry dropped here is one another
+    // message is already waiting on.
+    void next.then(() => {
+      if (this.chains.get(conversation) === next) this.chains.delete(conversation);
+    });
+    return next;
+  }
+
+  private async accept(message: SlackMessage, generation: number): Promise<void> {
     if (!message.channel) return;
     // A DM cannot be addressed to anyone but this bot, and its conversation ID does not
     // exist until someone opens it — so it can never be configured ahead of time. The
     // app's `message.im` subscription is the switch; the guard still sees a DM as private.
     const direct = isDirectSlackChannel(message);
     if (!direct && !this.allowedChannels.has(message.channel)) return;
+    await this.socketSettled; // see the field: a replay passes through, the socket is up
+    // Checked before the lookup as well as after: a message already stale when its turn
+    // comes must not spend a `users.info` that the run still serving this conversation
+    // would wait behind.
+    if (generation !== this.generation) return;
+    // Before normalizing, because the text is rendered there and a name that arrives after
+    // is a name the brain never saw.
+    await this.learnNames(message.text ?? "");
+    if (generation !== this.generation) return;
     const normalized = toSlackInboundEvent(message, this.normalizeOptions());
     if (!normalized) return;
 
@@ -436,7 +554,13 @@ export class SlackAdapter implements SurfaceAdapter {
 
     if (direct) this.dmChannels.add(message.channel);
     this.since = Math.max(this.since ?? 0, Number(message.ts));
-    this.lastByChannel.set(normalized.channel.id, contextOf(normalized));
+    // The newest, not the most recently processed: `start` connects before it fills the
+    // gap, so a replay lands among live messages older than it.
+    const context = contextOf(normalized);
+    const latest = this.lastByChannel.get(normalized.channel.id);
+    if (!latest || Number(context.eventTs) > Number(latest.eventTs)) {
+      this.lastByChannel.set(normalized.channel.id, context);
+    }
     this.onEvent?.(normalized);
   }
 
@@ -447,7 +571,30 @@ export class SlackAdapter implements SurfaceAdapter {
       botId: this.botId,
       privateChannels: this.privateChannels,
       publicChannels: this.publicChannels,
+      memberNames: this.memberNames,
     };
+  }
+
+  /**
+   * Names the members a message mentions, so normalization can render them.
+   *
+   * Sequential, because Slack rate-limits `users.info` per workspace and a burst is what
+   * that limit is aimed at. A refusal is remembered: an id Slack will not name would
+   * otherwise cost a failed call per message forever.
+   */
+  private async learnNames(text: string): Promise<void> {
+    for (const id of new Set(slackMentionedMembers(text))) {
+      if (id === this.botUserId || this.memberNames.has(id) || this.unnamed.has(id)) continue;
+      try {
+        const name = await this.api.userName(id);
+        if (name) this.memberNames.set(id, name);
+        else this.unnamed.add(id);
+      } catch (error) {
+        // Only a refusal that will not change on its own. `unnamed` is never cleared, so a
+        // transient failure recorded here renders that member by id for the whole process.
+        if (isPermanentNameFailure(error)) this.unnamed.add(id);
+      }
+    }
   }
 
   /**
@@ -462,18 +609,25 @@ export class SlackAdapter implements SurfaceAdapter {
    * outside the history window, and Slack offers no way to enumerate the threads that
    * moved in a period — only the replies of a thread you can already name.
    */
-  private async backfill(oldest: number): Promise<void> {
-    for (const channel of [...this.allowedChannels, ...(await this.directChannels())]) {
-      const parents = await this.collect((cursor) =>
-        this.api.history({ channel, oldest: String(oldest), cursor }),
+  private async backfill(oldest: number, session: number): Promise<void> {
+    const live = () => session === this.generation;
+    // Built before the walk it guards: enumerating DMs pages too, and a `stop` landing in
+    // the middle of that is the same waste as one landing in the middle of a history page.
+    for (const channel of [...this.allowedChannels, ...(await this.directChannels(live))]) {
+      if (!live()) return;
+      const parents = await this.collect(
+        (cursor) => this.api.history({ channel, oldest: String(oldest), cursor }),
+        live,
       );
 
       const missed = [...parents];
       for (const parent of parents) {
+        if (!live()) return;
         if (!hasRepliesSince(parent, oldest)) continue;
         missed.push(
-          ...(await this.collect((cursor) =>
-            this.api.replies({ channel, ts: parent.ts!, oldest: String(oldest), cursor }),
+          ...(await this.collect(
+            (cursor) => this.api.replies({ channel, ts: parent.ts!, oldest: String(oldest), cursor }),
+            live,
           )),
         );
       }
@@ -483,37 +637,30 @@ export class SlackAdapter implements SurfaceAdapter {
       const replay = missed
         .filter((message) => Number(message.ts ?? 0) > oldest)
         .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
-      for (const message of replay) {
-        this.accept({
-          ...message,
-          type: message.type ?? "message",
-          channel,
-          channel_type: this.privateChannels.has(channel) ? "group" : "channel",
-        });
-      }
+      // One turn, not one await per message: each await was a point where a live message
+      // could land in the middle of a sorted replay. The chain already orders them.
+      await Promise.all(
+        replay.map((message) =>
+          this.enqueue({
+            ...message,
+            type: message.type ?? "message",
+            channel,
+            channel_type: this.privateChannels.has(channel) ? "group" : "channel",
+          }, session),
+        ),
+      );
     }
   }
 
   /**
-   * The DMs a backfill has to cover, which no configuration could have named.
+   * The DMs a backfill has to cover. `channels` never holds one — the id does not exist
+   * until someone opens it — and `dmChannels` is empty until `accept` fills it, so without
+   * this a DM sent while the agent was down is in neither set and is lost.
    *
-   * `channels` never holds a DM — its conversation id does not exist until someone opens
-   * it — and `dmChannels` is populated by `accept`, so at startup it is empty. Between
-   * them that left a DM sent while the agent was down in neither set: nothing enumerated
-   * it, nothing replayed it, and the cursor moved past it the moment any channel message
-   * was accepted. The message was gone, and a person who had asked something in a DM got
-   * silence back from an agent that looked healthy.
-   *
-   * **Read, never granted.** These ids are backfilled and nothing else. A DM still earns
-   * the right to be answered by having spoken, which `accept` is what records — so a
-   * conversation with nothing in the gap stays one this adapter may not post into, and
-   * enumerating open DMs cannot become a way to open one.
-   *
-   * A failed lookup costs the backfill, not the launch. Without `im:read` there is nothing
-   * to enumerate, and taking a working channel-only agent down over it would be refusing
-   * the wrong thing.
+   * **Read, never granted:** these ids are backfilled and nothing else. A DM still earns a
+   * reply by having spoken. A failed lookup costs the backfill, not the launch.
    */
-  private async directChannels(): Promise<string[]> {
+  private async directChannels(live: () => boolean): Promise<string[]> {
     const ids: string[] = [];
     try {
       let cursor: string | undefined;
@@ -521,7 +668,7 @@ export class SlackAdapter implements SurfaceAdapter {
         const page = await this.api.openDirectChannels(cursor);
         ids.push(...(page.ids ?? []));
         cursor = page.nextCursor || undefined;
-      } while (cursor);
+      } while (cursor && live());
     } catch {
       // Whatever paged in before the failure is still worth refilling. Without `im:read`
       // that is nothing, which is the case this catch is really here for.
@@ -529,15 +676,23 @@ export class SlackAdapter implements SurfaceAdapter {
     return ids;
   }
 
-  /** Drains one cursor-paged endpoint. Slack pages backwards in time; the caller sorts. */
-  private async collect(page: (cursor?: string) => Promise<SlackHistoryPage>): Promise<SlackMessage[]> {
+  /**
+   * Drains one cursor-paged endpoint. Slack pages backwards in time; the caller sorts.
+   *
+   * `live` is asked between pages, so a walk whose run has ended stops. A backfill passes
+   * it; a thread read does not, being a caller's request rather than background work.
+   */
+  private async collect(
+    page: (cursor?: string) => Promise<SlackHistoryPage>,
+    live: () => boolean = () => true,
+  ): Promise<SlackMessage[]> {
     const messages: SlackMessage[] = [];
     let cursor: string | undefined;
     do {
       const result = await page(cursor);
       messages.push(...(result.messages ?? []));
       cursor = result.nextCursor || undefined;
-    } while (cursor);
+    } while (cursor && live());
     return messages;
   }
 
@@ -558,9 +713,11 @@ export class SlackAdapter implements SurfaceAdapter {
    * `&lt;`, `&gt;` and `&amp;` on the way in, so the brain reads characters and never
    * Slack's encoding — but with no encoder on the way out the round trip is not symmetric,
    * and text that reached the brain carrying `<@U0ALICE>` went back out as live markup and
-   * notified that member. Quoting the message that woke the agent is ordinary and must not
-   * be an act of addressing. Addressing is `mentions`, whose ids {@link address} validates
-   * and whose count the `post_message` audit line carries.
+   * notified that member. Inbound no longer hands that form over — a mention arrives named,
+   * as `@alice` — so what this still catches is a brain writing `<@…>` of its own, which
+   * nothing upstream screens. Quoting the message that woke the agent is ordinary and must
+   * not be an act of addressing. Addressing is `mentions`, whose ids {@link address}
+   * validates and whose count the `post_message` audit line carries.
    *
    * A broadcast is escaped by those same replacements and logged rather than refused.
    * `&lt;!channel&gt;` renders as characters and notifies nobody, so the throw that stood
@@ -681,6 +838,12 @@ export class WebSlackApi implements SlackApiClient {
     return response.ts;
   }
 
+  /** `display_name` is what the workspace shows; the rest are Slack's own fallbacks. */
+  async userName(id: string): Promise<string | undefined> {
+    const user = (await this.client.users.info({ user: id })).user;
+    return user?.profile?.display_name || user?.profile?.real_name || user?.name;
+  }
+
   async addReaction(args: { channel: string; timestamp: string; name: string }): Promise<void> {
     await this.client.reactions.add(args);
   }
@@ -754,6 +917,25 @@ function address(mentions: readonly string[]): string {
     }
   }
   return `${mentions.map((id) => `<@${id}>`).join(" ")} `;
+}
+
+/**
+ * `users.info` failures that outlast the request, so the id is worth not asking about again.
+ *
+ * Read off `data.error` like {@link isAlreadyReacted}, and deliberately a short list: the
+ * default `WebClient` retries 429 itself, so what reaches this is usually a network fault,
+ * which must stay retryable. Everything unrecognised is treated that way.
+ */
+const PERMANENT_NAME_FAILURES = new Set([
+  "missing_scope",
+  "not_allowed_token_type",
+  "user_not_found",
+  "account_inactive",
+]);
+
+function isPermanentNameFailure(error: unknown): boolean {
+  const code = (error as { data?: { error?: unknown } } | null)?.data?.error;
+  return typeof code === "string" && PERMANENT_NAME_FAILURES.has(code);
 }
 
 /**

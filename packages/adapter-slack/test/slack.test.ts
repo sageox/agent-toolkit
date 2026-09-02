@@ -12,6 +12,8 @@ import {
 class FakeSocket implements SlackSocketClient {
   listener?: (payload: unknown) => void;
   started = false;
+  /** Connect attempts, so a stale run opening a second one is visible. */
+  starts = 0;
   disconnected = false;
 
   on(_event: string, listener: (payload: unknown) => void): void {
@@ -24,14 +26,20 @@ class FakeSocket implements SlackSocketClient {
 
   async start(): Promise<void> {
     this.started = true;
+    this.starts += 1;
   }
 
   async disconnect(): Promise<void> {
     this.disconnected = true;
   }
 
-  emit(event: Record<string, unknown>, ack = async () => {}): void {
-    this.listener?.({ type: "events_api", body: { event }, ack });
+  /** Answers when the adapter has finished with the envelope: delivery is not synchronous. */
+  emit(event: Record<string, unknown>, ack = async () => {}): unknown {
+    // Not optional chaining. An emit with nobody subscribed answers `undefined`, and the
+    // lifecycle tests here assert on an empty result — so a subscription that quietly went
+    // missing would read as the adapter correctly declining to deliver.
+    if (!this.listener) throw new Error("emit with no socket listener installed");
+    return this.listener({ type: "events_api", body: { event }, ack });
   }
 }
 
@@ -63,6 +71,12 @@ class FakeApi implements SlackApiClient {
   async replies(args: { channel: string; ts: string; oldest: string; cursor?: string }) {
     this.replyCalls.push(args);
     return this.threads.shift() ?? {};
+  }
+  names: Record<string, string> = {};
+  nameCalls: string[] = [];
+  async userName(id: string): Promise<string | undefined> {
+    this.nameCalls.push(id);
+    return this.names[id];
   }
   async postMessage(args: { channel: string; text: string; threadTs?: string }) {
     this.posts.push(args);
@@ -112,10 +126,10 @@ describe("SlackAdapter", () => {
     let acked = false;
     await instance.start((event) => got.push(event));
 
-    socket.emit(mention(), async () => {
+    await socket.emit(mention(), async () => {
       acked = true;
     });
-    socket.emit({ ...mention("1786761000.000200"), channel: "GOTHER" });
+    await socket.emit({ ...mention("1786761000.000200"), channel: "GOTHER" });
     await Promise.resolve();
 
     expect(acked).toBe(true);
@@ -127,7 +141,7 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention("1786761000.000200", { thread_ts: "1786760000.000001" }));
+    await socket.emit(mention("1786761000.000200", { thread_ts: "1786760000.000001" }));
 
     const acknowledged = await instance.react(got[0], "👀");
     await instance.send(got[0].channel, { text: "all green" });
@@ -148,8 +162,8 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention("1786761000.000100"));
-    socket.emit(mention("1786761000.000200"));
+    await socket.emit(mention("1786761000.000100"));
+    await socket.emit(mention("1786761000.000200"));
 
     await instance.send(got[0].channel, { text: "first reply" }, got[0]);
 
@@ -268,6 +282,29 @@ describe("SlackAdapter", () => {
     expect(await instance.readThread!(root!, 0)).toEqual([]);
   });
 
+  it("names mentions in a thread read the same way the inbound path does", async () => {
+    const { instance, api } = adapter();
+    api.names = { U0ALICE: "alice" };
+    await instance.start(() => {});
+    const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
+    const root = await instance.post(channel, { text: "roll call" }, undefined, ["U0DRONE"]);
+
+    api.threads = [
+      {
+        messages: [
+          { type: "message", user: "UBOT", text: "roll call", ts: "1786761001.000200" },
+          { type: "message", user: "U0DRONE", text: "ask <@U0ALICE>", ts: "1786761003.000000" },
+        ],
+      },
+    ];
+
+    // A probe tallying replies must not read a mention differently from the channel it is
+    // reading — sharing the directory without filling it is what made the two disagree.
+    const replies = await instance.readThread!(root!);
+    expect(replies.map((reply) => reply.text)).toEqual(["ask @alice"]);
+    expect(api.nameCalls).toEqual(["U0ALICE"]);
+  });
+
   it("refuses a thread read it cannot answer, rather than reporting an empty thread", async () => {
     const { instance, api } = adapter();
     const root = { surface: "slack", nativeId: "GENG:1786761001.000200" } as const;
@@ -316,19 +353,584 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    // Slack delivers a mention of a third party as live markup and `normalizeSlackText`
-    // hands it to the brain as those characters, so quoting the message that woke the agent
-    // is enough to page whoever it named — through none of the screening `mentions` gets.
-    socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE> & <@U0BOB>" }));
+    // Quoting the message that woke the agent must not page whoever it named. Two
+    // independent things now stop it, and this asserts both: the mention reaches the brain
+    // as a name rather than markup, and what the brain sends is escaped regardless.
+    api.names = { U0ALICE: "alice" };
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE> & <@U0BOB>" }));
+    expect(got[0].text).toBe("ask @alice & @U0BOB");
 
     await instance.send(got[0].channel, { text: got[0].text }, got[0]);
-    expect(api.posts[0].text).toBe("ask &lt;@U0ALICE&gt; &amp; &lt;@U0BOB&gt;");
+    expect(api.posts[0].text).toBe("ask @alice &amp; @U0BOB");
 
     // The recipients the adapter builds from validated ids stay markup; the text beside
     // them does not, so the two ways to address somebody have not become one again.
     const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
     await instance.post(channel, { text: "who is <@U0ALICE>?" }, undefined, ["U0DRONE"]);
     expect(api.posts[1].text).toBe("<@U0DRONE> who is &lt;@U0ALICE&gt;?");
+  });
+
+  it("names the members a message mentions, and asks Slack about each one once", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    api.names = { U0ALICE: "alice", U0BOB: "bob" };
+    await instance.start((event) => got.push(event));
+
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE> and <@U0BOB>" }));
+    await socket.emit(mention("1786761000.000200", { text: "<@UBOT> and <@U0ALICE> again" }));
+
+    expect(got.map((event) => event.text)).toEqual(["ask @alice and @bob", "and @alice again"]);
+    // Each member once across both messages, and never the bot: its own mention is stripped.
+    expect(api.nameCalls).toEqual(["U0ALICE", "U0BOB"]);
+  });
+
+  it("keeps a mention Slack will not name, and stops asking about it", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    // No `users:read`. Slack reports it on `data.error`, which is how a refusal that will
+    // not change is told apart from a request that merely failed.
+    api.userName = async (id: string) => {
+      api.nameCalls.push(id);
+      throw Object.assign(new Error("missing_scope"), { data: { error: "missing_scope" } });
+    };
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0GHOST>" }));
+    await socket.emit(mention("1786761000.000200", { text: "<@UBOT> ask <@U0GHOST> again" }));
+
+    // The mention still reads as a mention. Dropping it would lose the fact that somebody
+    // was named, which is worse than naming them by id.
+    expect(got.map((event) => event.text)).toEqual(["ask @U0GHOST", "ask @U0GHOST again"]);
+    // Asked once. A refusal that is not remembered spends the rate limit re-asking forever.
+    expect(api.nameCalls).toEqual(["U0GHOST"]);
+  });
+
+  it("retries a lookup that merely failed, rather than naming by id forever", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    // A network fault, not a refusal. `WebClient` retries 429 itself, so what reaches this
+    // is usually of this kind — and `unnamed` is never cleared, so caching it would render
+    // that member by id for the life of the process.
+    let attempts = 0;
+    api.userName = async (id: string) => {
+      api.nameCalls.push(id);
+      attempts += 1;
+      if (attempts === 1) throw new Error("socket hang up");
+      return "alice";
+    };
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+    await socket.emit(mention("1786761000.000200", { text: "<@UBOT> ask <@U0ALICE>" }));
+
+    expect(got.map((event) => event.text)).toEqual(["ask @U0ALICE", "ask @alice"]);
+    expect(api.nameCalls).toEqual(["U0ALICE", "U0ALICE"]);
+  });
+
+  it("delivers in arrival order even when the first message waits on a lookup", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    // The first message needs a name and the second does not. Without the chain the second
+    // overtakes it, `ChannelQueue` submits them reversed, and the agent answers backwards.
+    let release: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    api.userName = async (id: string) => {
+      await held;
+      return id === "U0ALICE" ? "alice" : undefined;
+    };
+    const first = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+    const second = socket.emit(mention("1786761000.000200", { text: "<@UBOT> second" }));
+
+    expect(got).toHaveLength(0);
+    release!();
+    await Promise.all([first, second]);
+
+    expect(got.map((event) => event.text)).toEqual(["ask @alice", "second"]);
+  });
+
+  it("believes the directory over a label the sending client embedded", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    api.names = { U0ALICE: "alice" };
+    await instance.start((event) => got.push(event));
+
+    // The two disagree after a rename. On the reading that a label decides, the brain is
+    // told a different person was named than the one Slack will actually notify.
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE|bob>" }));
+    // With nothing in the directory the label is still better than the bare id.
+    await socket.emit(mention("1786761000.000200", { text: "<@UBOT> and <@U0CAROL|carol>" }));
+
+    expect(got.map((event) => event.text)).toEqual(["ask @alice", "and @carol"]);
+  });
+
+  it("does not let one conversation's lookups hold up another's", async () => {
+    const { instance, socket, api } = adapter({
+      channels: [
+        { id: "GENG", reply: "private" },
+        { id: "GOPS", reply: "private" },
+      ],
+    });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    let release: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    api.userName = async () => {
+      await held;
+      return "alice";
+    };
+    // GENG is stuck on a lookup. GOPS mentions nobody and must not wait behind it —
+    // ordering is what `ChannelQueue` needs per channel, and it runs channels in parallel.
+    const stuck = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+    await socket.emit({ ...mention("1786761000.000200"), channel: "GOPS" });
+
+    expect(got.map((event) => event.channel.id)).toEqual(["GOPS"]);
+    release!();
+    await stuck;
+    expect(got.map((event) => event.channel.id)).toEqual(["GOPS", "GENG"]);
+  });
+
+  it("drops a message still resolving when the adapter is stopped", async () => {
+    const { instance, socket, api } = adapter();
+    const first: InboundEvent[] = [];
+    await instance.start((event) => first.push(event));
+
+    let release: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    api.userName = async () => {
+      await held;
+      return "alice";
+    };
+    const inFlight = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+
+    // Stopped and restarted while that lookup is outstanding. The queued message belongs to
+    // the run that heard it: delivering it to the new session's callback would answer a
+    // question from before the restart, and leave its reply target behind in `lastByChannel`.
+    await instance.stop();
+    const second: InboundEvent[] = [];
+    await instance.start((event) => second.push(event));
+    release!();
+    await inFlight;
+
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+    // The new run still works, and threads onto its own message rather than the dropped one.
+    await socket.emit(mention("1786761000.000300"));
+    await instance.send({ surface: "slack", id: "GENG", isPublic: false }, { text: "ok" });
+    expect(api.posts[0].threadTs).toBe("1786761000.000300");
+  });
+
+  it("delivers nothing from a start that never connected, and not into the next one", async () => {
+    const { instance, socket } = adapter();
+    const first: InboundEvent[] = [];
+    let queued: unknown;
+    // The listener is registered before the connection is up, so an envelope can arrive
+    // here. No held lookup and a full drain before the failure, so it has every chance to
+    // complete: if delivery were merely racing the cleanup, this is where it would win.
+    socket.start = async () => {
+      queued = socket.emit(mention("1786761000.000100"));
+      await new Promise((resolve) => setImmediate(resolve));
+      throw new Error("socket mode unavailable");
+    };
+
+    await expect(instance.start((event) => first.push(event))).rejects.toThrow(/unavailable/);
+    await queued;
+
+    // `start` threw, so the caller believes this adapter never came up. A turn spent
+    // answering under an identity that is not online would make that a lie.
+    expect(first).toEqual([]);
+
+    // Nor does it surface later: the run it belonged to is over, and the next one is not
+    // the same run.
+    const second: InboundEvent[] = [];
+    socket.start = async () => {};
+    await instance.start((event) => second.push(event));
+    await queued;
+    expect(second).toEqual([]);
+
+    // Nor a message for this run to thread onto. Read before it hears anything of its own,
+    // since `lastByChannel` keeps the newest and a live message would mask a stale write.
+    await expect(
+      instance.send({ surface: "slack", id: "GENG", isPublic: false }, { text: "ok" }),
+    ).rejects.toThrow(/no inbound context/);
+
+    // And that run works normally.
+    await socket.emit(mention("1786761000.000200"));
+    expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000200"]);
+  });
+
+  // `start` claims nothing until each of these answers, so a `stop` while one is in flight
+  // has to leave the call that made it unable to take the adapter over.
+  const heldStartCases: Array<[string, (api: FakeApi, gate: () => Promise<void>) => void]> = [
+    [
+      "authTest",
+      (api, gate) => {
+        const real = api.authTest.bind(api);
+        api.authTest = async () => {
+          await gate();
+          return real();
+        };
+      },
+    ],
+    [
+      "channelIsPrivate",
+      (api, gate) => {
+        const real = api.channelIsPrivate.bind(api);
+        api.channelIsPrivate = async (channel: string) => {
+          await gate();
+          return real(channel);
+        };
+      },
+    ],
+  ];
+
+  for (const [call, install] of heldStartCases) {
+    it(`does not let a start held in ${call} take over the run that replaced it`, async () => {
+      const { instance, socket, api } = adapter();
+      let release!: () => void;
+      let arrived!: () => void;
+      const blocked = new Promise<void>((resolve) => (release = resolve));
+      const inCall = new Promise<void>((resolve) => (arrived = resolve));
+      let held = false;
+      install(api, async () => {
+        if (held) return; // only the first run waits; the replacement runs through
+        held = true;
+        arrived();
+        await blocked;
+      });
+
+      const first: InboundEvent[] = [];
+      const starting = instance.start((event) => first.push(event));
+      await inCall;
+      await instance.stop();
+
+      const second: InboundEvent[] = [];
+      await instance.start((event) => second.push(event));
+      const connects = socket.starts;
+
+      release();
+      await starting;
+
+      // It must not have taken the callback, nor connected a socket of its own.
+      await socket.emit(mention());
+      expect(first).toEqual([]);
+      expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000100"]);
+      expect(socket.starts).toBe(connects);
+    });
+  }
+
+  it("does not let a stale start open the gate of the run that replaced it", async () => {
+    const { instance, socket } = adapter();
+    const gate = (signal: { at: () => void; release: Promise<void> }) => async () => {
+      signal.at();
+      await signal.release;
+    };
+    const make = () => {
+      let at!: () => void;
+      let go!: () => void;
+      const arrived = new Promise<void>((r) => (at = r));
+      const release = new Promise<void>((r) => (go = r));
+      return { at, go, arrived, release };
+    };
+
+    const one = make();
+    const two = make();
+    socket.start = gate(one);
+    const first: InboundEvent[] = [];
+    const starting = instance.start((event) => first.push(event));
+    await one.arrived;
+    await instance.stop();
+
+    socket.start = gate(two);
+    const second: InboundEvent[] = [];
+    const restarting = instance.start((event) => second.push(event));
+    await two.arrived;
+    const queued = socket.emit(mention("1786761000.000100"));
+
+    // The first run connects late. Its `releaseSocket` is the field the second run just
+    // overwrote, so without a check it opens a gate belonging to a connection that is
+    // still pending.
+    one.go();
+    await starting;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(second).toEqual([]);
+
+    two.go();
+    await restarting;
+    await queued;
+    expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000100"]);
+  });
+
+  it("does not let a stale start tear down the run that replaced it", async () => {
+    const { instance, socket } = adapter();
+    let failFirst!: (error: Error) => void;
+    const firstConnect = new Promise<void>((_resolve, reject) => (failFirst = reject));
+    let arrived!: () => void;
+    const atFirstConnect = new Promise<void>((r) => (arrived = r));
+    socket.start = async () => {
+      arrived();
+      await firstConnect;
+    };
+
+    const first: InboundEvent[] = [];
+    const starting = instance.start((event) => first.push(event));
+    await atFirstConnect;
+    await instance.stop();
+
+    socket.start = async () => {};
+    const second: InboundEvent[] = [];
+    await instance.start((event) => second.push(event));
+
+    // The first run fails after the second is up. Its cleanup would otherwise unsubscribe
+    // the listener, clear the callback, invalidate the generation and disconnect — all of
+    // them the second run's.
+    failFirst(new Error("socket mode unavailable"));
+    await expect(starting).rejects.toThrow(/unavailable/);
+
+    await socket.emit(mention("1786761000.000200"));
+    expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000200"]);
+  });
+
+  it("abandons a replay when the adapter is stopped mid-backfill", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    const first: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inHistory = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    api.histories.push({ messages: [mention("1786761000.000100")] });
+    const pages = api.history.bind(api);
+    // Held *before* the replay is queued, which is the window that matters: a stop landing
+    // here means the messages this page turns into were never queued by a live run.
+    api.history = async (args) => {
+      entered();
+      await held;
+      return pages(args);
+    };
+
+    const starting = instance.start((event) => first.push(event));
+    await inHistory;
+    await instance.stop();
+
+    // The restart backfills nothing of its own, so anything the second run hears came from
+    // the replay the first run abandoned.
+    const second: InboundEvent[] = [];
+    api.history = async () => ({});
+    await instance.start((event) => second.push(event));
+    release!();
+    await starting;
+
+    // The replay belongs to the run that asked for it. Delivering it into the next run
+    // would answer a message from before the restart, and thread onto it afterwards.
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+  });
+
+  it("stops paging and starting reply walks once the run it belongs to has ended", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    const first: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inHistory = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const requested: Array<string | undefined> = [];
+    api.history = async (args) => {
+      requested.push(args.cursor);
+      if (args.cursor) return {};
+      entered();
+      await held;
+      // A page with more behind it, held until the run that asked for it has ended.
+      return {
+        messages: [
+          mention("1786761000.000100", {
+            text: "<@UBOT> ask <@U0ALICE>",
+            thread_ts: "1786761000.000100",
+            latest_reply: "1786761000.000300",
+          }),
+        ],
+        nextCursor: "page2",
+      };
+    };
+
+    const starting = instance.start((event) => first.push(event));
+    await inHistory;
+    await instance.stop();
+    release!();
+    await starting;
+
+    // Paging to the end of a gap on behalf of a run that has ended is work nobody asked
+    // for, against a rate limit the next run needs.
+    expect(requested).toEqual([undefined]);
+    // Nor is a reply walk started for a thread that moved: the page said so, but the run
+    // that would have read it is over.
+    expect(api.replyCalls).toEqual([]);
+    expect(first).toEqual([]);
+  });
+
+  it("spends no lookup on a message already stale when its turn comes", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    const looked: string[] = [];
+    let release: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered: () => void;
+    const inLookup = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    api.userName = async (id: string) => {
+      looked.push(id);
+      if (id === "U0ALICE") {
+        entered();
+        await held;
+      }
+      return id.toLowerCase();
+    };
+    await instance.start((event) => got.push(event));
+
+    // Same conversation, so the second waits behind the first. By the time its turn comes
+    // the run is over — and a chain is per conversation, so a lookup it spends is one the
+    // run actually serving that conversation waits behind.
+    const a = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+    const b = socket.emit(mention("1786761000.000200", { text: "<@UBOT> ask <@U0BOB>" }));
+    // Stopped once the first lookup is genuinely in flight, so the run was live when it
+    // began. Stopping earlier would make both messages stale and prove nothing about the
+    // second one in particular.
+    await inLookup;
+    await instance.stop();
+    release!();
+    await Promise.all([a, b]);
+
+    expect(looked).toEqual(["U0ALICE"]);
+    expect(got).toEqual([]);
+  });
+
+  it("keeps a sorted replay contiguous when a live message lands mid-backfill", async () => {
+    const { instance, socket, api } = adapter({ since: 1786760000 });
+    const got: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inLookup = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    api.userName = async () => {
+      entered();
+      await held;
+      return "alice";
+    };
+    // History pages newest-first, so the replay sorts to 000100 then 000200. Only the
+    // first mentions anyone, which is what holds the replay open midway through.
+    api.histories.push({
+      messages: [
+        mention("1786761000.000200"),
+        mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }),
+      ],
+    });
+
+    const starting = instance.start((event) => got.push(event));
+    await inLookup;
+    const live = socket.emit(mention("1786761000.000400"));
+    release!();
+    await Promise.all([starting, live]);
+
+    // The live message must not land between two replayed ones. If it does, the older
+    // replay that follows it is the last thing written to the reply target.
+    expect(got.map((event) => event.id.nativeId)).toEqual([
+      "GENG:1786761000.000100",
+      "GENG:1786761000.000200",
+      "GENG:1786761000.000400",
+    ]);
+    await instance.send({ surface: "slack", id: "GENG", isPublic: false }, { text: "ok" });
+    expect(api.posts[0].threadTs).toBe("1786761000.000400");
+  });
+
+  it("stops enumerating DMs once the run it belongs to has ended", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    const got: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inDms = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const requested: Array<string | undefined> = [];
+    api.openDirectChannels = async (cursor?: string) => {
+      requested.push(cursor);
+      if (cursor) return { ids: ["DLATE"] };
+      entered();
+      await held;
+      return { ids: ["DALICE"], nextCursor: "page2" };
+    };
+
+    const starting = instance.start((event) => got.push(event));
+    await inDms;
+    await instance.stop();
+    release!();
+    await starting;
+
+    // Enumerating DMs pages like everything else here, and paging for a run that has ended
+    // spends a rate limit the next run needs.
+    expect(requested).toEqual([undefined]);
+    expect(got).toEqual([]);
+  });
+
+  it("threads a context-free reply onto the newest message, not the last replayed one", async () => {
+    const { instance, socket, api } = adapter({ since: 1786760000 });
+    const got: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inHistory = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    api.histories.push({ messages: [mention("1786761000.000100")] });
+    const pages = api.history.bind(api);
+    // `start` connects before it fills the gap, so a live message can arrive while history
+    // is still being collected — and it is newer than everything the replay will contain.
+    api.history = async (args) => {
+      entered();
+      await held;
+      return pages(args);
+    };
+
+    const starting = instance.start((event) => got.push(event));
+    await inHistory;
+    const live = socket.emit(mention("1786761000.000900"));
+    release!();
+    await Promise.all([starting, live]);
+
+    // The replay lands after the live message and is older than it. The reply target is
+    // the latest thing said, not whatever was processed last.
+    expect(got.map((event) => event.id.nativeId)).toEqual([
+      "GENG:1786761000.000900",
+      "GENG:1786761000.000100",
+    ]);
+    await instance.send({ surface: "slack", id: "GENG", isPublic: false }, { text: "ok" });
+    expect(api.posts[0].threadTs).toBe("1786761000.000900");
   });
 
   it("escapes a broadcast in the brain's text and logs it, rather than killing the turn", async () => {
@@ -339,10 +941,10 @@ describe("SlackAdapter", () => {
       const got: InboundEvent[] = [];
       await instance.start((event) => got.push(event));
       // Somebody used `@channel`, which Slack delivers as live markup.
-      socket.emit(mention("1786761000.000100", { text: "<@UBOT> <!channel> deploy now" }));
+      await socket.emit(mention("1786761000.000100", { text: "<@UBOT> <!channel> deploy now" }));
       // Somebody typed those characters, which Slack escapes on the wire and
       // `normalizeSlackText` un-escapes — so the brain reads a broadcast nobody sent.
-      socket.emit(mention("1786761000.000200", { text: "<@UBOT> what does &lt;!channel&gt; do?" }));
+      await socket.emit(mention("1786761000.000200", { text: "<@UBOT> what does &lt;!channel&gt; do?" }));
       expect(got.map((event) => event.text)).toEqual([
         "<!channel> deploy now",
         "what does <!channel> do?",
@@ -395,7 +997,7 @@ describe("SlackAdapter", () => {
       });
     };
     await instance.start((event) => got.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
 
     const adding = instance.react(got[0], "👀");
     // Nothing can be removed yet, and not because anything here is holding it back: the
@@ -414,7 +1016,7 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
 
     const acknowledged = await instance.react(got[0], "👀");
     await instance.react(got[0], ":tada:");
@@ -442,7 +1044,7 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
 
     const first = await instance.react(got[0], "👀");
     api.addReaction = async () => {
@@ -473,7 +1075,7 @@ describe("SlackAdapter", () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
 
     await instance.react(got[0], "rocket");
     await instance.react(got[0], ":sparkles:");
@@ -491,7 +1093,7 @@ describe("SlackAdapter", () => {
     const got: InboundEvent[] = [];
 
     await instance.start((event) => got.push(event));
-    socket.emit(mention("1786761000.000200"));
+    await socket.emit(mention("1786761000.000200"));
 
     expect(socket.started).toBe(true);
     expect(api.historyCalls).toEqual([
@@ -623,7 +1225,7 @@ describe("SlackAdapter", () => {
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
 
-    socket.emit({
+    await socket.emit({
       type: "message",
       channel: "D9001",
       channel_type: "im",
@@ -649,7 +1251,7 @@ describe("SlackAdapter", () => {
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
 
-    socket.emit({
+    await socket.emit({
       type: "message",
       channel: "D9001",
       channel_type: "im",
@@ -670,10 +1272,10 @@ describe("SlackAdapter", () => {
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
 
-    socket.emit(mention("1786761000.000001"));
+    await socket.emit(mention("1786761000.000001"));
     const acknowledged = await instance.react(got[0], "👀");
     for (let i = 2; i <= 2_100; i++) {
-      socket.emit(mention(`1786761000.${String(i).padStart(6, "0")}`));
+      await socket.emit(mention(`1786761000.${String(i).padStart(6, "0")}`));
     }
 
     await instance.send(got[0].channel, { text: "answer" }, got[0]);
@@ -693,11 +1295,11 @@ describe("SlackAdapter", () => {
       const { instance, socket, api } = adapter();
       const got: InboundEvent[] = [];
       await instance.start((event) => got.push(event));
-      socket.emit(mention("1786761000.000001"));
+      await socket.emit(mention("1786761000.000001"));
       const acknowledged = await instance.react(got[0], "👀");
 
       vi.setSystemTime(Date.now() + 60 * 60_000);
-      socket.emit(mention("1786761000.000002"));
+      await socket.emit(mention("1786761000.000002"));
 
       await instance.send(got[0].channel, { text: "worth the wait" }, got[0]);
       await instance.unreact(acknowledged!.ref);
@@ -727,6 +1329,35 @@ describe("SlackAdapter", () => {
     await instance.stop();
     expect(socket.disconnected).toBe(true);
     expect(socket.listener).toBeUndefined();
+  });
+
+  it("classifies from configuration and this run's answers, not a previous run's", async () => {
+    const { instance, api } = adapter({
+      channels: [
+        { id: "GPRIV", reply: "private" },
+        { id: "CPUB", reply: "public" },
+      ],
+    });
+    // A first run in which Slack contradicts both configured assertions.
+    api.channelIsPrivate = async (channel: string) => channel !== "GPRIV";
+    await instance.start(() => {});
+    expect(instance.postTargets()).toEqual([
+      { surface: "slack", id: "GPRIV", isPublic: true },
+      { surface: "slack", id: "CPUB", isPublic: false },
+    ]);
+    await instance.stop();
+
+    // A second run that cannot ask. Both sets outlive the stop, so without a reset the
+    // answers above still decide — including the one that would let a reply into a channel
+    // configured public.
+    api.channelIsPrivate = async () => {
+      throw new Error("missing_scope");
+    };
+    await instance.start(() => {});
+    expect(instance.postTargets()).toEqual([
+      { surface: "slack", id: "GPRIV", isPublic: false },
+      { surface: "slack", id: "CPUB", isPublic: true },
+    ]);
   });
 
   it("keeps an explicit is_private:false as false, not unknown", async () => {
@@ -760,7 +1391,7 @@ describe("SlackAdapter", () => {
 
     const events: InboundEvent[] = [];
     await instance.start((event) => events.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
     await Promise.resolve();
 
     expect(events[0]?.channel.isPublic).toBe(true);
@@ -784,7 +1415,7 @@ describe("SlackAdapter", () => {
 
     const events: InboundEvent[] = [];
     await instance.start((event) => events.push(event));
-    socket.emit(mention());
+    await socket.emit(mention());
     await Promise.resolve();
 
     expect(events[0]?.channel.isPublic).toBe(false);

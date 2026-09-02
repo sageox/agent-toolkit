@@ -33,6 +33,26 @@ export interface SlackNormalizeOptions {
    * answer, or the egress guard is deciding on the wrong fact.
    */
   publicChannels?: ReadonlySet<string>;
+  /**
+   * Member id to the name a person reads, for rendering the mentions in a message.
+   *
+   * Passed in rather than looked up, so this stays a pure function: resolving a name is a
+   * network call, and the adapter is what owns the cache and the ordering. An id missing
+   * from the map renders as itself, which is what every mention did before there was a map.
+   */
+  memberNames?: ReadonlyMap<string, string>;
+}
+
+/**
+ * A member mention, as Slack writes it in message text: `<@U0ALICE>`, or `<@U0ALICE|alice>`
+ * where an older client supplied the label. Also matches the bot's own id, which
+ * {@link normalizeSlackText} strips before this runs.
+ */
+export const SLACK_MENTION = /<@([UWB][A-Z0-9]+)(?:\|([^>]*))?>/g;
+
+/** Every member a message mentions, which is what the adapter has to resolve names for. */
+export function slackMentionedMembers(text: string): string[] {
+  return [...text.matchAll(SLACK_MENTION)].map((match) => match[1]);
 }
 
 const MESSAGE_SUBTYPES = new Set([undefined, "bot_message", "file_share", "me_message", "thread_broadcast"]);
@@ -94,7 +114,7 @@ export function toSlackInboundEvent(
       isSelf: authorId === opts.botUserId || (!!opts.botId && message.bot_id === opts.botId),
       isAgent: !!message.bot_id || authorId === opts.botUserId,
     },
-    text: normalizeSlackText(message.text, opts.botUserId),
+    text: normalizeSlackText(message.text, opts.botUserId, opts.memberNames),
     // A DM is itself a direct address; requiring an @mention inside it makes normal DMs deaf.
     mentionsMe: direct || mention || message.type === "app_mention",
     ...(root
@@ -127,12 +147,25 @@ export function parseSlackEventId(nativeId: string): { channel: string; ts: stri
 }
 
 /** Slack's three XML entities are the only ones its message text escapes. */
-function normalizeSlackText(text: string, botUserId: string): string {
+function normalizeSlackText(
+  text: string,
+  botUserId: string,
+  memberNames?: ReadonlyMap<string, string>,
+): string {
   const withoutMention = text.replace(
     new RegExp(`<@${escapeRegExp(botUserId)}(?:\\|[^>]+)?>`, "g"),
     "",
   );
-  return withoutMention
+  // Everyone else stays, named: `<@U0ALICE>` tells a brain somebody was addressed and not
+  // who. The directory outranks the label, which is whatever the sending client embedded
+  // and disagrees after a rename; the label beats a bare id, and a bare id still reads as
+  // a mention rather than vanishing. `@name` is text, not markup, so quoting it addresses
+  // nobody — the property `outboundText` keeps by escaping.
+  const named = withoutMention.replace(
+    SLACK_MENTION,
+    (_whole, id: string, label?: string) => `@${memberNames?.get(id) || label || id}`,
+  );
+  return named
     .replaceAll("&lt;", "<")
     .replaceAll("&gt;", ">")
     .replaceAll("&amp;", "&")
