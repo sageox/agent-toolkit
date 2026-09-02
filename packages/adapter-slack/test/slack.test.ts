@@ -32,7 +32,11 @@ class FakeSocket implements SlackSocketClient {
 
   /** Answers when the adapter has finished with the envelope: delivery is not synchronous. */
   emit(event: Record<string, unknown>, ack = async () => {}): unknown {
-    return this.listener?.({ type: "events_api", body: { event }, ack });
+    // Not optional chaining. An emit with nobody subscribed answers `undefined`, and the
+    // lifecycle tests here assert on an empty result — so a subscription that quietly went
+    // missing would read as the adapter correctly declining to deliver.
+    if (!this.listener) throw new Error("emit with no socket listener installed");
+    return this.listener({ type: "events_api", body: { event }, ack });
   }
 }
 
