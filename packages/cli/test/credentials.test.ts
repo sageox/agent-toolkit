@@ -339,11 +339,11 @@ describe("declared secretRefs", () => {
   });
 
   it("names run.jobSecrets when the ref that did not resolve is a job's own", () => {
-    // The arrangement above, spelled wrong: a credential moved to the mount only the job's
-    // Pods take, but left in `run.secrets`. The launch is refused — nothing here can tell
-    // that from a typo, and the whole surface goes down for a credential nothing read — so
-    // the message has to name the field that both isolates it and lets the agent start.
-    // The other two remedies it offers are "put it back on the gateway's mount".
+    // The arrangement above, spelled wrong: a credential moved to the directory only
+    // `job run` is given, but left in `run.secrets`. The launch is refused — nothing here
+    // can tell that from a typo, and the whole surface goes down for a credential nothing
+    // read — so the message has to name the field that both isolates it and lets the agent
+    // start. The other two remedies it offers are "put it back where the gateway reads it".
     for (const name of ["DEMO_NSEC", "DEMO_SLACK_BOT", "DEMO_SLACK_APP", "DEMO_TRACKER_KEY"]) {
       writeFileSync(join(secretsDir, name), "value");
     }
@@ -358,7 +358,85 @@ describe("declared secretRefs", () => {
     }
     expect(message).toMatch(/1 declared secret\(s\) did not resolve/);
     expect(message).toContain('jobs[0].run.secrets.GH_TOKEN (job "nightly")');
-    expect(message).toContain("jobs[0].run.jobSecrets");
+    expect(message).toContain("run.jobSecrets");
+  });
+
+  it("withholds that remedy from a ref the gateway itself also reads", () => {
+    // The hint is advice about one feature, and the feature sharing the ref is the one it
+    // is wrong for: a `private` checkout clones inside the gateway, so moving GITHUB_TOKEN
+    // to `run.jobSecrets` would leave repos.conf's declaration unresolved and the launch
+    // still refused. Which declaration was pushed first must not decide that — jobs are
+    // pushed before repos.conf, so first-wins would have sent the operator the wrong way.
+    const shared = loadManifest(`
+name: shared-demo
+brain: { provider: claude-acp }
+respondTo: anyone
+surfaces: [{ kind: console }]
+jobs:
+  - slug: nightly
+    archetype: sweep
+    description: A bounded pass over the repository.
+    trigger: { onRequest: true }
+    budget: { wallClockMs: 3600000 }
+    run: { command: node, args: ["nightly.ts"], secrets: { GH_TOKEN: GITHUB_TOKEN } }
+`);
+    const declared = declaredSecrets(shared, parseReposConf(PRIVATE_REPO));
+
+    expect(declared).toHaveLength(1);
+    expect(declared[0].where).toBe(
+      'jobs[0].run.secrets.GH_TOKEN (job "nightly") and repos.conf (private: service)',
+    );
+    expect(declared[0].hint).toBeUndefined();
+    expect(() => requireDeclaredSecrets(declared, { dir: secretsDir })).toThrow(
+      /GITHUB_TOKEN/,
+    );
+    let message = "";
+    try {
+      requireDeclaredSecrets(declared, { dir: secretsDir });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).not.toContain("jobSecrets");
+  });
+
+  it("keeps that remedy for a ref two jobs share, since it is true of both", () => {
+    // Two jobs that both need the credential can both move it, so the remedy survives —
+    // which is why the hint names no job index. `where` already names every line, and a
+    // remedy true of both has to read as one remedy rather than as advice about jobs[0].
+    const twoJobs = loadManifest(`
+name: two-job-demo
+brain: { provider: claude-acp }
+respondTo: anyone
+surfaces: [{ kind: console }]
+jobs:
+  - slug: nightly
+    archetype: sweep
+    description: A bounded pass over the repository.
+    trigger: { onRequest: true }
+    budget: { wallClockMs: 3600000 }
+    run: { command: node, args: ["nightly.ts"], secrets: { GH_TOKEN: DEMO_JOB_TOKEN } }
+  - slug: weekly
+    archetype: sweep
+    description: A wider pass over the repository.
+    trigger: { onRequest: true }
+    budget: { wallClockMs: 3600000 }
+    run: { command: node, args: ["weekly.ts"], secrets: { GH_TOKEN: DEMO_JOB_TOKEN } }
+`);
+    const declared = declaredSecrets(twoJobs, []);
+
+    expect(declared).toHaveLength(1);
+    expect(declared[0].where).toBe(
+      'jobs[0].run.secrets.GH_TOKEN (job "nightly") and jobs[1].run.secrets.GH_TOKEN (job "weekly")',
+    );
+    let message = "";
+    try {
+      requireDeclaredSecrets(declared, { dir: secretsDir });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("run.jobSecrets rather than run.secrets");
+    // No index, or it would be advice about one of the two lines it names.
+    expect(message).not.toContain("jobs[0].run.jobSecrets");
   });
 
   it("names every missing ref at once, with where it is declared and how to get one", () => {

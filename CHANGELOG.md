@@ -90,6 +90,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run.jobSecrets` exists to avoid, and that map is deliberately left out of this inventory.
   Each job-declared ref now carries it as the hint, in `run` and in `doctor`. A job that also
   arms `trigger.onRequest` is still refused at load, naming the three ways out it always has.
+  The remedy is withheld where the gateway itself also reads the ref — a job and a `private`
+  checkout sharing `GITHUB_TOKEN` would have to move a token the clone needs — so `mergeByRef`
+  now keeps a hint only where every declaration gives the same one, on the reasoning it
+  already applies to `degraded`. Which declaration was pushed first no longer decides which
+  advice an operator reads.
 
 - **A job a person asks for runs, even when its kill switch is parked.** `job_run` records
   the author of the message the agent is answering, so a request that arrives through a chat
