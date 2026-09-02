@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -32,6 +32,18 @@ function fakeOx(over: Partial<TeamOx> = {}): TeamOx {
     search,
     ...over,
   };
+}
+
+/**
+ * Waits for a condition rather than for a duration. A test that sleeps its way to an
+ * ordering asserts how loaded the machine was, and passes on either answer.
+ */
+async function until(condition: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${what}`);
 }
 
 /**
@@ -238,11 +250,16 @@ describe("the team brain's own capability health", () => {
     `if [ -f ./fail ]; then cat ./fail >&2; exit 1; fi\n` +
     `echo '{"team_context":{"results":[]}}'`;
   const REVOKED = "Error: team context query failed: not authenticated. Run 'ox login' first";
-  // A lookup whose query says `slow` answers a second late; every other one is refused now.
-  // That is enough to start one lookup before another and have it finish after.
-  const SLOW_THEN_REVOKED =
+  // A lookup whose query says `slow` announces itself in `blocked` and then waits for the
+  // test to create `release`; every other one is refused straight away. A barrier rather
+  // than a delay, so the interleaving is the test's to decide and not the machine's.
+  const HELD_THEN_REVOKED =
     `case "$*" in\n` +
-    `  *slow*) sleep 1; echo '{"team_context":{"results":[]}}'; exit 0;;\n` +
+    `  *slow*)\n` +
+    `    : > ./blocked\n` +
+    `    while [ ! -f ./release ]; do sleep 0.02; done\n` +
+    `    echo '{"team_context":{"results":[]}}'\n` +
+    `    exit 0;;\n` +
     `esac\n` +
     `echo "${REVOKED}" >&2\nexit 1`;
 
@@ -317,12 +334,16 @@ describe("the team brain's own capability health", () => {
     // Completion order is not start order once the launch probe overlaps a turn, and a
     // stale `Ok` landing on top of an auth failure is the silence this reading exists to
     // break, restored by a race.
-    const { value } = await withFakeOx(SLOW_THEN_REVOKED, async (brain) => {
+    const { value } = await withFakeOx(HELD_THEN_REVOKED, async (brain, bin) => {
+      // The older lookup is held inside the fake `ox` until this test lets it go, so the
+      // newer one demonstrably records first and the guard is what the assertion rests on.
       const older = brain.search("slow", 1).catch(() => {});
+      await until(() => existsSync(join(bin, "blocked")), "the older lookup to start");
       await brain.search("newer", 5).catch(() => {});
-      const beforeTheSlowOneLands = brain.readings()[0].health;
+      const whileTheOlderOneIsHeld = brain.readings()[0].health;
+      writeFileSync(join(bin, "release"), "");
       await older;
-      return [beforeTheSlowOneLands, brain.readings()[0].health];
+      return [whileTheOlderOneIsHeld, brain.readings()[0].health];
     });
     expect(value).toEqual(["Unavailable", "Unavailable"]);
   });
