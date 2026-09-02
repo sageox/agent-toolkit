@@ -84,13 +84,28 @@ counted 2 "- /mnt/secrets-store"
 # Nothing in the rendered object names the job body — that stays in the manifest.
 absent "runner/"
 
-present "claimName: agents-harry"
 present "mountPath: /mnt/secrets-store"
 
-# Every scheduled Pod stages its own bundle. One that waited on the Deployment to have gone
-# first would lose its run on a fresh install, and nothing retries it. It stages by rename
-# rather than in place, because that same claim is being staged by the agent Pod and by
-# every other job of this agent.
+# `/agents` is this Pod's own, never the agent's `ReadWriteOnce` claim. A job Pod that
+# mounted the claim could only attach where the Deployment Pod already ran; on any other
+# node it sat in `Init:0/1` behind a `Multi-Attach` event until its deadline killed it, and
+# its logs were empty because the body never started.
+counted 2 "emptyDir: {}"
+absent "claimName: agents-harry"
+absent "claimName: agents-ida"
+
+# The Deployment keeps the claim. Its `/agents` holds the cursors, local memory, checkouts
+# and indexes the contract calls durable, so gating the mount on the wrong side of `.job`
+# would lose every one of them on the next rollout and render just as cleanly.
+rendered=$(helm template agents "$chart" --values "$values" --show-only templates/deployment.yaml)
+present "claimName: agents-harry"
+present "claimName: agents-ida"
+absent "emptyDir"
+
+# Every scheduled Pod stages its own bundle, into the `emptyDir` above. One that waited on
+# the Deployment to have gone first would lose its run on a fresh install, and nothing
+# retries it.
+render
 counted 2 "name: stage-config"
 present 'dest="/agents/harry/${file#$stage/}"'
 present 'dest="/agents/ida/${file#$stage/}"'

@@ -78,6 +78,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the brain reads as characters goes back out as characters, and `mentions` remains the only
   way a Slack message addresses anyone.
 
+- **A scheduled job runs wherever the cluster puts it, instead of only on the agent's node.**
+  The chart mounted the agent's `ReadWriteOnce` claim in every job Pod as well as the
+  Deployment's, and RWO binds a volume to one node — so a job Pod the scheduler placed
+  anywhere else could never attach it. It sat in `Init:0/1` behind a `Multi-Attach error for
+  volume` until `activeDeadlineSeconds` killed it, with nothing in the job's own logs,
+  because the body never started; the same job then completed in seconds on the ticks that
+  landed beside the agent, and hung for the whole deadline on the ones that did not, which is
+  what made it hard to recognise as a placement problem at all. Once the scheduler settled on
+  another node, every tick hung. `/agents` in a job Pod is now an `emptyDir`, staged for that
+  run by the same init container the agent Pod runs and gone with it — a run needed nothing
+  that was on the claim: it stages its own bundle from `/config`, reads its kill switch
+  through the relay, and writes its verdict under the container's own tmpdir. Two Pods
+  writing one EBS volume was never safe on the ticks that *did* co-locate, either.
+  **A job body that genuinely shares durable state with the agent now has to say so** — one
+  `sharedVolumes` entry, on a claim whose access mode allows a second node, which is the same
+  thing shared brains already ask for. One that silently relied on the agent's warm
+  checkouts, index, or local vault gets an empty directory instead; on a claim it could only
+  reach from one node, and only after the Deployment had gone first, it was already relying
+  on luck. The deployment contract's job clause says this too: a target owes a run a writable
+  bundle directory, not a durable one.
+
 - **A job a person asks for runs, even when its kill switch is parked.** `job_run` records
   the author of the message the agent is answering, so a request that arrives through a chat
   surface is the human on-request run the host has always described — it has refused with
