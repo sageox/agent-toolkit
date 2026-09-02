@@ -77,7 +77,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that moved but stayed spelled `secrets` refuses the launch, not just the run. Nothing that
   loads today stops loading — the key is new, and `run` was already `.strict()`.
 
+### Changed
+
+- **The agent base image ships `ox` 0.14.3.** `OX_VERSION` and both architecture
+  checksums in `deploy/docker/Dockerfile` move up from 0.13.0. The six ox calls the
+  toolkit makes — `query`, `status`, `team list`, `index code`, `code status`, and
+  `code search` — take the same flags and return the same fields on 0.14.3 that they
+  did on 0.13.0, so nothing that reads them changes.
+
 ### Fixed
+
+- **A broadcast in a Slack message is escaped and logged instead of throwing, so the turn
+  ends in an answer.** `SlackAdapter.outboundText` refused `<!channel>` by throwing, and
+  `SurfaceEgress.reply` does not catch around `send` — so the throw left `drive`, ended the
+  turn, and the withdrawn acknowledgement left the channel watching the glyph appear and
+  vanish with no reply. The brain was never told what happened. That refusal predates the
+  outbound escaping this release also ships and was the only thing keeping a broadcast off
+  the wire; `&lt;!channel&gt;` now renders as those characters and notifies nobody, so the
+  refusal bought no reach and cost the turn. Every attempt still gets one line an operator
+  can act on — `egress_escaped surface=slack channel=… rule=slackBroadcast`, the shape
+  `egress_blocked` already logs. The sharper half was that `normalizeSlackText` un-escapes
+  inbound text, so somebody *typing* the characters `<!channel>` reached the brain as
+  markup: quoting a message that merely discussed Slack broadcasts killed the turn over one
+  nobody sent. The un-escape is unchanged, because the round trip is symmetric now — what
+  the brain reads as characters goes back out as characters, and `mentions` remains the only
+  way a Slack message addresses anyone.
+
+- **A job a person asks for runs, even when its kill switch is parked.** `job_run` records
+  the author of the message the agent is answering, so a request that arrives through a chat
+  surface is the human on-request run the host has always described — it has refused with
+  *"only a human's on-request run bypasses a parked job"* since jobs shipped, and nothing was
+  ever classified as one. A `tools/call` carries this server's bearer token and the tool
+  arguments and nothing at all about the turn that produced it, so the author is read off the
+  gateway instead: the same live-turn registry the reaction tool reads to mark "the message
+  you are answering". **A person is an author the manifest names in `owner`**, not one whose
+  `isAgent` flag is false — only a surface can tell an agent from a person, and Buzz cannot
+  yet: `toActorRef` flags this agent's own pubkey and nobody else's, because recognising a
+  sibling needs a roster the relay does not serve, so a bypass keyed on that flag would reach
+  every sibling in a fleet. Everyone else is automation for the purpose of the switch,
+  including an allowlisted colleague — an allowlist says who may speak to this agent, and a
+  fleet's names siblings — and so is a call arriving while two channels are mid-turn at once,
+  where no one person can be named. `on-request` remains a trigger rather than an
+  authorization. The record names the turn's author whichever kind it is, rather than this
+  agent's name, and falls back to the brain only where there is no one turn to read it from. The bypass answers
+  only whether the run starts: every gate governing what it may do is untouched, and it
+  writes nothing, so a parked job is still parked afterwards and the run carries
+  `bypassedSwitch: true` for whoever reads the record at 3am. Worst on a job with no schedule at all, where the switch
+  parked no clock and its only effect was to refuse the request it exists to permit; the
+  workaround it replaces is arming a posture switch for one run and remembering to disarm it.
 
 - **A DM sent to a Slack agent while it was down is answered when it comes back.**
   The backfill walked the configured `channels` and nothing else, so it could never reach a
@@ -103,7 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent enough to page whoever it named: through none of the id validation `mentions` gets,
   and recorded on the audit line as `mentions=0`. The recipients the adapter builds from
   `mentions` are still markup — the one part of an outbound message it constructs itself.
-  The bulk-mention refusal is unchanged: `<!channel>` is refused, not rendered.
+  Escaping also takes the reach of `<!channel>`, which is what let its refusal go.
 
 ## [0.1.0] - 2026-08-31
 

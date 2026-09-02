@@ -338,6 +338,28 @@ describe("reacting to the message a turn is answering", () => {
     expect(buzz.reactions).toEqual([{ target: "m2", emoji: "👍" }]);
   });
 
+  // The job door asks the same registry a different question: not which message, but who
+  // sent it. A run a person is waiting on is not the unattended work a kill switch parks.
+  it("names the author of the one live turn, and nobody when two are", () => {
+    const buzz = adapter("buzz", [...hive, { surface: "buzz", id: "town", isPublic: false }]);
+    const egress = new SurfaceEgress({ manifest: manifest(), adapters: [buzz.value] });
+    expect(egress.asking()).toBeNull();
+
+    const first = egress.answers(event("buzz", "hive"));
+    expect(egress.asking()).toMatchObject({ id: "npub1abc", isAgent: false });
+
+    // A different person in the second channel, so what comes back once one turn ends says
+    // which turn it was read from rather than repeating the only author in the test.
+    const inTown = event("buzz", "town", false, "m2");
+    const second = egress.answers({ ...inTown, author: { ...inTown.author, id: "npub1ryan" } });
+    expect(egress.asking()).toBeNull();
+
+    first.close();
+    expect(egress.asking()).toMatchObject({ id: "npub1ryan" });
+    second.close();
+    expect(egress.asking()).toBeNull();
+  });
+
   // A closer removes only its own event: a superseded turn must not delete the live one.
   it("keeps the live target when a finished turn's closer runs late", async () => {
     const buzz = adapter("buzz", hive);

@@ -67,12 +67,20 @@ So is the job surface, under `jobs`: `mcp__jobs__job_run`, which lets a conversa
 start one of the agent's own jobs. Only jobs that declare `trigger.onRequest` are offered,
 the slug is the whole of what the tool takes for a job that declares no `parameters` — the
 argv is always `run.command` and `run.args` from `agent.yaml`, and nothing in the call
-reaches it — and a run asked for this way is recorded as `agent`, so it does **not** bypass
-a job that is parked or `suspend: true`. A job that declares `parameters` also takes those,
-under `params`, typed and bounded by its own declaration and refused at the call if they do
-not match; they reach the body as `JOB_PARAM_<NAME>` in its environment. They name a
-**target** — which issue, which document, which environment — and never a behaviour: a job
-whose work a caller can switch is two jobs with two slugs. See
+reaches it — and a run asked for this way is recorded against the author of the message the
+agent is answering, whom the gateway resolves and the tool cannot name. A request from
+someone the manifest names in `owner` **does** run a job that is parked or `suspend: true`:
+they are waiting on the result, which is not the unattended work a kill switch parks, and the
+posture is unchanged afterwards. Every other author is recorded as `agent` and a parked job
+refuses — an allowlisted colleague, a sibling agent, and a call arriving while two channels
+are mid-turn at once, where no one person can be named. `owner` is the test rather than the
+author's agent flag because only a surface can tell an agent from a person, and Buzz cannot
+yet: it flags this agent's own key and nobody else's, so there a bypass keyed on that flag
+would reach every sibling in a fleet. A job that declares
+`parameters` also takes those, under `params`, typed and bounded by its own declaration and
+refused at the call if they do not match; they reach the body as `JOB_PARAM_<NAME>` in its
+environment. They name a **target** — which issue, which document, which environment — and
+never a behaviour: a job whose work a caller can switch is two jobs with two slugs. See
 [the job body contract](../job-contract.md). A job short enough to finish inside a turn is
 waited for and the tool answers with its verdict; a job whose `wallClockMs +
 deadlineHeadroomMs` is longer than `limits.turnTimeoutMs` is **started** instead, and the
