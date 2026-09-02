@@ -718,6 +718,43 @@ describe("SlackAdapter", () => {
     expect(got).toEqual([]);
   });
 
+  it("threads a context-free reply onto the newest message, not the last replayed one", async () => {
+    const { instance, socket, api } = adapter({ since: 1786760000 });
+    const got: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inHistory = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    api.histories.push({ messages: [mention("1786761000.000100")] });
+    const pages = api.history.bind(api);
+    // `start` connects before it fills the gap, so a live message can arrive while history
+    // is still being collected — and it is newer than everything the replay will contain.
+    api.history = async (args) => {
+      entered();
+      await held;
+      return pages(args);
+    };
+
+    const starting = instance.start((event) => got.push(event));
+    await inHistory;
+    const live = socket.emit(mention("1786761000.000900"));
+    release!();
+    await Promise.all([starting, live]);
+
+    // The replay lands after the live message and is older than it. The reply target is
+    // the latest thing said, not whatever was processed last.
+    expect(got.map((event) => event.id.nativeId)).toEqual([
+      "GENG:1786761000.000900",
+      "GENG:1786761000.000100",
+    ]);
+    await instance.send({ surface: "slack", id: "GENG", isPublic: false }, { text: "ok" });
+    expect(api.posts[0].threadTs).toBe("1786761000.000900");
+  });
+
   it("refuses a top-level post to an unconfigured channel", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});

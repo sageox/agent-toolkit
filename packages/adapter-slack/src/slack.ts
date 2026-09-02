@@ -541,7 +541,16 @@ export class SlackAdapter implements SurfaceAdapter {
 
     if (direct) this.dmChannels.add(message.channel);
     this.since = Math.max(this.since ?? 0, Number(message.ts));
-    this.lastByChannel.set(normalized.channel.id, contextOf(normalized));
+    // The newest message, never merely the most recently processed one. A backfill replays
+    // messages older than the live ones that arrived while it was paging — deliberately, as
+    // `start` connects before it fills the gap — so the two arrive interleaved. A reply with
+    // no inbound context has to thread onto the latest thing said, not onto whatever
+    // happened to finish last.
+    const context = contextOf(normalized);
+    const latest = this.lastByChannel.get(normalized.channel.id);
+    if (!latest || Number(context.eventTs) > Number(latest.eventTs)) {
+      this.lastByChannel.set(normalized.channel.id, context);
+    }
     this.onEvent?.(normalized);
   }
 
