@@ -175,12 +175,18 @@ jobs:
           # 1.3.9 backfilled after 1.4.0 would list the pull requests between those two
           # instead of since 1.3.8, and a re-run would then replace a body the first run
           # published with a different one. Read from the same `released` list the alias
-          # arithmetic uses, so both agree on what precedes what. A prerelease matches no
-          # entry and falls out with the newest full release, which is the one it follows.
-          # Empty for the first release ever, and then the field is omitted and GitHub
-          # generates from the first commit.
-          previous=$(printf '%s\n' "$released" \
-            | awk -v v="$VERSION" '$0 == v { exit } { last = $0 } END { print last }')
+          # arithmetic uses, so both agree on what precedes what.
+          #
+          # Found by inserting this version into that list and taking its left neighbour,
+          # under the prerelease suffix rather than beside it: 1.3.10-rc.1 follows 1.3.9,
+          # the release below the line it is a candidate for, and not the newest release in
+          # the repository — which for a candidate on an older line is *ahead* of it, and an
+          # inverted range. `released` holds no suffixes, so that order is total. Empty for
+          # the first release ever, and the field is then omitted and GitHub generates from
+          # the first commit.
+          base="${VERSION%%-*}"
+          previous=$(printf '%s\n%s\n' "$released" "$base" | sort -V \
+            | awk -v v="$base" '$0 == v { exit } { last = $0 } END { print last }')
           echo "Comparing against: ${previous:-no earlier release}"
           echo "previous=${previous}" >> "$GITHUB_OUTPUT"
 
