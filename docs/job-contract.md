@@ -106,6 +106,30 @@ still what most jobs should be.
 **If your body shells out to a coding harness, declare its key** — `ANTHROPIC_API_KEY` is
 not inherited any more than anything else is.
 
+## What a body finds on disk
+
+**The bundle, and nothing your body did not put there.** A run starts in the agent's
+directory — `./body.sh` resolves because of it. In a container deployment a scheduled run
+stages that directory for itself, fresh, and drops it when the run ends.
+
+**`workspace/` is not part of it, and a body must not read it.** The repository checkouts
+under `workspace/repos` and the `ox` index under `workspace/ox-data` belong to
+`sageox-agent run`: it builds them at startup, in its own process, for the brain's code
+tools. Nothing else builds them — not `job run`, whatever its trigger — so what a body finds
+there depends on where it is running. A run the brain starts is inside the gateway's own
+process, and on an agent whose brain has code tools it does see a workspace: a racing one,
+because startup creates each repository's directory before `git` fills it and waits for
+neither the clone nor the index. Every other run is a standalone `job run`, which builds
+none, and in a container deployment does not share a filesystem with the gateway at all. A
+body that reads a checkout is a body that works when someone asks for it and fails on its
+3am tick.
+
+**A body that wants a repository clones one** — shallow, and inside its budget. Durable state
+a body genuinely shares with the agent is a mount the deployment gives it
+([`sharedVolumes`](../deploy/helm/README.md#jobs) is the Kubernetes spelling), and a working
+tree is not that: the agent fast-forwards its checkout at every start, so a body writing
+there is a second writer on a tree it does not own.
+
 ## What the job writes back
 
 The artifact is gates you **ran**, never a verdict you reached — the host mints the verdict,
