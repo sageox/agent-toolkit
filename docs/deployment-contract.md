@@ -43,7 +43,7 @@ A target that supports jobs owes each declared job:
 | A platform deadline of `wallClockMs + deadlineHeadroomMs`, rounded up where the target's unit is coarser | `budget` |
 | Single-flight — a run that would overlap a running one is refused, never queued | — |
 | No platform retry — a failed run is a failed run | — |
-| Writable, durable state, and somewhere the verdict artifact lands | `Mutable state`, above |
+| A writable bundle directory and somewhere the verdict artifact lands — durable between runs is not owed | `Agent definition`, above |
 
 `run.command` and `run.args` are a list, and the list is the whole interface: no shell
 string, so nothing can be word-split or interpolated into one.
@@ -84,7 +84,12 @@ environment — and a job that needs the pod's cloud identity says so by name in
 wrote down.
 
 A job run is the same agent — the same bundle directory and the same `secretRef` mounts the
-rows above already require, not a second deployment carrying configuration of its own. A
+rows above already require, not a second deployment carrying configuration of its own. The
+same bundle, though, is not necessarily the same *copy*: a target may stage a run one of its
+own, and [the chart](#kubernetes-chart) does, because a job Pod sharing the agent's
+`ReadWriteOnce` claim could not start off the node the agent runs on. A job body's files are
+therefore its run's, and anything it needs to outlive the run belongs in a store it reaches
+over the network rather than beside the bundle. A
 target **may** add a second mount that a scheduled run gets and the agent's own workload does
 not, and one that does closes a gap policy cannot: a credential absent from the agent's mount
 is not a file in the process that runs the brain. Added, never substituted — a job run
@@ -109,7 +114,8 @@ the bundle's own source as a Kubernetes VolumeSource, so Helm, Kustomize, Terraf
 Argo CD, and Flux can own those objects without a toolkit-specific translation step.
 
 A short init container copies non-secret files from that volume, mounted read-only at
-`/config`, into a persistent volume; the long-running container then uses the same paths and
+`/config`, into the agent directory — the agent's persistent claim in the Deployment Pod, a
+per-run `emptyDir` in a job Pod; the long-running container then uses the same paths and
 command as Compose. Which volume carries the bundle is the operator's choice — a ConfigMap,
 an image, a claim, a CSI volume — and nothing below `/config` depends on the answer.
 Repository checkouts and `ox` indexes stay on that PVC, while clone, fast-forward fetch,
@@ -137,9 +143,11 @@ the budget, and mints the verdict. The declaration reaches the chart as a mirror
 in that agent's values, because Helm cannot read an operator-supplied bundle at render
 time; the mirror carries the clock and the bound only — not the argv, not the switch —
 so it cannot become a second place a job is decided.
-[The chart's README](../deploy/helm/README.md#jobs) has the rendered shape and the one
-placement consequence — a job Pod shares the agent's claim, so a `ReadWriteOnce` volume ties
-it to the node the agent runs on.
+[The chart's README](../deploy/helm/README.md#jobs) has the rendered shape and the one thing
+a job Pod does not share — the agent's `ReadWriteOnce` claim, which would tie its placement
+to the agent's node. It stages its bundle onto an `emptyDir` of its own instead, and a body
+that does share durable state with the agent gets a `sharedVolumes` claim whose access mode
+says so.
 
 A job Pod is the one pod spec that may hold a cluster token, opted into per agent with
 `serviceAccount.automountJobToken` and off by default. It runs the argv its `agent.yaml`

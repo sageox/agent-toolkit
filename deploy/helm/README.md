@@ -91,7 +91,16 @@ your behalf. An `image:` source is one more pull from a registry the node alread
 `imageRef` from, with the same node credential — pin it by digest for the same reason
 `imageRef` is pinned by digest, and note that a failed pull on a CronJob loses that run
 under `backoffLimit: 0`, the same class of failure as an `imageRef` pull failure. A
-`persistentVolumeClaim:` or `csi:` source costs whatever that driver costs at attach.
+`persistentVolumeClaim:` or `csi:` source costs whatever that driver costs at attach — and
+on an agent that declares a schedule it has to be mountable from more than one node,
+normally `ReadWriteMany`. A job Pod mounts the bundle source too, and `ReadWriteOnce` binds
+a volume to whichever node holds it: the job Pod then sits in `Init:0/1` behind a
+`Multi-Attach` event until its deadline kills it, unless it happened to land beside the
+Deployment. `readOnly: true` does not help — the limit is on nodes, not on writers. The
+chart cannot check this for you: values carry a `claimName`, the access mode lives on the
+claim, and the chart tooling deliberately does not contact the cluster. The agent's own
+claim is [not mounted in a job Pod](#jobs) for this reason; a bundle claim still is, on
+every scheduled run.
 
 Nothing here caps what a bundle may carry. On an uncapped source a runner can ship
 `node_modules`, a compiled binary, or a model file; whether it *should* is a policy you set,
@@ -142,10 +151,9 @@ Two limits of the copy onto the claim, both from the bundle sharing one director
 agent's mutable state — cursors, checkouts, and indexes cannot be replaced wholesale, so the
 bundle cannot either. A file dropped from the bundle is not removed from the claim; only
 `repos.conf` is, because it is the one name whose absence changes behaviour. And a bundle is
-staged file by file rather than all at once, so a Pod staging a *different* generation beside
-another — a same-name ConfigMap mid-refresh, or a job's `Job` that outlived a release change
-— can leave two generations mixed until the next stage. Immutable sources keep that to the
-one apply that changes them.
+staged file by file rather than all at once, so a stage that reads a source mid-change — a
+same-name ConfigMap being refreshed under it — can leave two generations mixed until the
+next stage. Immutable sources keep that to the one apply that changes them.
 
 `podAnnotations`, `nodeSelector`, `tolerations`, `priorityClassName`, and
 [`networkPolicy`](#network-policy) are release-wide.
@@ -199,7 +207,7 @@ Three, and they are fixed:
 |---|---|---|
 | `agent` | Deployment Pod | the gateway, and the brain as its subprocess |
 | `job` | CronJob Pod | `sageox-agent job run <slug>` |
-| `stage-config` | init container of both | the bundle copy onto the claim |
+| `stage-config` | init container of both | the bundle copy into `/agents` |
 
 They are listed because a cluster add-on that acts on *some* containers needs their names,
 and nothing else here would tell you them. EKS's IRSA webhook is the case worth spelling
@@ -333,13 +341,20 @@ Deployment runs, so the envelope is the host's: admission past both switches, si
 the budget's bow-out, the run record, and the verdict. The trigger is stamped by the door it
 came through, which is why a scheduled object can only ever claim `schedule`.
 
-A job run is the same identity, not a second workload: it runs on the agent's own claim,
-with that agent's ServiceAccount, secret mount, shared volumes, and resource numbers. It
-stages that bundle itself, with the same init container the agent Pod runs — a job that
-waited on the Deployment to have gone first would lose its run on a fresh install, and
-nothing retries it. With a `ReadWriteOnce` claim, that means a job Pod can
-only start where the agent Pod already runs; if your storage class is zonal, the placement
-values (`nodeSelector`, `tolerations`) are where you say so.
+A job run is the same identity, not a second workload: it runs with that agent's
+ServiceAccount, secret mount, shared volumes, and resource numbers. It stages that bundle
+itself, with the same init container the agent Pod runs — a job that waited on the
+Deployment to have gone first would lose its run on a fresh install, and nothing retries it.
+
+What it does not get is the agent's claim. `/agents` in a job Pod is an `emptyDir`, fresh
+for the run and gone with it, because the claim is `ReadWriteOnce` and a job Pod mounting it
+could only attach where the Deployment Pod already ran — anywhere else the Pod sat in
+`Init:0/1` behind a `Multi-Attach error for volume` until `activeDeadlineSeconds` killed it,
+with empty logs, because the body never started. Nothing a run needs is on that claim: it
+stages its own bundle, reads its kill switch through the relay, and writes its verdict
+under the container's own tmpdir. A job body that genuinely shares durable state with the
+agent gets a `sharedVolumes` entry, on a claim you back with an access mode that allows two
+Pods to mount it — `ReadWriteMany` for anything that may land on a second node.
 
 ### A job that reads the Kubernetes API
 
