@@ -170,6 +170,20 @@ jobs:
           echo "Publishing: ${tags}"
           echo "tags=${tags}" >> "$GITHUB_OUTPUT"
 
+          # The release this one follows, for the pull-request list GitHub generates below.
+          # Named rather than left to GitHub to infer, because it infers by tag date: a
+          # 1.3.9 backfilled after 1.4.0 would list the pull requests between those two
+          # instead of since 1.3.8, and a re-run would then replace a body the first run
+          # published with a different one. Read from the same `released` list the alias
+          # arithmetic uses, so both agree on what precedes what. A prerelease matches no
+          # entry and falls out with the newest full release, which is the one it follows.
+          # Empty for the first release ever, and then the field is omitted and GitHub
+          # generates from the first commit.
+          previous=$(printf '%s\n' "$released" \
+            | awk -v v="$VERSION" '$0 == v { exit } { last = $0 } END { print last }')
+          echo "Comparing against: ${previous:-no earlier release}"
+          echo "previous=${previous}" >> "$GITHUB_OUTPUT"
+
       # Checked before the build, not after: an hour of multi-arch build that ends with
       # nowhere to record its digest is an expensive way to learn the release notes are
       # missing.
@@ -333,6 +347,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.tags.outputs.previous }}
           DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
@@ -344,11 +359,13 @@ jobs:
           # lines and stripped of `**` before the first sentence is cut, so one that opens
           # with a bold lead sentence reads here the same as one that does not.
           summary=$(awk -v heading="## [${VERSION}]" '
-            function flush(  cut, lead) {
+            function flush(  lead) {
               if (bullet == "") return
               gsub(/\*\*/, "", bullet)
-              cut = index(bullet, ". ")
-              lead = cut ? substr(bullet, 1, cut) : bullet
+              if (match(bullet, /[.!?] /))
+                lead = substr(bullet, 1, RSTART)
+              else
+                lead = bullet
               print "- " lead
               bullet = ""
             }
@@ -363,12 +380,13 @@ jobs:
           ' CHANGELOG.md)
 
           # What GitHub generates for a release on its own: every merged pull request with
-          # its author, and the compare link against the previous tag. Asked for through
-          # the API rather than `gh release create --generate-notes`, which `gh release
-          # edit` has no counterpart for — a re-run has to converge on the body the first
-          # run published, and this is the one spelling both paths can share.
+          # its author, and the compare link against the release resolved above. Asked for
+          # through the API rather than `gh release create --generate-notes`, which `gh
+          # release edit` has no counterpart for — a re-run has to converge on the body the
+          # first run published, and this is the one spelling both paths can share.
           generated=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f "tag_name=v${VERSION}" --jq .body)
+            -f "tag_name=v${VERSION}" ${PREVIOUS:+-f "previous_tag_name=v${PREVIOUS}"} \
+            --jq .body)
 
           body=$(printf '%s\n\nEach entry in full: [CHANGELOG.md](https://github.com/%s/blob/v%s/CHANGELOG.md).\n\n## Runtime image\n\n```\n%s@%s\n```\n\nPullable anonymously, `%s`. Pin the digest in production: the `%s` tag is immutable and is never republished.\n\n%s\n' \
             "$summary" "$GITHUB_REPOSITORY" "$VERSION" "$IMAGE" "$DIGEST" "$PLATFORMS" "$VERSION" "$generated")
