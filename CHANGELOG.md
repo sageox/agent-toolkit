@@ -16,6 +16,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then the digest, then that generated list, with this file linked for the rest. Write an
   entry's first sentence to stand alone: it is what the release notes show.
 
+### Fixed
+
+- **A dead SageOx credential no longer degrades an agent in silence.** Every `team_search`
+  failed and the agent went on answering team-knowledge questions from the model alone —
+  the confident wrong answer, reached from a direction nothing was watching. The only trace
+  was one `ox_failed class=not-authenticated` line per turn in the gateway log. The team
+  brain now latches what each lookup proved as a capability reading, `brain.team` /
+  `cannot-reach`, so the turn prompt tells the agent not to answer as if team memory had
+  worked and the launch prints a `note:` line naming the credential to rotate. An answered
+  lookup clears the reading, so rotating the credential needs no restart.
+
+  `run` also takes one reading at startup. `doctor` was the only thing that ever checked
+  the credential and a deployment does not run `doctor`, so a credential already dead at
+  deploy time was exactly as silent as one revoked later. It is a capability and not a
+  precondition: an agent without team memory is less informed, not wrong, so it still comes
+  up, works, and discloses.
+
+  Two failure classes latch and only two — a rejected credential, and an `ox` that is not
+  on `PATH`. A lookup that merely fell over does not: the next one may well answer, and
+  announcing an outage a retry disproves is how people learn to skim announcements.
+
 ## [0.2.0] - 2026-09-02
 
 Everything below shipped after `v0.1.0`.
