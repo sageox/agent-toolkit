@@ -260,8 +260,27 @@ describe("the team brain's own capability health", () => {
     `    while [ ! -f ./release ]; do sleep 0.02; done\n` +
     `    echo '{"team_context":{"results":[]}}'\n` +
     `    exit 0;;\n` +
+    `  *flaky*) echo "Error: the team context service is unavailable" >&2; exit 1;;\n` +
     `esac\n` +
     `echo "${REVOKED}" >&2\nexit 1`;
+
+  it("lets a success outlive a newer transient failure and clear the latch", async () => {
+    // The other half of the ordering rule, and it is deliberate: a `failed` lookup records
+    // nothing, so it does not make a newer-started success stale. Suppressing that success
+    // would hold `Unavailable` on evidence nobody has — and delay exactly the recovery a
+    // rotated credential is supposed to get without a restart.
+    const { value } = await withFakeOx(HELD_THEN_REVOKED, async (brain, bin) => {
+      await brain.search("revoked", 5).catch(() => {});
+      const latched = brain.readings()[0].health;
+      const held = brain.search("slow", 1).catch(() => {});
+      await until(() => existsSync(join(bin, "blocked")), "the held lookup to start");
+      await brain.search("flaky", 5).catch(() => {});
+      writeFileSync(join(bin, "release"), "");
+      await held;
+      return [latched, brain.readings()[0].health];
+    });
+    expect(value).toEqual(["Unavailable", "Ok"]);
+  });
 
   it("reports nothing until a lookup has been made", async () => {
     // Not `Ok`: nothing has tried the credential yet, and a reading is a claim about it.
