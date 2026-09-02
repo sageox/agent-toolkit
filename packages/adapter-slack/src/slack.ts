@@ -145,41 +145,37 @@ export class SlackAdapter implements SurfaceAdapter {
   private readonly lastByChannel = new Map<string, SlackInboundContext>();
   private readonly seen = new Set<string>();
   /**
-   * Member id to name, filled as messages mention people and never expired.
-   *
-   * A miss costs one `users.info`; a rename goes unnoticed until restart. Both are the
-   * right trade for a directory that only decides how a mention reads — the alternative,
-   * pulling `users.list` at boot, spends a large workspace's whole member table to answer
-   * about the handful of people who actually speak.
+   * Member id to name, filled as messages mention people and never expired. A rename goes
+   * unnoticed until restart — the alternative, `users.list` at boot, spends a whole
+   * workspace's member table to answer about the few people who speak.
    */
   private readonly memberNames = new Map<string, string>();
   /** Ids Slack would not name, so a second message does not ask about them again. */
   private readonly unnamed = new Set<string>();
   /**
-   * Normalization runs one message at a time per conversation, in arrival order.
+   * One message at a time per conversation, in arrival order.
    *
-   * Resolving a name is a network call, so `accept` has to be able to wait — and two
-   * messages waiting concurrently would be delivered in whichever order Slack answered
-   * about their mentions. `ChannelQueue` preserves the order it is submitted in, so that
-   * scrambling would reach the brain: the agent answers the second question first, and a
-   * reply with no inbound context threads onto the wrong message.
-   *
-   * Per conversation and not one chain for the adapter, because that is the whole of what
-   * ordering means here — `ChannelQueue` serializes a channel and runs channels in
-   * parallel, so a single chain would impose a stricter order than anything downstream
-   * asks for and let one message's lookups delay every other conversation. A chain is
-   * dropped once it drains, so this holds an entry per conversation in flight rather than
-   * one per conversation ever seen.
+   * Resolving a name is a network call, and `ChannelQueue` preserves the order it is
+   * submitted in — so two messages racing on their lookups would have the agent answer the
+   * second question first. Per conversation, not adapter-wide, because that queue
+   * serializes a channel and runs channels in parallel. Dropped once drained.
    */
   private readonly chains = new Map<string, Promise<void>>();
   /**
-   * Which run of this adapter queued work belongs to.
-   *
-   * `stop()` bumps it, so a message still waiting on a lookup is discarded rather than
-   * finishing into a later `start()` — delivering an event the previous session heard to
-   * the callback the new one installed, and dragging its reply target along with it.
+   * Which run of this adapter queued work belongs to. Ending a run bumps it, so a message
+   * still waiting on a lookup is discarded rather than delivered into a later `start()`.
    */
   private generation = 0;
+  /**
+   * Resolves once this run's socket has settled — connected, or failed to.
+   *
+   * The listener is registered before `socket.start()`, because Socket Mode delivers from
+   * the moment it connects. Delivery still waits: a start that then fails throws out of
+   * `start`, and a turn already spent answering would make that a lie. Held rather than
+   * dropped — it is a real message either way.
+   */
+  private socketSettled: Promise<void> = Promise.resolve();
+  private releaseSocket: () => void = () => {};
   private botUserId?: string;
   private botId?: string;
   private onEvent?: (event: InboundEvent) => void;
@@ -251,10 +247,14 @@ export class SlackAdapter implements SurfaceAdapter {
     // The run every message from here belongs to. The listener is registered before the
     // connection is up, so an event can already be queued when the start below fails.
     const session = this.generation;
+    this.socketSettled = new Promise((resolve) => {
+      this.releaseSocket = resolve;
+    });
     this.socket.on("slack_event", this.handleEnvelope);
     try {
       await this.socket.start();
       this.listening = true;
+      this.releaseSocket(); // before the backfill, which enqueues through the same gate
       // Socket Mode has no replay. Connect first, then fill the earlier gap; deduplication
       // makes overlap safe and avoids a new gap between the history call and the socket.
       if (resumeFrom !== undefined) await this.backfill(resumeFrom, session);
@@ -329,18 +329,11 @@ export class SlackAdapter implements SurfaceAdapter {
   /**
    * Replies beneath a thread root this adapter posted — one `conversations.replies` walk.
    *
-   * Every way this can fail throws, and none of them answers `[]`. A probe mints a verdict
-   * from what comes back, so "nobody replied" has to stay distinguishable from "this read
-   * did not happen" — see {@link SurfaceAdapter.readThread}.
-   *
-   * `oldest: "0"` because a thread read is not a backfill: the caller wants everything
-   * under the root, not what arrived after some cursor. Slack returns the parent whatever
-   * `oldest` says, and the parent is not in its own thread — dropped by `ts` rather than by
-   * position, since a page boundary promises nothing about which message comes first.
-   *
-   * Normalized through `toSlackInboundEvent`, so a join notice or a hidden message is no
-   * more a reply here than it is a turn. One answer to "what counts as a message" rather
-   * than a second one that drifts.
+   * Every failure throws and none answers `[]`, per {@link SurfaceAdapter.readThread}.
+   * `oldest: "0"` because a thread read wants the whole thread, not what followed a cursor.
+   * Slack returns the parent whatever `oldest` says and it is not in its own thread, so it
+   * is dropped by `ts` — a page boundary promises nothing about order. Normalized through
+   * `toSlackInboundEvent`, so a join notice is no more a reply here than it is a turn.
    */
   async readThread(root: EventRef, limit?: number): Promise<readonly ThreadReply[]> {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before readThread()");
@@ -476,6 +469,7 @@ export class SlackAdapter implements SurfaceAdapter {
   private invalidate(): void {
     this.generation++;
     this.chains.clear();
+    this.releaseSocket(); // parked work wakes to a moved generation; without this it hangs
   }
 
   /**
@@ -521,11 +515,10 @@ export class SlackAdapter implements SurfaceAdapter {
     // app's `message.im` subscription is the switch; the guard still sees a DM as private.
     const direct = isDirectSlackChannel(message);
     if (!direct && !this.allowedChannels.has(message.channel)) return;
-    // Twice around the lookup, and both matter. Before, because a message already stale
-    // when it reaches the front of its chain must not spend a `users.info` — the chain is
-    // per conversation, so that lookup would hold up the run that is actually serving it.
-    // After, because the run can end while the lookup is outstanding, which is the window
-    // the stamp exists for.
+    await this.socketSettled; // see the field: a replay passes through, the socket is up
+    // Checked before the lookup as well as after: a message already stale when its turn
+    // comes must not spend a `users.info` that the run still serving this conversation
+    // would wait behind.
     if (generation !== this.generation) return;
     // Before normalizing, because the text is rendered there and a name that arrives after
     // is a name the brain never saw.
@@ -541,11 +534,8 @@ export class SlackAdapter implements SurfaceAdapter {
 
     if (direct) this.dmChannels.add(message.channel);
     this.since = Math.max(this.since ?? 0, Number(message.ts));
-    // The newest message, never merely the most recently processed one. A backfill replays
-    // messages older than the live ones that arrived while it was paging — deliberately, as
-    // `start` connects before it fills the gap — so the two arrive interleaved. A reply with
-    // no inbound context has to thread onto the latest thing said, not onto whatever
-    // happened to finish last.
+    // The newest, not the most recently processed: `start` connects before it fills the
+    // gap, so a replay lands among live messages older than it.
     const context = contextOf(normalized);
     const latest = this.lastByChannel.get(normalized.channel.id);
     if (!latest || Number(context.eventTs) > Number(latest.eventTs)) {
@@ -568,14 +558,9 @@ export class SlackAdapter implements SurfaceAdapter {
   /**
    * Names the members a message mentions, so normalization can render them.
    *
-   * Sequential rather than concurrent: a message mentions a handful of people at most, and
-   * every one after the first conversation is already cached. Slack rate-limits
-   * `users.info` per workspace, and a burst is what that limit is aimed at.
-   *
-   * A refusal is remembered as a refusal. Without `unnamed`, an id Slack will not name —
-   * no `users:read`, a deactivated account, someone in another Enterprise Grid workspace —
-   * would cost one failed call per message forever, and a channel that talks about that
-   * person often would spend the rate limit on an answer that never changes.
+   * Sequential, because Slack rate-limits `users.info` per workspace and a burst is what
+   * that limit is aimed at. A refusal is remembered: an id Slack will not name would
+   * otherwise cost a failed call per message forever.
    */
   private async learnNames(text: string): Promise<void> {
     for (const id of new Set(slackMentionedMembers(text))) {
@@ -630,10 +615,8 @@ export class SlackAdapter implements SurfaceAdapter {
       const replay = missed
         .filter((message) => Number(message.ts ?? 0) > oldest)
         .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
-      // Queued in one turn, then awaited — never awaited one at a time. Each `await` here
-      // was a point where a live message could land in the middle of a sorted replay, and
-      // the older messages still to come would then overwrite the newer one's reply target.
-      // The chain already orders them, so nothing is lost by not waiting between them.
+      // One turn, not one await per message: each await was a point where a live message
+      // could land in the middle of a sorted replay. The chain already orders them.
       await Promise.all(
         replay.map((message) =>
           this.enqueue({
@@ -648,23 +631,12 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   /**
-   * The DMs a backfill has to cover, which no configuration could have named.
+   * The DMs a backfill has to cover. `channels` never holds one — the id does not exist
+   * until someone opens it — and `dmChannels` is empty until `accept` fills it, so without
+   * this a DM sent while the agent was down is in neither set and is lost.
    *
-   * `channels` never holds a DM — its conversation id does not exist until someone opens
-   * it — and `dmChannels` is populated by `accept`, so at startup it is empty. Between
-   * them that left a DM sent while the agent was down in neither set: nothing enumerated
-   * it, nothing replayed it, and the cursor moved past it the moment any channel message
-   * was accepted. The message was gone, and a person who had asked something in a DM got
-   * silence back from an agent that looked healthy.
-   *
-   * **Read, never granted.** These ids are backfilled and nothing else. A DM still earns
-   * the right to be answered by having spoken, which `accept` is what records — so a
-   * conversation with nothing in the gap stays one this adapter may not post into, and
-   * enumerating open DMs cannot become a way to open one.
-   *
-   * A failed lookup costs the backfill, not the launch. Without `im:read` there is nothing
-   * to enumerate, and taking a working channel-only agent down over it would be refusing
-   * the wrong thing.
+   * **Read, never granted:** these ids are backfilled and nothing else. A DM still earns a
+   * reply by having spoken. A failed lookup costs the backfill, not the launch.
    */
   private async directChannels(live: () => boolean): Promise<string[]> {
     const ids: string[] = [];
@@ -685,9 +657,8 @@ export class SlackAdapter implements SurfaceAdapter {
   /**
    * Drains one cursor-paged endpoint. Slack pages backwards in time; the caller sorts.
    *
-   * `live` is asked between pages, so a walk started by a run that has since ended stops
-   * rather than paging to the end of the gap on its behalf. A backfill passes it; a thread
-   * read does not, being a caller's own request rather than a run's background work.
+   * `live` is asked between pages, so a walk whose run has ended stops. A backfill passes
+   * it; a thread read does not, being a caller's request rather than background work.
    */
   private async collect(
     page: (cursor?: string) => Promise<SlackHistoryPage>,

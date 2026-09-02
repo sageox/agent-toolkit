@@ -32,7 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adapter-wide, since that is all `ChannelQueue` asks for and one message's lookups must not
   delay another channel. A message still resolving when `stop()` runs is discarded rather
   than finishing into a later `start()`. After the first mention of a person every lookup is
-  a cache hit.
+  a cache hit. An envelope that arrives before the connection is up waits for it rather
+  than being dropped, and a start that then fails delivers none of what it heard — the
+  caller's `start()` throwing and a turn having been spent answering would otherwise both
+  be true at once.
 
 - **A probing job can read its thread back on Slack, so a roll call there has an answer.**
   `SlackAdapter.readThread` walks `conversations.replies` under a root the run posted and

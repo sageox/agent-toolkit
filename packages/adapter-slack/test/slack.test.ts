@@ -502,38 +502,37 @@ describe("SlackAdapter", () => {
     expect(api.posts[0].threadTs).toBe("1786761000.000300");
   });
 
-  it("drops a queued event when the start that heard it fails", async () => {
-    const { instance, socket, api } = adapter();
+  it("delivers nothing from a start that never connected, and not into the next one", async () => {
+    const { instance, socket } = adapter();
     const first: InboundEvent[] = [];
-    let release: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    // The lookup is what holds the message past the failure. Without one it settles while
-    // `onEvent` is still cleared, and nothing about the run it belongs to is ever tested.
-    api.userName = async () => {
-      await held;
-      return "alice";
-    };
-    // The listener is registered before the connection is up, so an envelope can already be
-    // queued when the start fails.
     let queued: unknown;
+    // The listener is registered before the connection is up, so an envelope can arrive
+    // here. No held lookup and a full drain before the failure, so it has every chance to
+    // complete: if delivery were merely racing the cleanup, this is where it would win.
     socket.start = async () => {
-      queued = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+      queued = socket.emit(mention("1786761000.000100"));
+      await new Promise((resolve) => setImmediate(resolve));
       throw new Error("socket mode unavailable");
     };
 
     await expect(instance.start((event) => first.push(event))).rejects.toThrow(/unavailable/);
+    await queued;
 
+    // `start` threw, so the caller believes this adapter never came up. A turn spent
+    // answering under an identity that is not online would make that a lie.
+    expect(first).toEqual([]);
+
+    // Nor does it surface later: the run it belonged to is over, and the next one is not
+    // the same run.
     const second: InboundEvent[] = [];
     socket.start = async () => {};
     await instance.start((event) => second.push(event));
-    release!();
     await queued;
-
-    // It belongs to the run that heard it, and that run never came up.
-    expect(first).toEqual([]);
     expect(second).toEqual([]);
+
+    // And that run works normally.
+    await socket.emit(mention("1786761000.000200"));
+    expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000200"]);
   });
 
   it("abandons a replay when the adapter is stopped mid-backfill", async () => {
@@ -628,9 +627,16 @@ describe("SlackAdapter", () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let entered: () => void;
+    const inLookup = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     api.userName = async (id: string) => {
       looked.push(id);
-      if (id === "U0ALICE") await held;
+      if (id === "U0ALICE") {
+        entered();
+        await held;
+      }
       return id.toLowerCase();
     };
     await instance.start((event) => got.push(event));
@@ -640,6 +646,10 @@ describe("SlackAdapter", () => {
     // run actually serving that conversation waits behind.
     const a = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
     const b = socket.emit(mention("1786761000.000200", { text: "<@UBOT> ask <@U0BOB>" }));
+    // Stopped once the first lookup is genuinely in flight, so the run was live when it
+    // began. Stopping earlier would make both messages stale and prove nothing about the
+    // second one in particular.
+    await inLookup;
     await instance.stop();
     release!();
     await Promise.all([a, b]);
