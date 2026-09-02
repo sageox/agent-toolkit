@@ -91,7 +91,15 @@ your behalf. An `image:` source is one more pull from a registry the node alread
 `imageRef` from, with the same node credential — pin it by digest for the same reason
 `imageRef` is pinned by digest, and note that a failed pull on a CronJob loses that run
 under `backoffLimit: 0`, the same class of failure as an `imageRef` pull failure. A
-`persistentVolumeClaim:` or `csi:` source costs whatever that driver costs at attach.
+`persistentVolumeClaim:` or `csi:` source costs whatever that driver costs at attach — and
+on an agent that declares a schedule it has to be mountable from more than one node,
+normally `ReadWriteMany`. A job Pod mounts the bundle source too, and `ReadWriteOnce` binds
+a volume to whichever node holds it: the job Pod then sits in `Init:0/1` behind a
+`Multi-Attach` event until its deadline kills it, unless it happened to land beside the
+Deployment. `readOnly: true` does not help — the limit is on nodes, not on writers. The
+chart cannot check this for you: values carry a `claimName`, the access mode lives on the
+claim, and the chart tooling deliberately does not contact the cluster. This is the one
+volume both Pods still mount; the agent's own claim is [no longer one of them](#jobs).
 
 Nothing here caps what a bundle may carry. On an uncapped source a runner can ship
 `node_modules`, a compiled binary, or a model file; whether it *should* is a policy you set,
