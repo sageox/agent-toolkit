@@ -51,7 +51,7 @@ Or depend on it, and nest this chart's values under its name. Helm hands every s
 # Chart.yaml
 dependencies:
   - name: agent
-    version: 0.9.0
+    version: 0.10.0
     repository: "file://../agent-toolkit/deploy/helm"
 ```
 
