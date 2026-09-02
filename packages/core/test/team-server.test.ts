@@ -230,10 +230,21 @@ describe("what the brain is told when ox fails", () => {
 });
 
 describe("the team brain's own capability health", () => {
-  // Answers with no passages, and fails with whatever the body has written into `fail`
-  // beside it. ox runs with its cwd set to that directory, so `./fail` is the marker.
-  const SCRIPTED = `if [ -f ./fail ]; then cat ./fail >&2; exit 1; fi\necho '{"team_context":{"results":[]}}'`;
+  // Answers with no passages; fails with whatever the body has written into `fail` beside
+  // it, and answers unreadably if `garbage` is there. ox runs with its cwd set to that
+  // directory, so the markers are `./fail` and `./garbage`.
+  const SCRIPTED =
+    `if [ -f ./garbage ]; then echo "not json at all"; exit 0; fi\n` +
+    `if [ -f ./fail ]; then cat ./fail >&2; exit 1; fi\n` +
+    `echo '{"team_context":{"results":[]}}'`;
   const REVOKED = "Error: team context query failed: not authenticated. Run 'ox login' first";
+  // A lookup whose query says `slow` answers a second late; every other one is refused now.
+  // That is enough to start one lookup before another and have it finish after.
+  const SLOW_THEN_REVOKED =
+    `case "$*" in\n` +
+    `  *slow*) sleep 1; echo '{"team_context":{"results":[]}}'; exit 0;;\n` +
+    `esac\n` +
+    `echo "${REVOKED}" >&2\nexit 1`;
 
   it("reports nothing until a lookup has been made", async () => {
     // Not `Ok`: nothing has tried the credential yet, and a reading is a claim about it.
@@ -286,16 +297,34 @@ describe("the team brain's own capability health", () => {
     expect(value).toBe("Ok");
   });
 
-  it("leaves the reading standing when one lookup merely fell over", async () => {
-    // `failed` is the class retrying can disprove. Latching it would announce an outage to
-    // a human on every flaky lookup, which is how people learn to skim announcements.
+  it("leaves the reading standing when a lookup falls over or answers unreadably", async () => {
+    // The two classes retrying can disprove. Latching either would announce an outage to a
+    // human on every flaky lookup, which is how people learn to skim announcements.
     const { value } = await withFakeOx(SCRIPTED, async (brain, bin) => {
       await brain.search("x", 5);
       writeFileSync(join(bin, "fail"), "Error: the team context service is unavailable");
       await brain.search("x", 5).catch(() => {});
-      return brain.readings()[0].health;
+      const afterFailed = brain.readings()[0].health;
+      rmSync(join(bin, "fail"));
+      writeFileSync(join(bin, "garbage"), "");
+      await brain.search("x", 5).catch(() => {});
+      return [afterFailed, brain.readings()[0].health];
     });
-    expect(value).toBe("Ok");
+    expect(value).toEqual(["Ok", "Ok"]);
+  });
+
+  it("does not let a slower older lookup bury what a newer one proved", async () => {
+    // Completion order is not start order once the launch probe overlaps a turn, and a
+    // stale `Ok` landing on top of an auth failure is the silence this reading exists to
+    // break, restored by a race.
+    const { value } = await withFakeOx(SLOW_THEN_REVOKED, async (brain) => {
+      const older = brain.search("slow", 1).catch(() => {});
+      await brain.search("newer", 5).catch(() => {});
+      const beforeTheSlowOneLands = brain.readings()[0].health;
+      await older;
+      return [beforeTheSlowOneLands, brain.readings()[0].health];
+    });
+    expect(value).toEqual(["Unavailable", "Unavailable"]);
   });
 
   it("takes the first reading at launch, without throwing", async () => {

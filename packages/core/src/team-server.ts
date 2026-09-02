@@ -160,8 +160,21 @@ export interface TeamBrain extends TeamOx {
  */
 export function makeOxTeam(scope: OxScope = {}): TeamBrain {
   let reading: ProbeResult | undefined;
+  // Which lookup's outcome `reading` currently holds. Completion order is not start order:
+  // the launch probe runs alongside the first turns, and `ChannelQueue` runs one turn per
+  // channel rather than one at a time, so two lookups can be in flight. A slow older `Ok`
+  // landing after a newer auth failure would restore exactly the silence this reading
+  // exists to break, so an outcome is dropped when something newer has already recorded.
+  let started = 0;
+  let recorded = 0;
 
   const search: TeamSearch = async (query, limit) => {
+    const lookup = ++started;
+    const record = (result: ProbeResult) => {
+      if (lookup < recorded) return;
+      recorded = lookup;
+      reading = result;
+    };
     const args = ["query", query, "--json", "--limit", String(limit)];
     if (scope.team) args.push("--team", scope.team);
     if (scope.repo) args.push("--repo", scope.repo);
@@ -176,11 +189,13 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
           // second wording of it: both reach a turn, and two spellings of one fact drift
           // into the agent hearing one thing per lookup and another from its capability
           // block.
-          reading = probeUnavailable(
-            TEAM_CAPABILITY,
-            latch.failure,
-            latch.remedy,
-            OX_FAILURE_TEXT[error.failure],
+          record(
+            probeUnavailable(
+              TEAM_CAPABILITY,
+              latch.failure,
+              latch.remedy,
+              OX_FAILURE_TEXT[error.failure],
+            ),
           );
         }
       }
@@ -190,7 +205,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     // before is over. Zero passages is still `Ok` and never `Empty` — `ox query` reports no
     // corpus size, and one query matching nothing is also what a team with plenty written
     // down returns to unlucky wording.
-    reading = probeOk(TEAM_CAPABILITY, "team memory answered this gateway's last lookup");
+    record(probeOk(TEAM_CAPABILITY, "team memory answered this gateway's last lookup"));
     return (out as { team_context?: { results?: TeamPassage[] } }).team_context?.results ?? [];
   };
 
