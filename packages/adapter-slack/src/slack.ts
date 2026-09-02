@@ -594,11 +594,11 @@ export class SlackAdapter implements SurfaceAdapter {
    * moved in a period — only the replies of a thread you can already name.
    */
   private async backfill(oldest: number, session: number): Promise<void> {
-    for (const channel of [...this.allowedChannels, ...(await this.directChannels())]) {
-      // A replay outlives a `stop` that lands mid-page otherwise, and goes on spending
-      // history calls on a run that has ended.
-      if (session !== this.generation) return;
-      const live = () => session === this.generation;
+    const live = () => session === this.generation;
+    // Built before the walk it guards: enumerating DMs pages too, and a `stop` landing in
+    // the middle of that is the same waste as one landing in the middle of a history page.
+    for (const channel of [...this.allowedChannels, ...(await this.directChannels(live))]) {
+      if (!live()) return;
       const parents = await this.collect(
         (cursor) => this.api.history({ channel, oldest: String(oldest), cursor }),
         live,
@@ -621,14 +621,20 @@ export class SlackAdapter implements SurfaceAdapter {
       const replay = missed
         .filter((message) => Number(message.ts ?? 0) > oldest)
         .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
-      for (const message of replay) {
-        await this.enqueue({
-          ...message,
-          type: message.type ?? "message",
-          channel,
-          channel_type: this.privateChannels.has(channel) ? "group" : "channel",
-        }, session);
-      }
+      // Queued in one turn, then awaited — never awaited one at a time. Each `await` here
+      // was a point where a live message could land in the middle of a sorted replay, and
+      // the older messages still to come would then overwrite the newer one's reply target.
+      // The chain already orders them, so nothing is lost by not waiting between them.
+      await Promise.all(
+        replay.map((message) =>
+          this.enqueue({
+            ...message,
+            type: message.type ?? "message",
+            channel,
+            channel_type: this.privateChannels.has(channel) ? "group" : "channel",
+          }, session),
+        ),
+      );
     }
   }
 
@@ -651,7 +657,7 @@ export class SlackAdapter implements SurfaceAdapter {
    * to enumerate, and taking a working channel-only agent down over it would be refusing
    * the wrong thing.
    */
-  private async directChannels(): Promise<string[]> {
+  private async directChannels(live: () => boolean): Promise<string[]> {
     const ids: string[] = [];
     try {
       let cursor: string | undefined;
@@ -659,7 +665,7 @@ export class SlackAdapter implements SurfaceAdapter {
         const page = await this.api.openDirectChannels(cursor);
         ids.push(...(page.ids ?? []));
         cursor = page.nextCursor || undefined;
-      } while (cursor);
+      } while (cursor && live());
     } catch {
       // Whatever paged in before the failure is still worth refilling. Without `im:read`
       // that is nothing, which is the case this catch is really here for.

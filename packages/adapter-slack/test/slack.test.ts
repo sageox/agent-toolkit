@@ -644,6 +644,80 @@ describe("SlackAdapter", () => {
     expect(got).toEqual([]);
   });
 
+  it("keeps a sorted replay contiguous when a live message lands mid-backfill", async () => {
+    const { instance, socket, api } = adapter({ since: 1786760000 });
+    const got: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inLookup = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    api.userName = async () => {
+      entered();
+      await held;
+      return "alice";
+    };
+    // History pages newest-first, so the replay sorts to 000100 then 000200. Only the
+    // first mentions anyone, which is what holds the replay open midway through.
+    api.histories.push({
+      messages: [
+        mention("1786761000.000200"),
+        mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }),
+      ],
+    });
+
+    const starting = instance.start((event) => got.push(event));
+    await inLookup;
+    const live = socket.emit(mention("1786761000.000400"));
+    release!();
+    await Promise.all([starting, live]);
+
+    // The live message must not land between two replayed ones. If it does, the older
+    // replay that follows it is the last thing written to the reply target.
+    expect(got.map((event) => event.id.nativeId)).toEqual([
+      "GENG:1786761000.000100",
+      "GENG:1786761000.000200",
+      "GENG:1786761000.000400",
+    ]);
+    await instance.send({ surface: "slack", id: "GENG", isPublic: false }, { text: "ok" });
+    expect(api.posts[0].threadTs).toBe("1786761000.000400");
+  });
+
+  it("stops enumerating DMs once the run it belongs to has ended", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    const got: InboundEvent[] = [];
+    let release: () => void;
+    let entered: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inDms = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const requested: Array<string | undefined> = [];
+    api.openDirectChannels = async (cursor?: string) => {
+      requested.push(cursor);
+      if (cursor) return { ids: ["DLATE"] };
+      entered();
+      await held;
+      return { ids: ["DALICE"], nextCursor: "page2" };
+    };
+
+    const starting = instance.start((event) => got.push(event));
+    await inDms;
+    await instance.stop();
+    release!();
+    await starting;
+
+    // Enumerating DMs pages like everything else here, and paging for a run that has ended
+    // spends a rate limit the next run needs.
+    expect(requested).toEqual([undefined]);
+    expect(got).toEqual([]);
+  });
+
   it("refuses a top-level post to an unconfigured channel", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});
