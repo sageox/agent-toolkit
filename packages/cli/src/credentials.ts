@@ -246,6 +246,14 @@ export interface DeclaredSecret extends CredentialSpec {
  * The merged entry names every place, and is **fatal if any declaration is fatal**: a
  * feature that degrades gracefully without the credential does not make the one that cannot
  * start without it any less broken.
+ *
+ * It keeps a hint only where every declaration gives the same one, under the same reasoning:
+ * a remedy is advice about one feature, and the other feature sharing the ref may be the one
+ * it is wrong for. Moving a `GITHUB_TOKEN` that a job and a `private` checkout both read into
+ * `run.jobSecrets` leaves the clone's declaration unresolved and the launch still refused —
+ * so that hint must not survive the merge that proves the gateway needs the value. Two jobs
+ * sharing a ref do give the same hint, which is why it does not name their indices: `where`
+ * already names every line, and a remedy true of both should read as one remedy.
  */
 function mergeByRef(declared: DeclaredSecret[]): DeclaredSecret[] {
   const byRef = new Map<string, DeclaredSecret>();
@@ -259,6 +267,7 @@ function mergeByRef(declared: DeclaredSecret[]): DeclaredSecret[] {
       ...seen,
       where: `${seen.where} and ${secret.where}`,
       degraded: seen.degraded && secret.degraded ? seen.degraded : undefined,
+      hint: seen.hint === secret.hint ? seen.hint : undefined,
     });
   }
   return [...byRef.values()];
@@ -331,11 +340,19 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
   // calling process was given, and a `jobSecrets` ref is the one a deployment keeps out of
   // the gateway's. Listing it would refuse the launch of every agent that split a credential
   // out. `job run` resolves it per run and fails by name.
+  //
+  // The hint names that field here, where the refusal is read, because the two remedies
+  // this error otherwise offers — mount the file here, add it to `.env` — are both the
+  // arrangement the split was for.
   manifest.jobs.forEach((job, index) => {
     for (const [envVar, ref] of Object.entries(job.run.secrets)) {
       declared.push({
         ...spawnedSecretSpec(ref, envVar, "the job body"),
         where: `jobs[${index}].run.secrets.${envVar} (job "${job.slug}")`,
+        hint:
+          `if ${ref} is mounted only in a directory this process is not given, it belongs ` +
+          "in run.jobSecrets rather than run.secrets — this check leaves that map out, and " +
+          "`sageox-agent job run` resolves it per run and fails by name",
       });
     }
   });

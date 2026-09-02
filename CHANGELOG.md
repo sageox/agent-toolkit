@@ -99,6 +99,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on luck. The deployment contract's job clause says this too: a target owes a run a writable
   bundle directory, not a durable one.
 
+- **The launch a job-only credential refuses now names the field that would let it start.**
+  `sageox-agent run` resolves every `jobs[].run.secrets` ref against the directory this
+  process was given, before it opens a socket, so a credential moved to a directory only
+  `job run` is given — but left spelled `secrets` — takes the whole surface down: no mentions
+  answered, no on-request runs, over a value nothing in that process would have read. The
+  refusal stays right, since nothing there can tell a moved credential from a typo, and a
+  scheduled job's unresolvable ref is otherwise a crashed 3am tick in a channel. What was
+  missing is the way out. The two remedies the message offered — mount the file here, add it
+  to `.env` — are both "put it back where the gateway reads it", which is the arrangement
+  `run.jobSecrets` exists to avoid, and that map is deliberately left out of this inventory.
+  Each job-declared ref now carries it as the hint, in `run` and in `doctor`. A job that also
+  arms `trigger.onRequest` is still refused at load, naming the three ways out it always has.
+  The remedy is withheld where the gateway itself also reads the ref — a job and a `private`
+  checkout sharing `GITHUB_TOKEN` would have to move a token the clone needs — so `mergeByRef`
+  now keeps a hint only where every declaration gives the same one, on the reasoning it
+  already applies to `degraded`. Which declaration was pushed first no longer decides which
+  advice an operator reads.
+
 - **A job a person asks for runs, even when its kill switch is parked.** `job_run` records
   the author of the message the agent is answering, so a request that arrives through a chat
   surface is the human on-request run the host has always described — it has refused with

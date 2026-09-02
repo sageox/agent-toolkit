@@ -436,7 +436,7 @@ Two consequences worth knowing before you split a credential out:
   `run.secrets` ref against its own mount before it opens a socket and refuses the launch on
   one that does not, so a credential that moved here but stayed spelled `secrets` is a
   crashlooping agent rather than a quietly weaker one. `run.jobSecrets` is left out of that
-  inventory.
+  inventory, and the refusal names it — so the Pod's log carries the fix, not only this page.
 - **The render refuses `jobSecrets` on an agent with no schedule**, because no Pod would then
   mount it and the field would read as though it had moved a credential it had not.
 
