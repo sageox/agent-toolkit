@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that moved but stayed spelled `secrets` refuses the launch, not just the run. Nothing that
   loads today stops loading — the key is new, and `run` was already `.strict()`.
 
+### Changed
+
+- **The agent base image ships `ox` 0.14.3.** `OX_VERSION` and both architecture
+  checksums in `deploy/docker/Dockerfile` move up from 0.13.0. The six ox calls the
+  toolkit makes — `query`, `status`, `team list`, `index code`, `code status`, and
+  `code search` — take the same flags and return the same fields on 0.14.3 that they
+  did on 0.13.0, so nothing that reads them changes.
+
 ### Fixed
 
 - **A job a person asks for runs, even when its kill switch is parked.** `job_run` records
