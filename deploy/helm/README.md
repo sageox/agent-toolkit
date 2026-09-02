@@ -98,8 +98,9 @@ a volume to whichever node holds it: the job Pod then sits in `Init:0/1` behind 
 `Multi-Attach` event until its deadline kills it, unless it happened to land beside the
 Deployment. `readOnly: true` does not help — the limit is on nodes, not on writers. The
 chart cannot check this for you: values carry a `claimName`, the access mode lives on the
-claim, and the chart tooling deliberately does not contact the cluster. This is the one
-volume both Pods still mount; the agent's own claim is [no longer one of them](#jobs).
+claim, and the chart tooling deliberately does not contact the cluster. The agent's own
+claim is [not mounted in a job Pod](#jobs) for this reason; a bundle claim still is, on
+every scheduled run.
 
 Nothing here caps what a bundle may carry. On an uncapped source a runner can ship
 `node_modules`, a compiled binary, or a model file; whether it *should* is a policy you set,
