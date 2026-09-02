@@ -28,6 +28,7 @@ import {
   makeOxTeam,
   serveTeamBrain,
   type HostedMcp,
+  type TeamBrain,
   resolveSecret,
   type AgentManifest,
   type Brain,
@@ -256,6 +257,12 @@ async function buildBrain(
   react: boolean;
   /** Present only when the job tool is served — see the shutdown path in `runCmd`. */
   jobs?: JobHost;
+  /**
+   * Present only when a team brain is configured. `runCmd` probes it once and hands its
+   * readings to the gateway, which is the only capability source here other than the code
+   * workspace.
+   */
+  team?: TeamBrain;
 }> {
   const nothingToClose = async () => {};
   if (manifest.brain.provider === "mock") {
@@ -397,6 +404,7 @@ async function buildBrain(
     addHosted(JOB_SERVER, server, `job tool (${requestable.map((l) => l.slug).join(", ")})`);
   }
 
+  let teamBrain: TeamBrain | undefined;
   for (const cfg of wiring.hosted) {
     let server: HostedMcp;
     if (cfg.preset === "vault") {
@@ -425,16 +433,16 @@ async function buildBrain(
         serveAt,
       );
     } else {
-      server = await serveTeamBrain(
-        makeOxTeam({
-          team: cfg.team,
-          repo: cfg.repo,
-          configHome: cfg.configHome,
-          // Resolved here, in the gateway. File-first: a mounted secret beats an env var.
-          token: resolveSecret(cfg.token, { dir: secretsDir }),
-        }),
-        serveAt,
-      );
+      // Held, not just served: this is the one brain that measures its own health, and
+      // `runCmd` puts those readings in the gateway's capability closure.
+      teamBrain = makeOxTeam({
+        team: cfg.team,
+        repo: cfg.repo,
+        configHome: cfg.configHome,
+        // Resolved here, in the gateway. File-first: a mounted secret beats an env var.
+        token: resolveSecret(cfg.token, { dir: secretsDir }),
+      });
+      server = await serveTeamBrain(teamBrain, serveAt);
     }
     addHosted(cfg.name, server, `${cfg.preset === "vault" ? cfg.brainPreset : cfg.preset} brain`);
   }
@@ -465,6 +473,7 @@ async function buildBrain(
     postMessage,
     react,
     jobs,
+    team: teamBrain,
   };
 }
 
@@ -1357,7 +1366,7 @@ async function runCmd(argv: string[]): Promise<void> {
   const state = loadState(statePath);
   const adapters = await buildAdapters(manifest, { secretsDir, since: state.since });
   const egress = new SurfaceEgress({ manifest, adapters });
-  const { brain, closeHosted, postMessage, react, jobs } = await buildBrain(
+  const { brain, closeHosted, postMessage, react, jobs, team } = await buildBrain(
     manifest,
     agent.dir,
     secretsDir,
@@ -1365,6 +1374,18 @@ async function runCmd(argv: string[]): Promise<void> {
     codeWorkspace,
     policy,
   );
+
+  // One lookup, so a credential that was already dead at deploy time is not first noticed
+  // by an agent answering a team-knowledge question from the model alone. Off the startup
+  // path for the same reason the code index is: an unusable team brain leaves this agent
+  // less informed, not wrong, so it comes up, works, and discloses.
+  if (team) {
+    void team.probe().then(() => {
+      for (const r of team.readings().filter(isActionable)) {
+        process.stdout.write(`  note: ${r.capability} — ${r.reason}; ${r.remedy}\n`);
+      }
+    });
+  }
 
   // Subscribe before the brain is ready — upstream's `--lazy-pool` exists for the same
   // reason. A brain that takes seconds to come up must not cost us the mentions that
@@ -1390,7 +1411,10 @@ async function runCmd(argv: string[]): Promise<void> {
           team: manifest.brains.some((b) => b.preset === "team"),
         }
       : undefined,
-    capabilities: codeWorkspace ? () => codeWorkspace.readings() : undefined,
+    // Re-read every turn, never captured: the team reading changes when a lookup fails or
+    // succeeds, and a latched one handed over as a value would outlive the credential that
+    // was rotated to clear it.
+    capabilities: () => [...(codeWorkspace?.readings() ?? []), ...(team?.readings() ?? [])],
   });
 
   // Persist the resume cursor periodically and on exit, so a restart does not reopen a

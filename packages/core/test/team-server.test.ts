@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -11,11 +11,13 @@ import {
   TEAM_TOOLS,
   TEAM_TOOL_NAMES,
   type OxFailure,
+  type TeamBrain,
   type TeamOx,
   type TeamPassage,
   type TeamSearch,
   passageDate,
 } from "../src/team-server.ts";
+import { describeHealth, isActionable, isDegrading, needsHuman } from "../src/health.ts";
 
 const passages: TeamPassage[] = [
   { score: 0.94, text: "We chose Postgres over DynamoDB for the ledger.", doc_type: "adr", file_path: "docs/adr/012.md" },
@@ -30,6 +32,44 @@ function fakeOx(over: Partial<TeamOx> = {}): TeamOx {
     search,
     ...over,
   };
+}
+
+/**
+ * Waits for a condition rather than for a duration. A test that sleeps its way to an
+ * ordering asserts how loaded the machine was, and passes on either answer.
+ */
+async function until(condition: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+/**
+ * Puts a fake `ox` on PATH for the duration of `body`, with the audit lines it logs
+ * captured. The child runs with its cwd set to the same directory, so a script can gate on
+ * a marker file the body writes there — which is how one brain sees a credential die and
+ * come back. Pass no script to put nothing on PATH at all.
+ */
+async function withFakeOx<T>(
+  script: string | undefined,
+  body: (brain: TeamBrain, bin: string) => Promise<T>,
+): Promise<{ value: T; log: string }> {
+  const bin = mkdtempSync(join(tmpdir(), "ox-fake-"));
+  if (script !== undefined) writeFileSync(join(bin, "ox"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = script === undefined ? bin : `${bin}:${previousPath ?? ""}`;
+  const logged: string[] = [];
+  const warn = vi.spyOn(console, "warn").mockImplementation((line) => void logged.push(String(line)));
+  try {
+    const value = await body(makeOxTeam({ team: "team_x", cwd: bin }), bin);
+    return { value, log: logged.join("\n") };
+  } finally {
+    warn.mockRestore();
+    process.env.PATH = previousPath;
+    rmSync(bin, { recursive: true, force: true });
+  }
 }
 
 const call = (name: string, args: Record<string, unknown> = {}, ox: TeamOx = fakeOx()) =>
@@ -132,23 +172,11 @@ describe("what the brain is told when ox fails", () => {
 
   /** Runs `search` against a fake `ox` on PATH, and returns the error and the audit lines. */
   async function failingOx(script: string) {
-    const bin = mkdtempSync(join(tmpdir(), "ox-fake-"));
-    writeFileSync(join(bin, "ox"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
-    const previousPath = process.env.PATH;
-    process.env.PATH = `${bin}:${previousPath ?? ""}`;
-    const logged: string[] = [];
-    const warn = vi.spyOn(console, "warn").mockImplementation((line) => void logged.push(String(line)));
-    try {
+    const { value, log } = await withFakeOx(script, (brain) =>
       // The query is the caller's own words: the thing that must not come back out.
-      const error = await makeOxTeam({ team: "team_x", cwd: bin })
-        .search(PLANTED, 5)
-        .then(() => undefined, (e: Error) => e);
-      return { message: error?.message ?? "", log: logged.join("\n") };
-    } finally {
-      warn.mockRestore();
-      process.env.PATH = previousPath;
-      rmSync(bin, { recursive: true, force: true });
-    }
+      brain.search(PLANTED, 5).then(() => undefined, (e: Error) => e),
+    );
+    return { message: value?.message ?? "", log };
   }
 
   it("keeps ox's stderr out of the brain and puts it in the audit log", async () => {
@@ -210,6 +238,154 @@ describe("what the brain is told when ox fails", () => {
     // four names, and the brain would act the same way on all of them.
     const classes: OxFailure[] = ["not-installed", "not-authenticated", "unreadable", "failed"];
     expect(new Set(classes.map((name) => OX_FAILURE_TEXT[name])).size).toBe(classes.length);
+  });
+});
+
+describe("the team brain's own capability health", () => {
+  // Answers with no passages; fails with whatever the body has written into `fail` beside
+  // it, and answers unreadably if `garbage` is there. ox runs with its cwd set to that
+  // directory, so the markers are `./fail` and `./garbage`.
+  const SCRIPTED =
+    `if [ -f ./garbage ]; then echo "not json at all"; exit 0; fi\n` +
+    `if [ -f ./fail ]; then cat ./fail >&2; exit 1; fi\n` +
+    `echo '{"team_context":{"results":[]}}'`;
+  const REVOKED = "Error: team context query failed: not authenticated. Run 'ox login' first";
+  // A lookup whose query says `slow` announces itself in `blocked` and then waits for the
+  // test to create `release`; every other one is refused straight away. A barrier rather
+  // than a delay, so the interleaving is the test's to decide and not the machine's.
+  const HELD_THEN_REVOKED =
+    `case "$*" in\n` +
+    `  *slow*)\n` +
+    `    : > ./blocked\n` +
+    `    while [ ! -f ./release ]; do sleep 0.02; done\n` +
+    `    echo '{"team_context":{"results":[]}}'\n` +
+    `    exit 0;;\n` +
+    `  *flaky*) echo "Error: the team context service is unavailable" >&2; exit 1;;\n` +
+    `esac\n` +
+    `echo "${REVOKED}" >&2\nexit 1`;
+
+  it("lets a success outlive a newer transient failure and clear the latch", async () => {
+    // The other half of the ordering rule, and it is deliberate: a `failed` lookup records
+    // nothing, so it does not make a newer-started success stale. Suppressing that success
+    // would hold `Unavailable` on evidence nobody has — and delay exactly the recovery a
+    // rotated credential is supposed to get without a restart.
+    const { value } = await withFakeOx(HELD_THEN_REVOKED, async (brain, bin) => {
+      await brain.search("revoked", 5).catch(() => {});
+      const latched = brain.readings()[0].health;
+      const held = brain.search("slow", 1).catch(() => {});
+      await until(() => existsSync(join(bin, "blocked")), "the held lookup to start");
+      // Asserted rather than swallowed: a `flaky` lookup that answered would leave the
+      // held success to produce `Ok` on its own, and the test would pass having exercised
+      // nothing.
+      await expect(brain.search("flaky", 5)).rejects.toMatchObject({ failure: "failed" });
+      writeFileSync(join(bin, "release"), "");
+      await held;
+      return [latched, brain.readings()[0].health];
+    });
+    expect(value).toEqual(["Unavailable", "Ok"]);
+  });
+
+  it("reports nothing until a lookup has been made", async () => {
+    // Not `Ok`: nothing has tried the credential yet, and a reading is a claim about it.
+    const { value } = await withFakeOx(SCRIPTED, async (brain) => brain.readings());
+    expect(value).toEqual([]);
+  });
+
+  it("latches a revoked credential, so the turn and the operator both learn of it", async () => {
+    const { value, log } = await withFakeOx(SCRIPTED, async (brain, bin) => {
+      writeFileSync(join(bin, "fail"), REVOKED);
+      await brain.search("how do we deploy", 5).catch(() => {});
+      return brain.readings();
+    });
+
+    expect(value).toHaveLength(1);
+    const [reading] = value;
+    expect(reading.capability).toBe("brain.team");
+    expect(reading.health).toBe("Unavailable");
+    // The same word on both lines, so one grep finds the classification and the reading.
+    expect(log).toContain("class=not-authenticated");
+    expect(describeHealth(reading)).toContain("failure=not-authenticated");
+    // Disclosed to the agent, and announced to a human — the two are separate decisions.
+    expect(isDegrading(reading.health)).toBe(true);
+    expect(needsHuman(reading.health)).toBe(true);
+    // What the agent is told is the fixed sentence, and the remedy is only for the operator.
+    expect(reading.reason).toBe(OX_FAILURE_TEXT["not-authenticated"]);
+    expect(isActionable(reading) && reading.remedy).toMatch(/rotate/);
+  });
+
+  it("clears itself on the next answer, so a rotated credential needs no restart", async () => {
+    const { value } = await withFakeOx(SCRIPTED, async (brain, bin) => {
+      const path = join(bin, "fail");
+      writeFileSync(path, REVOKED);
+      await brain.search("x", 5).catch(() => {});
+      const dead = brain.readings()[0].health;
+      rmSync(path);
+      await brain.search("x", 5);
+      return [dead, brain.readings()[0].health];
+    });
+    expect(value).toEqual(["Unavailable", "Ok"]);
+  });
+
+  it("reads an answer with no passages as Ok, never as an empty corpus", async () => {
+    // One query that matched nothing says nothing about how much the team has written
+    // down, and `ox query` reports no corpus size. `Empty` here would be a guess.
+    const { value } = await withFakeOx(SCRIPTED, async (brain) => {
+      expect(await brain.search("nothing matches this", 5)).toEqual([]);
+      return brain.readings()[0].health;
+    });
+    expect(value).toBe("Ok");
+  });
+
+  it("leaves the reading standing when a lookup falls over or answers unreadably", async () => {
+    // The two classes retrying can disprove. Latching either would announce an outage to a
+    // human on every flaky lookup, which is how people learn to skim announcements.
+    const { value } = await withFakeOx(SCRIPTED, async (brain, bin) => {
+      await brain.search("x", 5);
+      writeFileSync(join(bin, "fail"), "Error: the team context service is unavailable");
+      await brain.search("x", 5).catch(() => {});
+      const afterFailed = brain.readings()[0].health;
+      rmSync(join(bin, "fail"));
+      writeFileSync(join(bin, "garbage"), "");
+      await brain.search("x", 5).catch(() => {});
+      return [afterFailed, brain.readings()[0].health];
+    });
+    expect(value).toEqual(["Ok", "Ok"]);
+  });
+
+  it("does not let a slower older lookup bury what a newer one proved", async () => {
+    // Completion order is not start order once the launch probe overlaps a turn, and a
+    // stale `Ok` landing on top of an auth failure is the silence this reading exists to
+    // break, restored by a race.
+    const { value } = await withFakeOx(HELD_THEN_REVOKED, async (brain, bin) => {
+      // The older lookup is held inside the fake `ox` until this test lets it go, so the
+      // newer one demonstrably records first and the guard is what the assertion rests on.
+      const older = brain.search("slow", 1).catch(() => {});
+      await until(() => existsSync(join(bin, "blocked")), "the older lookup to start");
+      await brain.search("newer", 5).catch(() => {});
+      const whileTheOlderOneIsHeld = brain.readings()[0].health;
+      writeFileSync(join(bin, "release"), "");
+      await older;
+      return [whileTheOlderOneIsHeld, brain.readings()[0].health];
+    });
+    expect(value).toEqual(["Unavailable", "Unavailable"]);
+  });
+
+  it("takes the first reading at launch, without throwing", async () => {
+    const { value } = await withFakeOx(SCRIPTED, async (brain) => {
+      await brain.probe();
+      return brain.readings()[0].health;
+    });
+    expect(value).toBe("Ok");
+  });
+
+  it("latches a missing `ox` at launch too — an image built without it stays broken", async () => {
+    const { value } = await withFakeOx(undefined, async (brain) => {
+      await brain.probe();
+      return brain.readings()[0];
+    });
+    expect(value.health).toBe("Unavailable");
+    expect(describeHealth(value)).toContain("failure=not-installed");
+    expect(value.reason).toBe(OX_FAILURE_TEXT["not-installed"]);
   });
 });
 

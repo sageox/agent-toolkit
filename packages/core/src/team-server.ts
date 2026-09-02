@@ -9,6 +9,7 @@ import {
   type McpHandler,
   type ServeOptions,
 } from "./mcp-http.ts";
+import { probeOk, probeUnavailable, type ProbeFailure, type ProbeResult } from "./health.ts";
 
 const run = promisify(execFile);
 
@@ -127,20 +128,95 @@ export interface TeamOx {
 }
 
 /**
+ * The ox-backed surface, plus the capability health its own lookups measure.
+ *
+ * Health is not on {@link TeamOx} because {@link teamBrainHandler} never reads it. What
+ * the brain is told about a failed lookup is the per-turn sentence in
+ * {@link OX_FAILURE_TEXT}; the latched reading is for the gateway's capability closure and
+ * the operator's terminal, which are the two places that sentence never reaches.
+ */
+export interface TeamBrain extends TeamOx {
+  /**
+   * One lookup at launch, so a credential that is already dead at deploy time is no more
+   * silent than one revoked later. Nothing else in `run` checks: `oxStatus()` is called
+   * only by `init` and `doctor`, and a deployment runs neither.
+   *
+   * Never throws — the outcome is the reading.
+   */
+  probe(): Promise<void>;
+  /**
+   * This brain's capability health, live, as the closure handed to `Gateway` wants it.
+   * Empty until a lookup has happened: a reading before then would be a claim about a
+   * credential nothing has tried.
+   */
+  readings(): readonly ProbeResult[];
+}
+
+/**
  * Builds the ox-backed team surface, bound to one team.
  *
  * `configHome` points ox at its token file. This runs in the gateway, so the credential
  * stays on this side of the boundary; the brain never sees it.
  */
-export function makeOxTeam(scope: OxScope = {}): TeamOx {
+export function makeOxTeam(scope: OxScope = {}): TeamBrain {
+  let reading: ProbeResult | undefined;
+  // Which lookup's outcome `reading` currently holds. Completion order is not start order:
+  // the launch probe runs alongside the first turns, and `ChannelQueue` runs one turn per
+  // channel rather than one at a time, so two lookups can be in flight. A slow older `Ok`
+  // landing after a newer auth failure would restore exactly the silence this reading
+  // exists to break, so an outcome is dropped when something newer has already recorded.
+  let started = 0;
+  let recorded = 0;
+
+  const search: TeamSearch = async (query, limit) => {
+    const lookup = ++started;
+    const record = (result: ProbeResult) => {
+      if (lookup < recorded) return;
+      recorded = lookup;
+      reading = result;
+    };
+    const args = ["query", query, "--json", "--limit", String(limit)];
+    if (scope.team) args.push("--team", scope.team);
+    if (scope.repo) args.push("--repo", scope.repo);
+    let out: unknown;
+    try {
+      out = await runOx(args, scope, oxCwd(scope));
+    } catch (error) {
+      if (error instanceof OxCallError) {
+        const latch = LATCHED[error.failure];
+        if (latch) {
+          // `reason` is the same sentence the failed lookup itself hands the brain, not a
+          // second wording of it: both reach a turn, and two spellings of one fact drift
+          // into the agent hearing one thing per lookup and another from its capability
+          // block.
+          record(
+            probeUnavailable(
+              TEAM_CAPABILITY,
+              latch.failure,
+              latch.remedy,
+              OX_FAILURE_TEXT[error.failure],
+            ),
+          );
+        }
+      }
+      throw error;
+    }
+    // An answer is the proof: ox ran, the credential was accepted, and whatever was latched
+    // before is over. Zero passages is still `Ok` and never `Empty` — `ox query` reports no
+    // corpus size, and one query matching nothing is also what a team with plenty written
+    // down returns to unlucky wording.
+    record(probeOk(TEAM_CAPABILITY, "team memory answered this gateway's last lookup"));
+    return (out as { team_context?: { results?: TeamPassage[] } }).team_context?.results ?? [];
+  };
+
   return {
-    search: async (query, limit) => {
-      const args = ["query", query, "--json", "--limit", String(limit)];
-      if (scope.team) args.push("--team", scope.team);
-      if (scope.repo) args.push("--repo", scope.repo);
-      const out = await runOx(args, scope, oxCwd(scope));
-      return (out as { team_context?: { results?: TeamPassage[] } }).team_context?.results ?? [];
+    search,
+    // The query is a fixed word and the passages are thrown away: what is being read here
+    // is whether ox answers at all.
+    probe: async () => {
+      await search("team", 1).catch(() => {});
     },
+    readings: () => (reading ? [reading] : []),
   };
 }
 
@@ -236,11 +312,54 @@ export function classifyOxFailure(e: { code?: string; stderr?: string }): OxFail
 }
 
 /**
+ * A failed `ox` call, carrying its class. The message is still the fixed per-class
+ * sentence: the class is a second field so a caller can act on it, never a second thing to
+ * parse back out of the text.
+ */
+export class OxCallError extends Error {
+  constructor(
+    readonly failure: OxFailure,
+    message: string,
+  ) {
+    super(message);
+    this.name = "OxCallError";
+  }
+}
+
+/** The capability id this brain's health is reported under. */
+const TEAM_CAPABILITY = "brain.team";
+
+/**
+ * The failure classes worth latching as capability health, and what a person does about
+ * each.
+ *
+ * `failed` and `unreadable` are absent, and that is the judgement here. Latching sends a
+ * human somewhere — `needsHuman` is what the operator note and the degraded turn block are
+ * built on — so it is for what retrying cannot disprove. A lookup that fell over once may
+ * well answer the next time; a missing binary and a rejected credential stay broken until
+ * somebody acts.
+ */
+const LATCHED: Partial<Record<OxFailure, { failure: ProbeFailure; remedy: string }>> = {
+  "not-installed": {
+    failure: "not-installed",
+    remedy:
+      "install the `ox` CLI in this agent's image, or drop the team brain from agent.yaml, " +
+      "then restart",
+  },
+  "not-authenticated": {
+    failure: "not-authenticated",
+    remedy:
+      "rotate this deployment's SageOx credential — the secret the team brain's `token` " +
+      "names, or the auth file under its `configHome` — then restart",
+  },
+};
+
+/**
  * The two halves of a failure, together so neither can be raised without the other: a
  * fixed string for the brain, and the detail on the gateway's own log, which the brain
  * never reads. Same split `GuardVerdict` makes between `reason` and the audit line.
  */
-function oxFailed(verb: string, failure: OxFailure, detail: string | undefined): Error {
+function oxFailed(verb: string, failure: OxFailure, detail: string | undefined): OxCallError {
   // Collapsed and bounded so the line stays readable, then quoted as JSON so it cannot
   // end early: a `"` in ox's output would otherwise close `detail` and let the rest of it
   // read as fields of its own — a forged `class=` sends an operator after the wrong cause,
@@ -248,7 +367,7 @@ function oxFailed(verb: string, failure: OxFailure, detail: string | undefined):
   // the only free text here.
   const one = (detail ?? "").replace(/\s+/g, " ").trim().slice(0, 500);
   console.warn(`ox_failed verb="${verb}" class=${failure} detail=${JSON.stringify(one || "none")}`);
-  return new Error(`ox ${verb}: ${OX_FAILURE_TEXT[failure]}`);
+  return new OxCallError(failure, `ox ${verb}: ${OX_FAILURE_TEXT[failure]}`);
 }
 
 async function runOx(args: string[], scope: OxScope, cwd: string): Promise<unknown> {
