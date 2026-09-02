@@ -71,8 +71,10 @@ Maintainers cut a release from `main` in two steps:
 [`release.yml`](.github/workflows/release.yml) does the rest: it builds the
 runtime image for `linux/amd64` and `linux/arm64`, pushes it to
 `ghcr.io/sageox/agent-base`, checks that it is pullable with no credentials, and
-publishes a GitHub Release quoting that version's CHANGELOG section with the
-published digest under it. Production pins that digest; the tags are for humans.
+publishes a GitHub Release: the lead sentence of each of that version's CHANGELOG
+entries, the published digest, and the pull requests GitHub lists for the tag.
+Production pins that digest; the tags are for humans. Write each CHANGELOG entry
+so its first sentence stands alone — that sentence is the release note.
 
 A re-run reuses the digest already published under that version rather than
 building a second one, so a release that failed *after* its push is repaired by
