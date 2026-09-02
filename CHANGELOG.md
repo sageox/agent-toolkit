@@ -52,7 +52,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that moved but stayed spelled `secrets` refuses the launch, not just the run. Nothing that
   loads today stops loading — the key is new, and `run` was already `.strict()`.
 
+### Changed
+
+- **The agent base image ships `ox` 0.14.3.** `OX_VERSION` and both architecture
+  checksums in `deploy/docker/Dockerfile` move up from 0.13.0. The six ox calls the
+  toolkit makes — `query`, `status`, `team list`, `index code`, `code status`, and
+  `code search` — take the same flags and return the same fields on 0.14.3 that they
+  did on 0.13.0, so nothing that reads them changes.
+
 ### Fixed
+
+- **A broadcast in a Slack message is escaped and logged instead of throwing, so the turn
+  ends in an answer.** `SlackAdapter.outboundText` refused `<!channel>` by throwing, and
+  `SurfaceEgress.reply` does not catch around `send` — so the throw left `drive`, ended the
+  turn, and the withdrawn acknowledgement left the channel watching the glyph appear and
+  vanish with no reply. The brain was never told what happened. That refusal predates the
+  outbound escaping this release also ships and was the only thing keeping a broadcast off
+  the wire; `&lt;!channel&gt;` now renders as those characters and notifies nobody, so the
+  refusal bought no reach and cost the turn. Every attempt still gets one line an operator
+  can act on — `egress_escaped surface=slack channel=… rule=slackBroadcast`, the shape
+  `egress_blocked` already logs. The sharper half was that `normalizeSlackText` un-escapes
+  inbound text, so somebody *typing* the characters `<!channel>` reached the brain as
+  markup: quoting a message that merely discussed Slack broadcasts killed the turn over one
+  nobody sent. The un-escape is unchanged, because the round trip is symmetric now — what
+  the brain reads as characters goes back out as characters, and `mentions` remains the only
+  way a Slack message addresses anyone.
 
 - **A scheduled job runs wherever the cluster puts it, instead of only on the agent's node.**
   The chart mounted the agent's `ReadWriteOnce` claim in every job Pod as well as the
@@ -122,7 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent enough to page whoever it named: through none of the id validation `mentions` gets,
   and recorded on the audit line as `mentions=0`. The recipients the adapter builds from
   `mentions` are still markup — the one part of an outbound message it constructs itself.
-  The bulk-mention refusal is unchanged: `<!channel>` is refused, not rendered.
+  Escaping also takes the reach of `<!channel>`, which is what let its refusal go.
 
 ## [0.1.0] - 2026-08-31
 
