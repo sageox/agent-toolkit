@@ -204,9 +204,14 @@ export class SlackAdapter implements SurfaceAdapter {
 
   async start(onEvent?: (event: InboundEvent) => void): Promise<void> {
     if (this.started) throw new Error("SlackAdapter is already started");
+    // Before the first await, not after the last: a `stop` during either lookup below ends
+    // this run, and capturing afterwards would read the replacement's stamp and pass every
+    // ownership check downstream as though this were the live run.
+    const session = this.generation;
 
     const identity = await this.api.authTest();
     if (!identity.userId) throw new Error("Slack auth.test did not return the bot user id");
+    if (session !== this.generation) return;
     this.botUserId = identity.userId;
     this.botId = identity.botId;
     this.onEvent = onEvent;
@@ -214,28 +219,28 @@ export class SlackAdapter implements SurfaceAdapter {
     // Slack Connect and shared channels do not always follow an ID-prefix privacy rule.
     // A failed lookup is not trusted as private: the configured assertion remains, and
     // everything else stays public so the egress guard fails closed.
-    await Promise.all(
+    const privacy = await Promise.all(
       [...this.allowedChannels].map(async (channel) => {
         try {
-          const isPrivate = await this.api.channelIsPrivate(channel);
-          if (isPrivate) this.privateChannels.add(channel);
-          // Recorded, not merely "not added": normalization otherwise falls back to the
-          // ID prefix and calls a public G-prefixed channel private, which is the one
-          // case where the guard would let workspace-visible output through.
-          //
-          // The configured assertion is dropped in the same step, because Slack answering
-          // "public" outranks it. Leaving it in place kept `postTargets` reporting the
-          // channel private off the configured entries alone, so the guard never saw a
-          // public channel to refuse and a cross-surface post reached the whole workspace.
-          else if (isPrivate === false) {
-            this.publicChannels.add(channel);
-            this.privateChannels.delete(channel);
-          }
+          return { channel, isPrivate: await this.api.channelIsPrivate(channel) };
         } catch {
           // Missing channels:read/groups:read must not widen egress.
+          return { channel, isPrivate: undefined };
         }
       }),
     );
+    if (session !== this.generation) return;
+    for (const { channel, isPrivate } of privacy) {
+      if (isPrivate) this.privateChannels.add(channel);
+      // Recorded, not merely "not added": normalization otherwise falls back to the ID
+      // prefix and calls a public G-prefixed channel private, the one case where the guard
+      // would let workspace-visible output through. The configured assertion is dropped in
+      // the same step, because Slack answering "public" outranks it.
+      else if (isPrivate === false) {
+        this.publicChannels.add(channel);
+        this.privateChannels.delete(channel);
+      }
+    }
 
     // Everything `post` and the egress guard rely on is now in place. Saying so before the
     // socket is what lets a caller with nothing to listen for stop here — and it is why an
@@ -244,9 +249,8 @@ export class SlackAdapter implements SurfaceAdapter {
     if (!onEvent) return;
 
     const resumeFrom = this.since;
-    // The run every message from here belongs to. The listener is registered before the
-    // connection is up, so an event can already be queued when the start below fails.
-    const session = this.generation;
+    // The listener goes on before the connection is up, so an envelope can already be
+    // queued when the start below fails.
     this.socketSettled = new Promise((resolve) => {
       this.releaseSocket = resolve;
     });

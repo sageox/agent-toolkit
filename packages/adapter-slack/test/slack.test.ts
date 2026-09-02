@@ -12,6 +12,8 @@ import {
 class FakeSocket implements SlackSocketClient {
   listener?: (payload: unknown) => void;
   started = false;
+  /** Connect attempts, so a stale run opening a second one is visible. */
+  starts = 0;
   disconnected = false;
 
   on(_event: string, listener: (payload: unknown) => void): void {
@@ -24,6 +26,7 @@ class FakeSocket implements SlackSocketClient {
 
   async start(): Promise<void> {
     this.started = true;
+    this.starts += 1;
   }
 
   async disconnect(): Promise<void> {
@@ -563,6 +566,66 @@ describe("SlackAdapter", () => {
     await socket.emit(mention("1786761000.000200"));
     expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000200"]);
   });
+
+  // `start` claims nothing until each of these answers, so a `stop` while one is in flight
+  // has to leave the call that made it unable to take the adapter over.
+  const heldStartCases: Array<[string, (api: FakeApi, gate: () => Promise<void>) => void]> = [
+    [
+      "authTest",
+      (api, gate) => {
+        const real = api.authTest.bind(api);
+        api.authTest = async () => {
+          await gate();
+          return real();
+        };
+      },
+    ],
+    [
+      "channelIsPrivate",
+      (api, gate) => {
+        const real = api.channelIsPrivate.bind(api);
+        api.channelIsPrivate = async (channel: string) => {
+          await gate();
+          return real(channel);
+        };
+      },
+    ],
+  ];
+
+  for (const [call, install] of heldStartCases) {
+    it(`does not let a start held in ${call} take over the run that replaced it`, async () => {
+      const { instance, socket, api } = adapter();
+      let release!: () => void;
+      let arrived!: () => void;
+      const blocked = new Promise<void>((resolve) => (release = resolve));
+      const inCall = new Promise<void>((resolve) => (arrived = resolve));
+      let held = false;
+      install(api, async () => {
+        if (held) return; // only the first run waits; the replacement runs through
+        held = true;
+        arrived();
+        await blocked;
+      });
+
+      const first: InboundEvent[] = [];
+      const starting = instance.start((event) => first.push(event));
+      await inCall;
+      await instance.stop();
+
+      const second: InboundEvent[] = [];
+      await instance.start((event) => second.push(event));
+      const connects = socket.starts;
+
+      release();
+      await starting;
+
+      // It must not have taken the callback, nor connected a socket of its own.
+      await socket.emit(mention());
+      expect(first).toEqual([]);
+      expect(second.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000100"]);
+      expect(socket.starts).toBe(connects);
+    });
+  }
 
   it("does not let a stale start open the gate of the run that replaced it", async () => {
     const { instance, socket } = adapter();
