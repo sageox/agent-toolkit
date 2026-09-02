@@ -569,8 +569,10 @@ export class SlackAdapter implements SurfaceAdapter {
         const name = await this.api.userName(id);
         if (name) this.memberNames.set(id, name);
         else this.unnamed.add(id);
-      } catch {
-        this.unnamed.add(id);
+      } catch (error) {
+        // Only a refusal that will not change on its own. `unnamed` is never cleared, so a
+        // transient failure recorded here renders that member by id for the whole process.
+        if (isPermanentNameFailure(error)) this.unnamed.add(id);
       }
     }
   }
@@ -895,6 +897,25 @@ function address(mentions: readonly string[]): string {
     }
   }
   return `${mentions.map((id) => `<@${id}>`).join(" ")} `;
+}
+
+/**
+ * `users.info` failures that outlast the request, so the id is worth not asking about again.
+ *
+ * Read off `data.error` like {@link isAlreadyReacted}, and deliberately a short list: the
+ * default `WebClient` retries 429 itself, so what reaches this is usually a network fault,
+ * which must stay retryable. Everything unrecognised is treated that way.
+ */
+const PERMANENT_NAME_FAILURES = new Set([
+  "missing_scope",
+  "not_allowed_token_type",
+  "user_not_found",
+  "account_inactive",
+]);
+
+function isPermanentNameFailure(error: unknown): boolean {
+  const code = (error as { data?: { error?: unknown } } | null)?.data?.error;
+  return typeof code === "string" && PERMANENT_NAME_FAILURES.has(code);
 }
 
 /**

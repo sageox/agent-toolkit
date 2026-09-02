@@ -386,10 +386,11 @@ describe("SlackAdapter", () => {
     const got: InboundEvent[] = [];
     await instance.start((event) => got.push(event));
 
-    // No `users:read`, a deactivated account, another Grid workspace — all the same here.
+    // No `users:read`. Slack reports it on `data.error`, which is how a refusal that will
+    // not change is told apart from a request that merely failed.
     api.userName = async (id: string) => {
       api.nameCalls.push(id);
-      throw new Error("missing_scope");
+      throw Object.assign(new Error("missing_scope"), { data: { error: "missing_scope" } });
     };
     await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0GHOST>" }));
     await socket.emit(mention("1786761000.000200", { text: "<@UBOT> ask <@U0GHOST> again" }));
@@ -399,6 +400,28 @@ describe("SlackAdapter", () => {
     expect(got.map((event) => event.text)).toEqual(["ask @U0GHOST", "ask @U0GHOST again"]);
     // Asked once. A refusal that is not remembered spends the rate limit re-asking forever.
     expect(api.nameCalls).toEqual(["U0GHOST"]);
+  });
+
+  it("retries a lookup that merely failed, rather than naming by id forever", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    // A network fault, not a refusal. `WebClient` retries 429 itself, so what reaches this
+    // is usually of this kind — and `unnamed` is never cleared, so caching it would render
+    // that member by id for the life of the process.
+    let attempts = 0;
+    api.userName = async (id: string) => {
+      api.nameCalls.push(id);
+      attempts += 1;
+      if (attempts === 1) throw new Error("socket hang up");
+      return "alice";
+    };
+    await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
+    await socket.emit(mention("1786761000.000200", { text: "<@UBOT> ask <@U0ALICE>" }));
+
+    expect(got.map((event) => event.text)).toEqual(["ask @U0ALICE", "ask @alice"]);
+    expect(api.nameCalls).toEqual(["U0ALICE", "U0ALICE"]);
   });
 
   it("delivers in arrival order even when the first message waits on a lookup", async () => {
@@ -529,6 +552,12 @@ describe("SlackAdapter", () => {
     await instance.start((event) => second.push(event));
     await queued;
     expect(second).toEqual([]);
+
+    // Nor a message for this run to thread onto. Read before it hears anything of its own,
+    // since `lastByChannel` keeps the newest and a live message would mask a stale write.
+    await expect(
+      instance.send({ surface: "slack", id: "GENG", isPublic: false }, { text: "ok" }),
+    ).rejects.toThrow(/no inbound context/);
 
     // And that run works normally.
     await socket.emit(mention("1786761000.000200"));
