@@ -62,9 +62,9 @@ export function strings(value: unknown): string[] {
  * Attachments and broadcasts need no rule here: `GuardedMessage` cannot represent
  * either, so the type refuses them structurally. Where a surface encodes them in the
  * message text instead of in a field of its own, keeping that refusal true is the
- * adapter's job and not this function's: `SlackAdapter.outboundText` refuses `<!channel>`
- * and escapes the rest, so `<@U0ALICE>` in text renders as those characters rather than
- * notifying that member.
+ * adapter's job and not this function's: `SlackAdapter.outboundText` escapes `&`, `<` and
+ * `>`, so `<@U0ALICE>` and `<!channel>` in text render as those characters rather than
+ * notifying anyone.
  */
 export function evaluateEgress(
   msg: GuardedMessage,
