@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -87,6 +87,19 @@ describe("sageox-agent job run", () => {
     const { stdout } = await job("shift", "--trigger", "webhook");
 
     expect(stdout).toContain(`envelope shift/webhook/3 in ${realpathSync(bundle)}`);
+  });
+
+  it("warms no repository workspace, so a body cannot come to depend on one", async () => {
+    // Declared and still not built. The clone, the fast-forward and `ox index code` belong
+    // to `run`, and a body that read what they leave behind would work on the chat door —
+    // which runs inside that process — and find nothing on the tick.
+    writeFileSync(join(bundle, "repos.conf"), "https://github.com/acme/service\n");
+    body('echo "workspace $([ -d workspace ] && echo present || echo absent)"');
+    const { stdout, code } = await job("shift");
+
+    expect(code).toBe(0);
+    expect(stdout).toContain("workspace absent");
+    expect(existsSync(join(bundle, "workspace"))).toBe(false);
   });
 
   it("passes a declared target through, converting the text a command line can only carry", async () => {

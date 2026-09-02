@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The job body contract says what a body finds on disk.** A body must not read
+  `workspace/` — the repository checkouts and the `ox` index there are built by
+  `sageox-agent run`, in its own process, so what a body finds there depends on where it is
+  running: a run the brain starts is inside that process and, on an agent whose brain has
+  code tools, sees one — while every other run is a standalone `job run`, which builds no
+  workspace whatever its trigger. A body that reads a checkout works when someone asks for
+  it and fails on its tick. `docs/job-contract.md` has the rule, what to do instead, and
+  why a shared working tree is the wrong fix; `job run` is now held to it by a test that fails if
+  it ever starts warming a workspace of its own.
+
 ### Changed
 
 - **A GitHub Release leads with one line per entry here, not the whole section.** Quoting
