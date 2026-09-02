@@ -23,11 +23,12 @@
 # has happened, which is the only thing that keeps the property true a year from now.
 #
 # THE DIGEST IS THE CONTRACT, NOT THE TAG. The deployment contract pins `imageRef` by
-# digest, so each release records its manifest-list digest in its GitHub Release, which
-# quotes that version's CHANGELOG.md section beside it. The workflow writes it because
-# nobody — not the tagger, not the reviewer — knows the digest before the build runs; it
-# writes it to the release rather than onto `main` because that is not a branch write, and
-# because the registry already answers `:VERSION` authoritatively.
+# digest, so each release records its manifest-list digest in its GitHub Release, beside a
+# one-line summary of each of that version's CHANGELOG.md entries and the pull-request list
+# GitHub generates on its own. The workflow writes the digest because nobody — not the
+# tagger, not the reviewer — knows it before the build runs; it writes it to the release
+# rather than onto `main` because that is not a branch write, and because the registry
+# already answers `:VERSION` authoritatively.
 name: Release
 
 on:
@@ -92,7 +93,7 @@ jobs:
 
           # A tag can be pushed at any commit, including one that was never merged. Without
           # this, the official image is built from code nobody reviewed and published under
-          # release notes quoted from main's CHANGELOG — describing an image main's own
+          # release notes drawn from main's CHANGELOG — describing an image main's own
           # source never produced.
           if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
             echo "::error::${GITHUB_REF_NAME} points at a commit that is not on main."
@@ -326,7 +327,7 @@ jobs:
 
       # The release, not `main`: a digest is derived, and the registry already answers
       # `:VERSION` authoritatively, so a tracked copy is a second source that drifts — it
-      # did, on the first release. `CHANGELOG.md` keeps what humans write and is quoted
+      # did, on the first release. `CHANGELOG.md` keeps what humans write and is summarized
       # here. Creating a release is not a branch write, so no ruleset applies.
       - name: Publish the GitHub Release
         env:
@@ -336,15 +337,41 @@ jobs:
         run: |
           set -euo pipefail
 
-          # This version's own section, ended by the next heading.
-          notes=$(awk -v heading="## [${VERSION}]" '
+          # The lead sentence of each entry in this version's CHANGELOG section, under its
+          # own heading. The section itself is the reasoning — 0.2.0's ran to 200 lines —
+          # which pushed the digest and the pull-request list below the fold; it stays in
+          # CHANGELOG.md, linked under the summary. An entry is joined across its wrapped
+          # lines and stripped of `**` before the first sentence is cut, so one that opens
+          # with a bold lead sentence reads here the same as one that does not.
+          summary=$(awk -v heading="## [${VERSION}]" '
+            function flush(  cut, lead) {
+              if (bullet == "") return
+              gsub(/\*\*/, "", bullet)
+              cut = index(bullet, ". ")
+              lead = cut ? substr(bullet, 1, cut) : bullet
+              print "- " lead
+              bullet = ""
+            }
             index($0, heading) == 1 { inside = 1; next }
-            inside && /^## / { exit }
-            inside { print }
+            !inside { next }
+            /^## / { flush(); exit }
+            /^### / { flush(); sub(/^### /, "## "); if (seen++) print ""; print; print ""; next }
+            /^- / { flush(); bullet = substr($0, 3); next }
+            /^ / && bullet != "" { sub(/^ +/, ""); bullet = bullet " " $0; next }
+            /^$/ { flush() }
+            END { flush() }
           ' CHANGELOG.md)
 
-          body=$(printf '%s\n\n## Runtime image\n\n```\n%s@%s\n```\n\nPullable anonymously, `%s`. Pin the digest in production: the `%s` tag is immutable and is never republished.\n' \
-            "$notes" "$IMAGE" "$DIGEST" "$PLATFORMS" "$VERSION")
+          # What GitHub generates for a release on its own: every merged pull request with
+          # its author, and the compare link against the previous tag. Asked for through
+          # the API rather than `gh release create --generate-notes`, which `gh release
+          # edit` has no counterpart for — a re-run has to converge on the body the first
+          # run published, and this is the one spelling both paths can share.
+          generated=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f "tag_name=v${VERSION}" --jq .body)
+
+          body=$(printf '%s\n\nEach entry in full: [CHANGELOG.md](https://github.com/%s/blob/v%s/CHANGELOG.md).\n\n## Runtime image\n\n```\n%s@%s\n```\n\nPullable anonymously, `%s`. Pin the digest in production: the `%s` tag is immutable and is never republished.\n\n%s\n' \
+            "$summary" "$GITHUB_REPOSITORY" "$VERSION" "$IMAGE" "$DIGEST" "$PLATFORMS" "$VERSION" "$generated")
 
           # GitHub hands its own "Latest release" badge to the newest release not marked
           # prerelease — a second `latest`, which the image tags above do not govern. An rc

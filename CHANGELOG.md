@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A GitHub Release leads with one line per entry here, not the whole section.** Quoting
+  the section put a screen of *why* above the image digest — the one thing a deployment
+  needs from the release — and above the pull-request list GitHub generates for the tag.
+  The body is now each entry's lead sentence under its Added / Changed / Fixed heading,
+  then the digest, then that generated list, with this file linked for the rest. Write an
+  entry's first sentence to stand alone: it is what the release notes show.
+
 ## [0.2.0] - 2026-09-02
 
 Everything below shipped after `v0.1.0`.
