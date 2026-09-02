@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-02
+
+Everything below shipped after `v0.1.0`.
+
+Published as `ghcr.io/sageox/agent-base:0.2.0`, which takes `:latest` and `:0.2`. `:0.1`
+stays on 0.1.0, and `:0` is not published at all — before 1.0.0 a minor bump may break
+you. Pin the digest recorded on the GitHub Release in production; the tags are for
+humans.
+
+Still pre-1.0: configuration format and CLI flags may move between minor versions. Two
+things a deployment already running 0.1.0 has to act on. **Slack needs the `users:read`
+scope** before an agent reads a mention as a name; a workspace that withholds it keeps
+rendering every mention as its id, which is what it did before. And **a job Pod's
+`/agents` no longer outlives the run** — a body that kept durable state beside its bundle
+needs a `sharedVolumes` claim whose access mode allows the placement.
+
+**The Helm chart moves to 0.10.0**, for the one entry here that is templates rather than
+code: `/agents` in a job Pod is an `emptyDir` instead of the agent's `ReadWriteOnce`
+claim. It renders on 0.1.0's image, and it is the only entry that does not need the new
+one.
+
+Two of the rest are keys an older binary will not honour, so roll the image before
+setting either: `jobs[].run.jobSecrets` is refused under `.strict()`, and `mentions` on
+`post_message` is dropped as an undeclared argument, leaving a roll call that addresses
+nobody — the silence that field exists to prevent.
+
 ### Added
 
 - **A Slack agent reads a mention as a name, not an id.** Slack's addressing primitive is

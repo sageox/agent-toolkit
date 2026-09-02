@@ -2,7 +2,7 @@ apiVersion: v2
 name: agent
 description: Run one or more SageOx Agent Toolkit identities on Kubernetes
 type: application
-version: 0.9.0
+version: 0.10.0
 appVersion: "0.0.0"
 home: https://github.com/sageox/agent-toolkit
 sources:
