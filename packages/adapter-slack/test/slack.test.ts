@@ -1331,6 +1331,35 @@ describe("SlackAdapter", () => {
     expect(socket.listener).toBeUndefined();
   });
 
+  it("classifies from configuration and this run's answers, not a previous run's", async () => {
+    const { instance, api } = adapter({
+      channels: [
+        { id: "GPRIV", reply: "private" },
+        { id: "CPUB", reply: "public" },
+      ],
+    });
+    // A first run in which Slack contradicts both configured assertions.
+    api.channelIsPrivate = async (channel: string) => channel !== "GPRIV";
+    await instance.start(() => {});
+    expect(instance.postTargets()).toEqual([
+      { surface: "slack", id: "GPRIV", isPublic: true },
+      { surface: "slack", id: "CPUB", isPublic: false },
+    ]);
+    await instance.stop();
+
+    // A second run that cannot ask. Both sets outlive the stop, so without a reset the
+    // answers above still decide — including the one that would let a reply into a channel
+    // configured public.
+    api.channelIsPrivate = async () => {
+      throw new Error("missing_scope");
+    };
+    await instance.start(() => {});
+    expect(instance.postTargets()).toEqual([
+      { surface: "slack", id: "GPRIV", isPublic: false },
+      { surface: "slack", id: "CPUB", isPublic: true },
+    ]);
+  });
+
   it("keeps an explicit is_private:false as false, not unknown", async () => {
     // This is what conversations.info returns for a public channel: is_private false, the
     // IM flags absent. `is_private || is_im || is_mpim` yields undefined for it, laundering

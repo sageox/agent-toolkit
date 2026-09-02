@@ -135,6 +135,8 @@ export class SlackAdapter implements SurfaceAdapter {
   private readonly socket: SlackSocketClient;
   private readonly allowedChannels: Set<string>;
   private readonly privateChannels: Set<string>;
+  /** `reply: private` as configured — what a lookup that cannot answer falls back to. */
+  private readonly configuredPrivate: ReadonlySet<string>;
   /** Display names as configured, so a cross-post can be asked for by the name people say. */
   private readonly channelNames: Map<string, string>;
   /** Channels Slack answered `is_private: false` for. Outranks the ID-prefix guess. */
@@ -187,9 +189,10 @@ export class SlackAdapter implements SurfaceAdapter {
 
   constructor(opts: SlackAdapterOptions) {
     this.allowedChannels = new Set(opts.channels.map((channel) => channel.id));
-    this.privateChannels = new Set(
+    this.configuredPrivate = new Set(
       opts.channels.filter((channel) => channel.reply === "private").map((channel) => channel.id),
     );
+    this.privateChannels = new Set(this.configuredPrivate);
     this.channelNames = new Map(
       opts.channels.flatMap((channel) => (channel.name ? [[channel.id, channel.name]] : [])),
     );
@@ -230,6 +233,13 @@ export class SlackAdapter implements SurfaceAdapter {
       }),
     );
     if (session !== this.generation) return;
+    // From configuration plus this run's answers, and nothing earlier. Both sets outlive a
+    // `stop`, so a previous run's answer would decide a lookup that fails now — and in the
+    // direction where it once said "private", the guard would allow a reply into a channel
+    // configured public.
+    this.privateChannels.clear();
+    for (const channel of this.configuredPrivate) this.privateChannels.add(channel);
+    this.publicChannels.clear();
     for (const { channel, isPrivate } of privacy) {
       if (isPrivate) this.privateChannels.add(channel);
       // Recorded, not merely "not added": normalization otherwise falls back to the ID
