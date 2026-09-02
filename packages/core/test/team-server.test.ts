@@ -274,7 +274,10 @@ describe("the team brain's own capability health", () => {
       const latched = brain.readings()[0].health;
       const held = brain.search("slow", 1).catch(() => {});
       await until(() => existsSync(join(bin, "blocked")), "the held lookup to start");
-      await brain.search("flaky", 5).catch(() => {});
+      // Asserted rather than swallowed: a `flaky` lookup that answered would leave the
+      // held success to produce `Ok` on its own, and the test would pass having exercised
+      // nothing.
+      await expect(brain.search("flaky", 5)).rejects.toMatchObject({ failure: "failed" });
       writeFileSync(join(bin, "release"), "");
       await held;
       return [latched, brain.readings()[0].health];
