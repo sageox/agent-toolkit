@@ -106,6 +106,16 @@ provenance, admission past a parked switch, the soft kill switch read from the a
 memory, the budget's own bow-out, the run record, and the verdict artifact the job writes. A
 target supplies a clock, a process, a deadline, and durable state.
 
+A target **may** also let a scheduled run read the repository checkouts the agent's own
+workload maintains, and [the chart](#kubernetes-chart) does, per agent. Read-only is the
+whole of the offer: the agent fast-forwards those trees at every start, so a run writing to
+one is a second writer on a tree it does not own. The `ox` index beside them is not part of
+it — `ox` opens its store read-write and reports one it cannot write as corrupt, so a shared
+index answers a job's search from nothing instead of failing — and neither is the rest of
+the agent's durable state. A target that offers this owes a refusal rather than a
+substitute: a run that cannot reach the checkouts does not happen, because a body written to
+read code, running without the code, is a green run that proved nothing.
+
 ## Kubernetes chart
 
 [`deploy/helm`](../deploy/helm) is the canonical Kubernetes
@@ -143,11 +153,13 @@ the budget, and mints the verdict. The declaration reaches the chart as a mirror
 in that agent's values, because Helm cannot read an operator-supplied bundle at render
 time; the mirror carries the clock and the bound only — not the argv, not the switch —
 so it cannot become a second place a job is decided.
-[The chart's README](../deploy/helm/README.md#jobs) has the rendered shape and the one thing
-a job Pod does not share — the agent's `ReadWriteOnce` claim, which would tie its placement
-to the agent's node. It stages its bundle onto an `emptyDir` of its own instead, and a body
-that does share durable state with the agent gets a `sharedVolumes` claim whose access mode
-says so.
+[The chart's README](../deploy/helm/README.md#jobs) has the rendered shape and what a job
+Pod does not share by default — the agent's `ReadWriteOnce` claim, which ties its placement
+to the agent's node. It stages its bundle onto an `emptyDir` of its own instead.
+`persistence.jobCheckouts` buys back the repository checkouts alone, `subPath`-narrowed and
+read-only, and pays that placement price with a required pod affinity onto the agent's node.
+A body that shares other durable state with the agent gets a `sharedVolumes` claim whose
+access mode says so.
 
 A job Pod is the one pod spec that may hold a cluster token, opted into per agent with
 `serviceAccount.automountJobToken` and off by default. It runs the argv its `agent.yaml`

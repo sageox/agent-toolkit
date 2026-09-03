@@ -112,23 +112,38 @@ not inherited any more than anything else is.
 directory — `./body.sh` resolves because of it. In a container deployment a scheduled run
 stages that directory for itself, fresh, and drops it when the run ends.
 
-**`workspace/` is not part of it, and a body must not read it.** The repository checkouts
-under `workspace/repos` and the `ox` index under `workspace/ox-data` belong to
-`sageox-agent run`: it builds them at startup, in its own process, for the brain's code
-tools. Nothing else builds them — not `job run`, whatever its trigger — so what a body finds
-there depends on where it is running. A run the brain starts is inside the gateway's own
-process, and on an agent whose brain has code tools it does see a workspace: a racing one,
-because startup creates each repository's directory before `git` fills it and waits for
-neither the clone nor the index. Every other run is a standalone `job run`, which builds
-none, and in a container deployment does not share a filesystem with the gateway at all. A
-body that reads a checkout is a body that works when someone asks for it and fails on its
-3am tick.
+**`workspace/` is the agent's, and a body never writes it.** The repository checkouts under
+`workspace/repos` and the `ox` index under `workspace/ox-data` belong to `sageox-agent run`:
+it clones, fast-forwards and indexes them at startup, in its own process, for the brain's
+code tools. Nothing else builds them — not `job run`, whatever its trigger — so a body
+writing there is a second writer on a tree it does not own, and a body deleting there
+deletes an index the agent pays minutes to rebuild.
 
-**A body that wants a repository clones one** — shallow, and inside its budget. Durable state
-a body genuinely shares with the agent is a mount the deployment gives it
-([`sharedVolumes`](../deploy/helm/README.md#jobs) is the Kubernetes spelling), and a working
-tree is not that: the agent fast-forwards its checkout at every start, so a body writing
-there is a second writer on a tree it does not own.
+**Whether a body may read them depends on the deployment, so test before you look.** A run
+the brain starts is inside the gateway's own process and sees the workspace that process
+built — a racing one, because startup creates each repository's directory before `git` fills
+it and waits for neither the clone nor the index. A standalone `job run` sees what its target
+gave it: on a single host that is the same directory, and in a container deployment it is
+nothing at all unless the deployment says otherwise, which the chart spells
+`persistence.jobCheckouts`
+([the chart's README](../deploy/helm/README.md#a-job-that-reads-the-agents-checkouts)).
+One directory per repository, named `<owner>--<repo>` in lower case, and
+`[ -d workspace/repos/acme--widgets/.git ]` is the test — the directory alone can exist
+before `git` has filled it.
+
+**A body that needs a tree either way clones one** — shallow, and inside its budget. From
+the mount when there is one: `git clone --depth 1 workspace/repos/acme--widgets ./work` is
+local, needs no token, and costs no network. Durable state a body genuinely shares with the
+agent is a mount the deployment gives it
+([`sharedVolumes`](../deploy/helm/README.md#jobs) is the Kubernetes spelling); a working
+tree is not that, which is why the checkouts arrive read-only or not at all.
+
+**The index does not travel with them.** `ox` opens its store read-write, so pointed at a
+read-only one it reports corruption: `ox code search` errors, and `ox code status` answers
+zeroes over `index_exists: true`. A deployment that shares checkouts therefore shares the
+checkouts alone, and a body's `ox` finds no index rather than one that reads as empty.
+`ox query` is API-backed and needs no local store, so it works wherever the job has network
+and a credential.
 
 ## What the job writes back
 

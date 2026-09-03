@@ -147,7 +147,11 @@
           "properties": {
             "size": { "type": "string", "minLength": 1 },
             "storageClass": { "type": "string" },
-            "existingClaim": { "$ref": "#/$defs/optionalObjectName" }
+            "existingClaim": { "$ref": "#/$defs/optionalObjectName" },
+            "jobCheckouts": {
+              "type": "boolean",
+              "description": "Mount this agent's repository checkouts — `workspace/repos` on its claim, cloned and fast-forwarded by the agent Pod — read-only into its CronJob Pods, and pin those Pods to the node the agent Pod runs on. Default false, which leaves a job Pod with the `emptyDir` it has always had. The claim is ReadWriteOnce, so the affinity is required rather than preferred: a job Pod anywhere else cannot attach it. The checkouts and nothing else on the claim — the `ox` index is left out because `ox` opens its store read-write and reports one it cannot write as corrupt, and the agent's cursors and local memory vault are not a job's to read."
+            }
           }
         },
         "jobs": {
