@@ -709,9 +709,10 @@ Every piece of new cross-agent wiring must state its termination proof.
 since, and their proof: a brain post may name one principal, only during the single
 live turn, and at most once per turn — so one admitted message wakes at most one
 principal. The addressed principal's replies under that post come home to the
-asking thread as the agent's own message (`isSelf`, so never a wake), bounded to
-that root, that principal, twenty lines, and an hour. Residual: an unaddressed
-post is still not rate-limited on egress.
+asking thread as the agent's own message (`isSelf`, so never a wake) and are
+consumed by the relay rather than admitted as turns, bounded to that root, that
+principal, twenty lines, and an hour. Residual: an unaddressed post is still not
+rate-limited on egress.
 
 ---
 

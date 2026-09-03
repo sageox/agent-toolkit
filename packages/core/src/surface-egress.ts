@@ -252,8 +252,17 @@ export class SurfaceEgress {
       );
     }
 
-    const ref = await this.post(surface, channelId, msg, undefined, [principal.id]);
+    // Reserved before the await, not after: the hosted server handles calls concurrently,
+    // and two that both passed the check above would both wake someone. Given back only
+    // when nothing was posted, so a refusal stays the feedback it is meant to be.
     turn.addressed = true;
+    let ref: EventRef | undefined;
+    try {
+      ref = await this.post(surface, channelId, msg, undefined, [principal.id]);
+    } catch (error) {
+      turn.addressed = false;
+      throw error;
+    }
     // The resolved id, on its own line: the tool audit records what the brain asked for,
     // which may be a name, and the post line records how many were addressed.
     console.info(`addressed surface=${surface} channel=${channelId} principal=${principal.id}`);

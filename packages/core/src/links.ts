@@ -83,6 +83,7 @@ export class Links {
   }
 }
 
+/** One key per root, surface-qualified: a Slack `ts` and a Buzz id can never collide. */
 function key(ref: EventRef): string {
   return `${ref.surface}:${ref.nativeId}`;
 }

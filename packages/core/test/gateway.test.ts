@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Gateway } from "../src/gateway.ts";
 import { SurfaceEgress } from "../src/surface-egress.ts";
 import { MockBrain } from "../src/brain.ts";
@@ -824,6 +824,7 @@ describe("answers come home", () => {
   function surface(kind: string, channelId: string, opts: { name?: string; isPublic?: boolean } = {}) {
     let emit!: (e: InboundEvent) => void;
     const sent: { channel: ChannelRef; msg: GuardedMessage; context?: InboundEvent }[] = [];
+    const posted: GuardedMessage[] = [];
     const adapter: SurfaceAdapter = {
       kind,
       start: async (onEvent) => {
@@ -835,12 +836,15 @@ describe("answers come home", () => {
       postTargets: () => [
         { surface: kind, id: channelId, isPublic: opts.isPublic ?? false, name: opts.name },
       ],
-      post: async () => ({ surface: kind, nativeId: "root1" }),
+      post: async (_channel, msg) => {
+        posted.push(msg);
+        return { surface: kind, nativeId: "root1" };
+      },
       principals: () => new Map([[IDA, "ida"]]),
       displayName: (id) => (id === IDA ? "ida" : undefined),
       stop: async () => {},
     };
-    return { adapter, sent, inject: (e: InboundEvent) => emit(e) };
+    return { adapter, sent, posted, inject: (e: InboundEvent) => emit(e) };
   }
 
   let seq = 0;
@@ -871,7 +875,12 @@ describe("answers come home", () => {
     };
   }
 
-  async function settled() {
+  /**
+   * A relay is fire-and-forget from the gateway's side, so a *negative* claim about it —
+   * nothing else arrived — can only be made after the positive ones have landed and a beat
+   * has passed. Every positive claim below waits on the observable state itself.
+   */
+  async function nothingMore() {
     await new Promise((r) => setTimeout(r, 20));
   }
 
@@ -891,11 +900,14 @@ describe("answers come home", () => {
     expect(slack.sent.map((s) => s.msg.text)).toEqual(["asked ida in hive"]);
 
     const under = { threadRoot: { surface: "buzz", nativeId: "root1" } };
-    buzz.inject(at("buzz", "hive", IDA, { text: "passed, 0 failures", ...under }));
+    // ida's reply p-tags the agent, as every toolkit reply does — and it still starts no
+    // turn: the line was addressed to the person who asked, and comes home instead.
+    buzz.inject(at("buzz", "hive", IDA, { text: "passed, 0 failures", mentionsMe: true, ...under }));
     buzz.inject(at("buzz", "hive", "bystander", { text: "me too", ...under }));
     buzz.inject(at("buzz", "hive", IDA, { text: "a top-level aside" }));
+    await vi.waitFor(() => expect(slack.sent).toHaveLength(2));
     await gw.drain();
-    await settled();
+    await nothingMore();
 
     expect(slack.sent.map((s) => s.msg.text)).toEqual([
       "asked ida in hive",
@@ -903,8 +915,10 @@ describe("answers come home", () => {
     ]);
     // Into the very message that asked, so the surface threads it there.
     expect(slack.sent[1].context?.id).toEqual(asked.id);
-    // Bringing an answer home is not answering it: nothing went out on Buzz.
+    // Bringing an answer home is not answering it: nothing went out on Buzz, and no turn
+    // ran for the mention — the brain would have addressed ida again and said so.
     expect(buzz.sent).toHaveLength(0);
+    expect(buzz.posted).toHaveLength(1);
   });
 
   it("scans a line on its way into a public home, and stays silent under the kill switch", async () => {
@@ -931,12 +945,12 @@ describe("answers come home", () => {
     const under = { threadRoot: { surface: "buzz", nativeId: "root1" } };
     buzz.inject(at("buzz", "hive", IDA, { text: "rolled out to host.internal", ...under }));
     buzz.inject(at("buzz", "hive", IDA, { text: "rolled out", ...under }));
-    await settled();
+    await vi.waitFor(() => expect(slack.sent).toHaveLength(2));
     expect(slack.sent.map((s) => s.msg.text)).toEqual(["asked ida in hive", "ida (buzz · hive): rolled out"]);
 
     gw.stopServing("operator");
     buzz.inject(at("buzz", "hive", IDA, { text: "one more", ...under }));
-    await settled();
+    await nothingMore();
     expect(slack.sent).toHaveLength(2);
   });
 });

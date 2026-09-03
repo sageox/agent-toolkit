@@ -382,6 +382,32 @@ describe("addressing one principal from the brain's post", () => {
     turn.close();
   });
 
+  // The hosted server handles calls concurrently, so the reservation has to be taken
+  // before the first await — two calls that both passed the check would both wake someone.
+  it("lets two concurrent calls wake one principal, not two", async () => {
+    const buzz = adapter("buzz", hive);
+    const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });
+    const turn = egress.answers(event("slack", "C0123"));
+
+    const outcomes = await Promise.allSettled([handler(egress)(call(OWNER)), handler(egress)(call(FRIEND))]);
+    expect(outcomes.map((o) => o.status).sort()).toEqual(["fulfilled", "rejected"]);
+    expect(buzz.posted).toHaveLength(1);
+    turn.close();
+  });
+
+  it("gives the reservation back when the post was refused, so the brain can try again", async () => {
+    const buzz = adapter("buzz", [{ surface: "buzz", id: "town", isPublic: true }, ...hive]);
+    const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });
+    const turn = egress.answers(event("slack", "C0123"));
+
+    await expect(
+      egress.address("buzz", "town", { text: "hi" }, OWNER),
+    ).rejects.toThrow(/publicChannel/);
+    await egress.address("buzz", "hive", { text: "hi" }, OWNER);
+    expect(buzz.posted).toHaveLength(1);
+    turn.close();
+  });
+
   it("wakes nobody with no turn behind the call, or two", async () => {
     const buzz = adapter("buzz", [...hive, { surface: "buzz", id: "town", isPublic: false }]);
     const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });

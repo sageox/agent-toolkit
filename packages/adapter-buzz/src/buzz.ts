@@ -124,7 +124,7 @@ export class BuzzAdapter implements SurfaceAdapter {
     const { relay, authRefusal } = await connectAuthenticated(
       this.opts.relayUrl,
       this.opts.signer,
-      { enableReconnect: true, onReauthenticated: () => this.subscribeAll() },
+      { enableReconnect: true, onReauthenticated: () => void this.subscribeAll() },
     );
 
     // A refusal is terminal for this agent, so it is raised here rather than carried: the
@@ -152,7 +152,9 @@ export class BuzzAdapter implements SurfaceAdapter {
     this.since ??= Math.floor(Date.now() / 1000) - FRESH_START_LOOKBACK;
 
     this.onEvent = onEvent;
-    this.subscribeAll();
+    // Resolves once the channel REQs are open, so a caller that was told the agent is
+    // listening is not told so a directory round trip early.
+    await this.subscribeAll();
   }
 
   /**
@@ -166,42 +168,58 @@ export class BuzzAdapter implements SurfaceAdapter {
    *
    * Resuming rather than replaying is free here: `since` has advanced with every event
    * received, so the new REQ asks only for the gap.
+   *
+   * The directory first, and the channels only once it has answered. A REQ is a
+   * subscription of its own and a relay may interleave two, so a sibling's message
+   * replayed from the backlog could otherwise be normalized before the record that names
+   * it and be admitted past the chain-depth cap as a person's. Waiting for the directory's
+   * EOSE is what makes the order a guarantee. Kind 10100 is replaceable, so that REQ is one
+   * record per author however long the relay has held it, and a `since` on it would hide
+   * every agent registered before this process started.
    */
-  private subscribeAll(): void {
+  private subscribeAll(): Promise<void> {
     const relay = this.relay;
     const onEvent = this.onEvent;
-    if (!relay || !onEvent) return;
+    if (!relay || !onEvent) return Promise.resolve();
 
-    // The directory before the channels: on a relay that answers REQs in the order they
-    // arrived, a sibling's message replayed from the backlog is normalized after the record
-    // that names it. Kind 10100 is replaceable, so this is one record per author however
-    // long the relay has held it, and a `since` would hide every agent registered before
-    // this process started.
-    relay.subscribe([{ kinds: [DIRECTORY_KIND] }], {
-      onevent: (event: Event) => this.agents.set(event.pubkey, directoryName(event)),
-    });
-
-    for (const filter of this.filters()) {
-      relay.subscribe([filter], {
-        onevent: (event: Event) => {
-          // Advance the cursor on everything received, not just what we act on: a
-          // filtered-out event still proves the relay had nothing older left to send.
-          this.since = Math.max(this.since ?? 0, event.created_at);
-          const inbound = toInboundEvent(event, {
-            pubkey: this.pubkey!,
-            privateChannels: this.privateChannels,
-            agents: this.agents,
+    return new Promise((resolve) => {
+      let listening = false;
+      const listen = () => {
+        if (listening) return;
+        listening = true;
+        for (const filter of this.filters()) {
+          relay.subscribe([filter], {
+            onevent: (event: Event) => {
+              // Advance the cursor on everything received, not just what we act on: a
+              // filtered-out event still proves the relay had nothing older left to send.
+              this.since = Math.max(this.since ?? 0, event.created_at);
+              const inbound = toInboundEvent(event, {
+                pubkey: this.pubkey!,
+                privateChannels: this.privateChannels,
+                agents: this.agents,
+              });
+              // An event tagged with two of our channels matches two REQs, and
+              // normalization gives it one channel. Only that channel's REQ delivers it, or
+              // the brain answers the same message once per REQ it arrived on.
+              const subscribed = filter[`#${BUZZ_DEFAULTS.channelTag}`]?.[0];
+              if (subscribed !== undefined && inbound.channel.id !== subscribed) return;
+              this.lastByChannel.set(inbound.channel.id, inbound);
+              onEvent(inbound);
+            },
           });
-          // An event tagged with two of our channels matches two REQs, and normalization
-          // gives it one channel. Only that channel's REQ delivers it, or the brain
-          // answers the same message once per REQ it arrived on.
-          const subscribed = filter[`#${BUZZ_DEFAULTS.channelTag}`]?.[0];
-          if (subscribed !== undefined && inbound.channel.id !== subscribed) return;
-          this.lastByChannel.set(inbound.channel.id, inbound);
-          onEvent(inbound);
-        },
+        }
+        resolve();
+      };
+
+      relay.subscribe([{ kinds: [DIRECTORY_KIND] }], {
+        onevent: (event: Event) => this.agents.set(event.pubkey, directoryName(event)),
+        // Either way the channels open: nostr-tools fires `oneose` on a timer of its own
+        // when a relay sends no EOSE, and a relay that refuses the REQ closes it. A
+        // directory that will not answer must not keep the agent deaf.
+        oneose: listen,
+        onclose: listen,
       });
-    }
+    });
   }
 
   async send(channel: ChannelRef, msg: GuardedMessage, context?: InboundEvent): Promise<void> {
@@ -409,15 +427,30 @@ export class BuzzAdapter implements SurfaceAdapter {
 }
 
 /**
- * The name a directory record carries, as clients show it: `display_name` over `name`.
- * Unreadable content is a record without a name, not a record that does not exist.
+ * What a directory name has to look like to be vouched for: a handle, not a sentence.
+ *
+ * The record is signed by the key it describes and by nobody else, so its name is that
+ * key's own claim — and it goes two places a claim must not be free-form: the tool
+ * description the brain reads, and the label on a line brought home for a person to read.
+ * A name that could carry an instruction, a second label, or a line break is not a name
+ * this adapter will put there. Letters and digits in any script, then up to thirty-one of
+ * those, spaces, and the punctuation a handle has.
+ */
+const DIRECTORY_NAME = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,31}$/u;
+
+/**
+ * The name a directory record carries, as clients show it: `display_name` over `name`,
+ * and only one that is a handle. Unreadable content is a record without a name, not a
+ * record that does not exist.
  */
 function directoryName(event: Event): string | undefined {
   try {
     const parsed: unknown = JSON.parse(event.content);
     if (!parsed || typeof parsed !== "object") return undefined;
     const { display_name: display, name } = parsed as Record<string, unknown>;
-    return typeof display === "string" ? display : typeof name === "string" ? name : undefined;
+    return [display, name].find(
+      (value): value is string => typeof value === "string" && DIRECTORY_NAME.test(value),
+    );
   } catch {
     return undefined;
   }

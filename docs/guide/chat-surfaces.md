@@ -544,7 +544,10 @@ surface vouches for — the directory's name on Buzz, the resolved member name o
 id otherwise — and it leaves as this agent's own message through the same chokepoint a
 reply takes: public consent and `guard.leakPatterns` apply on the *home* channel, and the
 surface's escaping keeps a mention inside the relayed text from addressing anyone. Being
-the agent's own, it can never wake the agent.
+the agent's own, it can never wake the agent. And the answer itself starts no turn, even
+when it mentions the agent: it was addressed to the person who asked, so it comes home
+instead of being answered on the far door — which is also what keeps two agents from
+continuing there.
 
 It is not a mirror, and the bounds are what keep it from becoming one. A link opens only
 from a post that addressed someone; a plain cross-post opens nothing. Only the addressed

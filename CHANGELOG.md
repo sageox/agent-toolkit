@@ -45,8 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the relayed text from addressing anyone. It is not a bridge, and every bound that keeps it
   from becoming one is stated in code: a link opens only from an addressed post, only the
   addressed principal's replies under that one root come home, a bystander's never, the
-  agent's own never, and the link closes on its count and its clock. The kill switch
-  silences relays too. `relay from=… home=… result=sent|refused|failed` is the log line.
+  agent's own never, and the link closes on its count and its clock. A reply that came home
+  starts no turn, even when it mentions the agent: it was addressed to the person who
+  asked. The kill switch silences relays too. `relay from=… home=… result=sent|refused|failed`
+  is the log line.
 
 - **A job that outlasts the turn answers the conversation that asked.** `job_run` started
   such a job, said "running", and the verdict went to the job's `report` channel alone —
@@ -111,9 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could answer one another until `maxTurnsPerThread`, since every reply `p`-tags the author
   it answers. The relay already holds the roster: every mentionable agent publishes a
   directory record (kind 10100), the record clients gate a mention on. The adapter now
-  subscribes to that kind before its channels and sets `isAgent` for any author it lists, so
-  the cap the design spec promised (§8 rule 4) holds on Buzz as it does on Slack. Nothing is
-  declared and nothing is pruned: a record that disappears does not make its author a person.
+  reads that kind first and opens its channels only once the directory has answered — two
+  REQs are two subscriptions a relay may interleave, and a sibling's message replayed ahead
+  of the record naming it would slip past the cap as a person's — and sets `isAgent` for
+  any author it lists, so the cap the design spec promised (§8 rule 4) holds on Buzz as it
+  does on Slack. `start` resolves once the channels are open. Nothing is declared and
+  nothing is pruned: a record that disappears does not make its author a person.
 
 ## [0.2.0] - 2026-09-02
 
