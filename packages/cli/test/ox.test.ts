@@ -27,15 +27,18 @@ describe("expiringSoon", () => {
 
 describe("credential source reporting", () => {
   it("names the token when one was supplied, since a PAT carries no user claims", () => {
-    expect(credentialSource({ token: "oxp_x" })).toBe("SAGEOX_TOKEN");
+    expect(credentialSource({ token: () => "oxp_x" })).toBe("SAGEOX_TOKEN");
   });
 
   it("reports the auth file when no token was supplied", () => {
     expect(credentialSource({})).toBe("auth file");
+    // The ref is declared but nothing is mounted under it: what `resolveSecret` returns
+    // then is `undefined`, and the auth file is what will have done the work.
+    expect(credentialSource({ token: () => undefined })).toBe("auth file");
   });
 
   it("prefers the token even when an auth file is also configured, as ox does", () => {
-    expect(credentialSource({ token: "oxp_x", configHome: "/mnt/secrets-store/ox" })).toBe("SAGEOX_TOKEN");
+    expect(credentialSource({ token: () => "oxp_x", configHome: "/mnt/secrets-store/ox" })).toBe("SAGEOX_TOKEN");
   });
 });
 

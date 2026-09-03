@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A rotated SageOx credential recovers without a Deployment restart.** The team brain's
+  token was resolved once, when the gateway started, and stamped onto every `ox` child for
+  the life of the process — so a secrets-store CSI driver that refreshed the mounted file
+  in place changed nothing, and the agent went on sending a revoked value until somebody
+  restarted it. The gateway now reads the secret per `ox` child, which is a file read next
+  to a process spawn, and the reading that a lookup latches clears itself the moment the
+  new value is accepted. Rotation stops needing a human; a genuine revoke is still the case
+  that does, which is the honest split. Every other credential still resolves at startup —
+  each is held by a connection or a subprocess a rotation would have to re-establish
+  anyway — and refreshing the mount remains opt-in: the bootstrap module leaves the CSI
+  driver's rotation reconciler off. `docs/deployment-contract.md` has the split.
+
 - **A GitHub Release leads with one line per entry here, not the whole section.** Quoting
   the section put a screen of *why* above the image digest — the one thing a deployment
   needs from the release — and above the pull-request list GitHub generates for the tag.

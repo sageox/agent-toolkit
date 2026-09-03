@@ -168,9 +168,18 @@ never contains external credentials. See the [ground-up AWS guide](aws-eks-deplo
 
 To rotate a credential, put the new value in the external store and restart the
 Deployment — the new pod mounts current values, and the runtime resolves credentials at
-process startup. The current single-container tier also
-shares a filesystem between the gateway and its brain subprocess. Kubernetes secret sourcing
-does not create a filesystem boundary; a future hardened tier must isolate those processes.
+process startup. The team brain's SageOx token is the one exception: it is read from the
+mount for every `ox` child, so a file the CSI driver refreshes in place is what the next
+lookup carries, and the capability recovers with nobody involved. Nothing else here can
+work that way — the surface tokens, the Buzz identity and the model key are each held at
+startup by a connection or a subprocess that a rotation would have to re-establish
+regardless. Refreshing the mount is opt-in: the bootstrap module leaves the CSI driver's
+rotation reconciler at its default of off, and without it a restart is the rotation step
+for this credential too.
+
+The current single-container tier also shares a filesystem between the gateway and its
+brain subprocess. Kubernetes secret sourcing does not create a filesystem boundary; a
+future hardened tier must isolate those processes.
 
 The runtime runs `ox index code` and verifies `ox code status`; it does not run `ox daemon`.
 The daemon synchronizes SageOx ledger state and is not the repository-index readiness

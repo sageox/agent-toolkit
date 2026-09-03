@@ -439,8 +439,10 @@ async function buildBrain(
         team: cfg.team,
         repo: cfg.repo,
         configHome: cfg.configHome,
-        // Resolved here, in the gateway. File-first: a mounted secret beats an env var.
-        token: resolveSecret(cfg.token, { dir: secretsDir }),
+        // Resolved here, in the gateway, and per lookup rather than once: file-first, so a
+        // mounted secret beats an env var, and a mount rewritten under this process is what
+        // the next `ox` child carries.
+        token: () => resolveSecret(cfg.token, { dir: secretsDir }),
       });
       server = await serveTeamBrain(teamBrain, serveAt);
     }
@@ -2092,7 +2094,7 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
     if (teamBrain?.preset === "team") {
       const tokenRef = teamBrain.token ?? DEFAULT_OX_TOKEN_SECRET;
       const ox = await oxStatus({
-        token: resolveSecret(tokenRef, { dir: secretsDir }),
+        token: () => resolveSecret(tokenRef, { dir: secretsDir }),
         configHome: teamBrain.configHome,
       });
       if (!ox.installed) {

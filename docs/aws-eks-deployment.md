@@ -161,6 +161,12 @@ Put a new Secrets Manager version, then restart the Deployment. The new pod moun
 current values; the runtime resolves credentials at process startup, so a restart is the
 rotation step either way.
 
+The team brain's SageOx token is the one credential that does not need the restart — the
+gateway reads it from the mount for every `ox` child. That only helps if the mount is
+refreshed, which the bootstrap module leaves off: set the CSI driver's
+`enableSecretRotation` if you want that credential to recover from a rotation on its own.
+See [the deployment contract](deployment-contract.md) for why it is the only one.
+
 Managed secret deletion uses a 7-day recovery window. The chart-managed PVC is
 retained on Helm uninstall. Confirm both retained data sets before permanently deleting them.
 

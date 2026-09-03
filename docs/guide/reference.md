@@ -159,8 +159,10 @@ retention and no shipping: it goes to the gateway's stream beside `turn_start` a
 Create one at **https://sageox.ai/settings/tokens**; it is prefixed `oxp_` and shown once.
 
 One thing to know: `doctor` checks the token with SageOx and reports its current rolling
-expiry. If SageOx rejects it, rotate the value through the deployment's secret manager and restart
-only the affected agent workload.
+expiry. If SageOx rejects it, rotate the value through the deployment's secret manager. The
+gateway reads that secret for each `ox` call rather than once at boot, so a mount refreshed in
+place is picked up by the next lookup; where nothing refreshes the file, restart only the
+affected agent workload.
 
 Do not reuse the access token from your own `ox login`: it expires within hours and has no
 refresh credential once out of ox's hands.

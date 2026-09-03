@@ -75,7 +75,7 @@ export async function oxStatus(scope: OxScope = {}): Promise<OxStatus> {
  * so supplying one means it is what did the work.
  */
 export function credentialSource(scope: OxScope): "SAGEOX_TOKEN" | "auth file" {
-  return scope.token ? "SAGEOX_TOKEN" : "auth file";
+  return scope.token?.() ? "SAGEOX_TOKEN" : "auth file";
 }
 
 /** True when the token is gone or expires within the hour. */

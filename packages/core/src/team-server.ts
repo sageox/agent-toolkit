@@ -229,6 +229,13 @@ export interface OxScope {
    * An access token supplied out-of-band, for CI and containers where no interactive
    * `ox login` can happen. Takes precedence over anything on disk.
    *
+   * A reading and not a value, for the same reason capability health is one: it changes
+   * under a running process. A secrets-store CSI driver with rotation on rewrites the
+   * mounted file in place, and a string captured when the gateway booted would keep
+   * stamping the revoked value onto every `ox` child until somebody restarted the
+   * Deployment — for a credential already sitting current on the container's own disk.
+   * {@link oxEnv} calls this once per child, which is a file read next to a process spawn.
+   *
    * Unlike a logged-in `auth.json`, this carries no refresh credential: ox stamps a
    * rolling 24h expiry and treats a server 401 as the truth. A long-running agent on a
    * token alone will eventually need it rotated — mount `auth.json` instead if you want
@@ -243,7 +250,7 @@ export interface OxScope {
    * production, so the default is already right and a knob would only add a way to be
    * wrong.
    */
-  token?: string;
+  token?: () => string | undefined;
   /**
    * Where ox runs.
    *
@@ -260,11 +267,16 @@ export function oxCwd(scope: OxScope): string {
   return scope.cwd ?? homedir();
 }
 
-/** Env for the ox child. Built explicitly so a credential is never passed by accident. */
+/**
+ * Env for the ox child. Built explicitly so a credential is never passed by accident, and
+ * built per child so the credential it carries is the one on disk now — see
+ * {@link OxScope.token}.
+ */
 export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...base };
   if (scope.configHome) env.XDG_CONFIG_HOME = scope.configHome;
-  if (scope.token) env.SAGEOX_TOKEN = scope.token;
+  const token = scope.token?.();
+  if (token) env.SAGEOX_TOKEN = token;
   return env;
 }
 
@@ -350,7 +362,8 @@ const LATCHED: Partial<Record<OxFailure, { failure: ProbeFailure; remedy: string
     failure: "not-authenticated",
     remedy:
       "rotate this deployment's SageOx credential — the secret the team brain's `token` " +
-      "names, or the auth file under its `configHome` — then restart",
+      "names, or the auth file under its `configHome`. The next lookup reads it, so a " +
+      "file-mounted value needs no restart; one supplied in the environment does",
   },
 };
 
