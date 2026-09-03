@@ -320,6 +320,11 @@ export class SlackAdapter implements SurfaceAdapter {
     }));
   }
 
+  /** A member's name as the inbound path resolved it — the same directory, read back. */
+  displayName(id: string): string | undefined {
+    return this.memberNames.get(id);
+  }
+
   async post(
     channel: ChannelRef,
     msg: GuardedMessage,

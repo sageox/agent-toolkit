@@ -496,10 +496,75 @@ The requested message is posted top-level in the destination, and the agent's or
 response confirms the result back in the conversation where the request originated.
 Unknown channels and unconsented public channels are refused. Slack markup written into the
 text is neither refused nor honoured: `<@U0ALICE>` and `<!channel>` alike render as the
-characters the agent typed, so a cross-post notifies nobody it names. A broadcast shape in
+characters the agent typed, so text alone notifies nobody it names. A broadcast shape in
 the text is logged as `egress_escaped … rule=slackBroadcast` rather than refused — escaping
 already takes its reach, and refusing cost the turn.
 Cross-posts never reuse an unrelated message as a fake thread parent.
+
+To reach someone, the agent names them in `mention` — one person or agent per post, which
+the adapter renders as the surface's own addressing primitive (a `p` tag on Buzz, `<@id>` on
+Slack). Without it a post informs a channel and wakes nobody in it; on Buzz the `p` tag is
+the only thing that wakes an agent at all.
+
+```text
+Slack: @harry ask ida in hive whether the nightly sweep passed
+```
+
+Whom it may address is bounded twice. The id must be one the manifest names in `owner` or
+`allowlist`, or one the surface itself vouches for — on Buzz, every agent with a directory
+record, listed to the brain by the name in that record, so "ida" resolves to her pubkey the
+way "hive" resolves to a channel id. Anyone else is refused. And being mentioned reaches no
+further than the recipient's own `respondTo` allows: the mention is a wake, never an
+authorization. One addressed post per turn — the message that asked is what authorizes the
+wake — so a call with no conversation mid-turn, or two at once, wakes nobody. The resolved
+id is logged on an `addressed …` line beside the tool call.
+
+### Answers come home
+
+A question asked on someone's behalf is only useful if the answer reaches them. So an
+addressed post opens a **link** from that post back to the message it was made for, and
+what the addressed principal replies under it is brought into the asking thread, verbatim,
+under a label the gateway wrote:
+
+```text
+Slack #ops                                     Buzz #hive
+  madhur: @harry ask ida if the sweep passed
+  harry:  asked ida in hive          ──────▶   harry: @ida did the nightly sweep pass?
+                                               ida:   @harry passed, 0 failures
+  harry:  ida (buzz · hive):         ◀──────
+          passed, 0 failures
+```
+
+The same shape runs the other way: an agent on Buzz can ask harry to put a question to a
+person in Slack, and that person's thread reply comes home to hive. Nobody has to open the
+other door.
+
+No brain is involved in the return trip. The line is the reply's text under a name the
+surface vouches for — the directory's name on Buzz, the resolved member name on Slack, the
+id otherwise — and it leaves as this agent's own message through the same chokepoint a
+reply takes: public consent and `guard.leakPatterns` apply on the *home* channel, and the
+surface's escaping keeps a mention inside the relayed text from addressing anyone. Being
+the agent's own, it can never wake the agent. And the answer itself starts no turn, even
+when it mentions the agent: it was addressed to the person who asked, so it comes home
+instead of being answered on the far door — which is also what keeps two agents from
+continuing there.
+
+It is not a mirror, and the bounds are what keep it from becoming one. A link opens only
+from a post that addressed someone; a plain cross-post opens nothing. Only the addressed
+principal's replies come home, and only under that one post — a bystander's line, or the
+principal's own top-level aside, stays where it was written. A link closes after twenty
+lines or an hour, whichever comes first, and the kill switch silences relays along with
+everything else. Each attempt is one log line, `relay from=… home=… result=sent`, or
+`result=refused rule=…` when the home channel's guard said no.
+
+A job's verdict comes home the same way. A `job_run` that outlasts the turn used to answer
+"running" and post its verdict to the job's `report` channel alone; now the verdict is also
+posted back into the thread that asked, on whichever door that was, and the channel hears
+it as it would a run somebody waited for. See [the job door](reference.md#naming-tools-in-the-policy).
+
+What does not come home yet: a follow-up. A second message in the asking thread is a new
+turn, not a continuation of the linked one, so "tell ida the nightly one" is a fresh
+addressed post rather than a reply under the first.
 
 ### Let the agent react with an emoji
 

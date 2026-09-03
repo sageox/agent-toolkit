@@ -58,6 +58,7 @@ import {
   type JobRun,
   type SwitchSource,
   type McpServerDecl,
+  type InboundEvent,
 } from "@sageox/agent-toolkit-core";
 import { ConsoleAdapter } from "@sageox/agent-toolkit-adapter-console";
 import {
@@ -393,7 +394,9 @@ async function buildBrain(
         // marks. Without it every request is automation, including the ones a person is
         // waiting on, and a parked job could only be run by arming the switch and
         // remembering to disarm it.
-        asking: egress && (() => egress.asking()),
+        answering: egress && (() => egress.answeringEvent()),
+        // How the verdict of a run that outlasts the turn reaches the message that asked.
+        reply: egress && jobAnswerer(egress),
         // Who that author has to be for the run to count as a person's. `owner` and not
         // `respondTo`: an allowlist says who may speak to this agent, and a fleet's names
         // siblings.
@@ -1518,6 +1521,18 @@ function jobPoster(egress: SurfaceEgress): JobPoster {
  */
 function jobReader(egress: SurfaceEgress): JobReader {
   return (root, limit) => egress.readThread(root, limit);
+}
+
+/**
+ * How a detached run answers the conversation that asked for it: the guarded reply the
+ * turn itself would have made, into the same thread. A refusal is thrown so the host counts
+ * the run as unanswered and lets the status post carry it instead.
+ */
+function jobAnswerer(egress: SurfaceEgress) {
+  return async (home: InboundEvent, text: string): Promise<void> => {
+    const verdict = await egress.replyTo(home, { text });
+    if (!verdict.ok) throw new Error(`answer refused by ${verdict.rule}: ${verdict.reason}`);
+  };
 }
 
 /**

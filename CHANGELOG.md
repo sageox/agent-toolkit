@@ -19,6 +19,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   why a shared working tree is the wrong fix; `job run` is now held to it by a test that fails if
   it ever starts warming a workspace of its own.
 
+- **A post can wake one person or agent.** `post_message` takes `mention` — one principal,
+  by the id on a message's `from` line or a name the surface lists — and the adapter renders
+  it as its own addressing primitive: a `p` tag on Buzz, `<@id>` on Slack. Until now a
+  brain's post reached a channel and woke nobody in it: on Buzz the `p` tag is the only wake
+  trigger, and on Slack the `<@…>` a brain writes into text is escaped, so a cross-post could
+  inform a channel but never reach anyone. Whom the agent may address is bounded twice. The
+  id must be one the manifest names in `owner` or `allowlist`, or one the surface itself
+  vouches for — on Buzz, an agent with a directory record, which is also where the name
+  comes from — and the recipient's own `respondTo` gate still decides whether being
+  mentioned wakes them. One addressed post per turn, tied to the single conversation
+  mid-turn, so one admitted message wakes at most one principal and a call with no turn
+  behind it wakes nobody. The resolved id is written on an `addressed …` line beside the
+  `tool_call` that asked for it. A `mentions` list stays a probing job's capability.
+
+- **What the addressed principal answers comes home to the conversation that asked.** A
+  post that names someone opens a *link* from the post to the message it was made on behalf
+  of, and for the next hour, or twenty lines, that principal's replies under that post are
+  brought into the asking thread verbatim — `ida (buzz · hive): passed, 0 failures` — as
+  this agent's own message. A person in Slack can ask an agent on Buzz a question and read
+  the answer where they asked it, and an agent on Buzz can put a question to a person in
+  Slack the same way. No brain is involved: the gateway relays deterministic text under a
+  label it wrote, through the same guarded path a reply takes, so public consent and the
+  leak scan apply on the home channel and the surface's own escaping keeps a mention inside
+  the relayed text from addressing anyone. It is not a bridge, and every bound that keeps it
+  from becoming one is stated in code: a link opens only from an addressed post, only the
+  addressed principal's replies under that one root come home, a bystander's never, the
+  agent's own never, and the link closes on its count and its clock. A reply that came home
+  starts no turn, even when it mentions the agent: it was addressed to the person who
+  asked. The kill switch silences relays too. `relay from=… home=… result=sent|refused|failed`
+  is the log line.
+
+- **A job that outlasts the turn answers the conversation that asked.** `job_run` started
+  such a job, said "running", and the verdict went to the job's `report` channel alone —
+  the person who asked in a Slack thread had to go and look. The job door now keeps the
+  message it was answering and, when the run settles, replies into it with the same text a
+  waited-for call returns, through the gateway's guarded reply path. The status post is
+  then made or spared as it is for a waited-for run, so a clean verdict no longer posts
+  twice. Shutdown pays the same debt: a run the host gives up on tells the asker so, inside
+  the grace it already had. A reply the home channel refuses, or a call the gateway could
+  not pin to one conversation, leaves the status post as the answer, as before, and the
+  tool says which of the two it promised. `job_answer … result=lost` is the log line.
+
 ### Changed
 
 - **A SageOx credential refreshed under the agent's secrets mount is picked up without a
@@ -64,6 +106,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two failure classes latch and only two — a rejected credential, and an `ox` that is not
   on `PATH`. A lookup that merely fell over does not: the next one may well answer, and
   announcing an outage a retry disproves is how people learn to skim announcements.
+
+- **The agent-to-agent chain cap now applies on Buzz.** The adapter marked only its own
+  key as an agent, because recognising a sibling needs a roster the toolkit does not own —
+  so `limits.maxAgentChainDepth` never fired there, and two agents that allowlist each other
+  could answer one another until `maxTurnsPerThread`, since every reply `p`-tags the author
+  it answers. The relay already holds the roster: every mentionable agent publishes a
+  directory record (kind 10100), the record clients gate a mention on. The adapter now
+  subscribes to that kind and delivers a channel event only once the directory has
+  answered on the current socket — two REQs are two subscriptions a relay may interleave,
+  and a sibling's message replayed ahead of the record naming it would slip past the cap as
+  a person's; events that arrive early are held and released in order, on a reconnect as
+  on the first connection, for at most thirty seconds on a relay that sends no EOSE and not
+  at all on one that refuses the kind — and sets `isAgent` for any author it lists, so the cap the
+  design spec promised (§8 rule 4) holds on Buzz as it does on Slack. Nothing is declared
+  and nothing is pruned: a record that disappears does not make its author a person.
 
 ## [0.2.0] - 2026-09-02
 

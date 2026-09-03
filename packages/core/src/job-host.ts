@@ -185,6 +185,17 @@ export type JobPoster = (
  */
 export type JobReader = (root: EventRef, limit?: number) => Promise<readonly ThreadReply[]>;
 
+/**
+ * How whoever asked for a detached run hears how it ended.
+ *
+ * Bound by the door that knows who asked — the chat tool holds the message it was answering
+ * — and handed in per run, so this host sees a function and never a surface, a channel, or
+ * an author. Called inside the run's settlement, after the record and before the status
+ * post, and on the shutdown path too: a person told "started" is owed a last word from
+ * whichever settler gets there.
+ */
+export type JobAnswer = (run: JobRun) => Promise<void>;
+
 export interface JobHostOptions {
   /**
    * How a job's kill switch is read. Bind `engramSwitchSource` from the Buzz adapter in
@@ -465,8 +476,16 @@ export class JobHost {
     job: JobConfig,
     requestedBy: JobRequester,
     params: JobParams = {},
+    answer?: JobAnswer,
   ): Promise<JobStart> {
-    const { finished, ...start } = await this.begin(job, "on-request", requestedBy, params, true);
+    const { finished, ...start } = await this.begin(
+      job,
+      "on-request",
+      requestedBy,
+      params,
+      true,
+      answer,
+    );
     if (start.refused) {
       await finished;
       return start;
@@ -576,8 +595,20 @@ export class JobHost {
    * which a settlement exists nowhere a shutdown could find it. Both settlers go through
    * here, because either one can be the sentence a shutdown would otherwise cut off.
    */
-  private async settle(job: JobConfig, run: JobRun, detached: boolean): Promise<void> {
-    const said = this.announce(job, run, detached);
+  private async settle(
+    job: JobConfig,
+    run: JobRun,
+    detached: boolean,
+    answer?: JobAnswer,
+  ): Promise<void> {
+    const said = (async () => {
+      // The asker first. A detached run that reached the person who asked is, to the
+      // channel, a run somebody waited for: the verdict arrived where the question was, so
+      // the status post is made or spared on the same terms as any other. One that could
+      // not be answered leaves the post as the answer, which is what it was before.
+      const answered = answer ? await this.answer(job, run, answer) : false;
+      await this.announce(job, run, detached && !answered);
+    })();
     this.saying.add(said);
     try {
       await said;
@@ -586,8 +617,29 @@ export class JobHost {
     }
   }
 
+  /**
+   * Tells whoever asked. Best-effort: the record already holds the run, so a reply that
+   * cannot land is one line here and the status post takes its place.
+   */
+  private async answer(job: JobConfig, run: JobRun, answer: JobAnswer): Promise<boolean> {
+    try {
+      await answer(run);
+      return true;
+    } catch (error) {
+      console.warn(
+        `job_answer slug=${job.slug} runId=${run.runId} result=lost reason=${errorLine(error)}`,
+      );
+      return false;
+    }
+  }
+
   /** One abandoned run: the record, then the last thing its channel will hear about it. */
-  private async giveUp(job: JobConfig, base: RunBase, admission: JobAdmission): Promise<void> {
+  private async giveUp(
+    job: JobConfig,
+    base: RunBase,
+    admission: JobAdmission,
+    answer?: JobAnswer,
+  ): Promise<void> {
     if (!this.claim(base.runId)) return; // its body finished first and has already spoken
     const run = this.record({
       ...base,
@@ -603,7 +655,7 @@ export class JobHost {
         `this host was asked to stop while the ${job.slug} body was still running, ` +
         "so nothing here will read what it proved",
     });
-    await this.settle(job, run, true);
+    await this.settle(job, run, true, answer);
   }
 
   private async run(
@@ -677,6 +729,7 @@ export class JobHost {
     requestedBy: JobRequester | null,
     params: JobParams,
     detached = false,
+    answer?: JobAnswer,
   ): Promise<Started> {
     const startedAt = Date.now();
     const runId = randomUUID();
@@ -776,13 +829,13 @@ export class JobHost {
         );
       }
       running = true;
-      if (detached) this.owed.set(runId, () => this.giveUp(job, base, admission));
+      if (detached) this.owed.set(runId, () => this.giveUp(job, base, admission, answer));
       return {
         runId,
         refused: null,
         // The claim is `finish`'s to take, so nothing is deleted from `owed` here: releasing
         // it on the way out would drop a settlement that a shutdown had already made.
-        finished: this.finish(job, base, admission, detached).finally(() =>
+        finished: this.finish(job, base, admission, detached, answer).finally(() =>
           this.inFlight.delete(job.slug),
         ),
       };
@@ -797,6 +850,7 @@ export class JobHost {
     base: RunBase,
     admission: JobAdmission,
     detached: boolean,
+    answer?: JobAnswer,
   ): Promise<JobRun> {
     const done = {
       ...base,
@@ -810,7 +864,7 @@ export class JobHost {
     if (detached && !this.claim(base.runId)) return this.seal(done);
 
     const run = this.record(done);
-    await this.settle(job, run, detached);
+    await this.settle(job, run, detached, answer);
     return run;
   }
 

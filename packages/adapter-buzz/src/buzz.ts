@@ -14,6 +14,7 @@ import type {
   ThreadReply,
 } from "@sageox/agent-toolkit-core";
 import { toHexPubkey } from "./identity.ts";
+import { DIRECTORY_KIND } from "./profile.ts";
 import {
   toInboundEvent,
   toChannelPostTemplate,
@@ -47,6 +48,19 @@ const FRESH_START_LOOKBACK = 60;
  * reading a thread it just rooted is asking a question it will act on.
  */
 const THREAD_READ_TIMEOUT_MS = 5000;
+
+/**
+ * How long the directory subscription waits for the relay's EOSE before the channels are
+ * released anyway.
+ *
+ * nostr-tools fires `oneose` from a timer of its own when a relay sends no EOSE, and its
+ * default is tuned for a browser client: 4.4 seconds is short enough to go off on a busy
+ * relay that is still sending records, which would release the channels ahead of the
+ * roster — the very order this subscription exists to keep. Long enough that only a relay
+ * that will never answer reaches it, and short enough that such a relay does not keep the
+ * agent deaf: the same trade `readThread` makes with its own clock.
+ */
+const DIRECTORY_EOSE_TIMEOUT_MS = 30_000;
 
 export interface BuzzAdapterOptions {
   relayUrl: string;
@@ -94,6 +108,14 @@ export class BuzzAdapter implements SurfaceAdapter {
   private lastByChannel = new Map<string, InboundEvent>();
   /** The ids the relay can never vouch for privacy on, so normalization does not re-derive it. */
   private readonly privateChannels: ReadonlySet<string>;
+  /**
+   * Pubkeys the relay's directory lists, with the name each record carries, so a sibling's
+   * message carries `isAgent` and the chain-depth cap applies to it, and so a person can
+   * ask for it by name. Learned from the relay rather than declared: the toolkit owns no
+   * roster, and a directory record is what makes a pubkey mentionable at all. Never pruned
+   * — a record that disappears does not make its author a person.
+   */
+  private agents = new Map<string, string | undefined>();
 
   constructor(private opts: BuzzAdapterOptions) {
     this.since = opts.since;
@@ -115,7 +137,7 @@ export class BuzzAdapter implements SurfaceAdapter {
     const { relay, authRefusal } = await connectAuthenticated(
       this.opts.relayUrl,
       this.opts.signer,
-      { enableReconnect: true, onReauthenticated: () => this.subscribeAll() },
+      { enableReconnect: true, onReauthenticated: () => void this.subscribeAll() },
     );
 
     // A refusal is terminal for this agent, so it is raised here rather than carried: the
@@ -157,29 +179,65 @@ export class BuzzAdapter implements SurfaceAdapter {
    *
    * Resuming rather than replaying is free here: `since` has advanced with every event
    * received, so the new REQ asks only for the gap.
+   *
+   * A channel event is delivered only once the directory has answered **on this socket**.
+   * A REQ is a subscription of its own and a relay may interleave two, so a sibling's
+   * message replayed from the backlog could otherwise be normalized before the record that
+   * names it and be admitted past the chain-depth cap as a person's. The gate is the
+   * directory subscription's own `eosed` flag rather than anything kept here, because
+   * nostr-tools resets that flag on every reconnect before re-firing the REQs — including
+   * the reconnects this adapter never hears about, on a relay that issues no AUTH
+   * challenge — so it says exactly what a replayed message has to wait for. Events that
+   * arrive early are held and released in order when the directory answers. Kind 10100 is
+   * replaceable, so that REQ is one record per author however long the relay has held it,
+   * and a `since` on it would hide every agent registered before this process started.
    */
   private subscribeAll(): void {
     const relay = this.relay;
     const onEvent = this.onEvent;
     if (!relay || !onEvent) return;
 
+    // A relay that refuses the directory REQ closes it, and nothing re-fires a closed
+    // subscription: there is no directory here, and holding on for one would be deafness.
+    let refused = false;
+    const held: Array<() => void> = [];
+    const release = () => {
+      for (const deliver of held.splice(0)) deliver();
+    };
+    const directory = relay.subscribe([{ kinds: [DIRECTORY_KIND] }], {
+      eoseTimeout: DIRECTORY_EOSE_TIMEOUT_MS,
+      onevent: (event: Event) => this.agents.set(event.pubkey, directoryName(event)),
+      oneose: release,
+      onclose: () => {
+        refused = true;
+        release();
+      },
+    });
+
     for (const filter of this.filters()) {
       relay.subscribe([filter], {
         onevent: (event: Event) => {
-          // Advance the cursor on everything received, not just what we act on: a
-          // filtered-out event still proves the relay had nothing older left to send.
-          this.since = Math.max(this.since ?? 0, event.created_at);
-          const inbound = toInboundEvent(event, {
-            pubkey: this.pubkey!,
-            privateChannels: this.privateChannels,
-          });
-          // An event tagged with two of our channels matches two REQs, and normalization
-          // gives it one channel. Only that channel's REQ delivers it, or the brain
-          // answers the same message once per REQ it arrived on.
-          const subscribed = filter[`#${BUZZ_DEFAULTS.channelTag}`]?.[0];
-          if (subscribed !== undefined && inbound.channel.id !== subscribed) return;
-          this.lastByChannel.set(inbound.channel.id, inbound);
-          onEvent(inbound);
+          const deliver = () => {
+            // Advance the cursor on everything delivered, not just what we act on: a
+            // filtered-out event still proves the relay had nothing older left to send.
+            // On delivery rather than receipt, so a held event a restart loses is one the
+            // cursor still asks for.
+            this.since = Math.max(this.since ?? 0, event.created_at);
+            const inbound = toInboundEvent(event, {
+              pubkey: this.pubkey!,
+              privateChannels: this.privateChannels,
+              agents: this.agents,
+            });
+            // An event tagged with two of our channels matches two REQs, and
+            // normalization gives it one channel. Only that channel's REQ delivers it, or
+            // the brain answers the same message once per REQ it arrived on.
+            const subscribed = filter[`#${BUZZ_DEFAULTS.channelTag}`]?.[0];
+            if (subscribed !== undefined && inbound.channel.id !== subscribed) return;
+            this.lastByChannel.set(inbound.channel.id, inbound);
+            onEvent(inbound);
+          };
+          if (directory.eosed || refused) deliver();
+          else held.push(deliver);
         },
       });
     }
@@ -195,6 +253,16 @@ export class BuzzAdapter implements SurfaceAdapter {
     }
     const signed = await this.opts.signer.signEvent(toReplyTemplate(msg, inReplyTo));
     await this.relay.publish(signed);
+  }
+
+  /** The relay's directory, as {@link SurfaceAdapter.principals} — see `agents`. */
+  principals(): ReadonlyMap<string, string | undefined> {
+    return this.agents;
+  }
+
+  /** The directory's name for an agent; a person's pubkey has none here. */
+  displayName(id: string): string | undefined {
+    return this.agents.get(id);
   }
 
   postTargets(): ChannelRef[] {
@@ -316,7 +384,7 @@ export class BuzzAdapter implements SurfaceAdapter {
 
     const replies = events
       .sort((a, b) => a.created_at - b.created_at)
-      .map((event) => toThreadReply(event, { pubkey: this.pubkey! }));
+      .map((event) => toThreadReply(event, { pubkey: this.pubkey!, agents: this.agents }));
     return limit === undefined ? replies : replies.slice(0, limit);
   }
 
@@ -376,5 +444,35 @@ export class BuzzAdapter implements SurfaceAdapter {
       ...base,
       [`#${BUZZ_DEFAULTS.channelTag}`]: [channel.id],
     }));
+  }
+}
+
+/**
+ * What a directory name has to look like to be vouched for: a handle, not a sentence.
+ *
+ * The record is signed by the key it describes and by nobody else, so its name is that
+ * key's own claim — and it goes two places a claim must not be free-form: the tool
+ * description the brain reads, and the label on a line brought home for a person to read.
+ * A name that could carry an instruction, a second label, or a line break is not a name
+ * this adapter will put there. Letters and digits in any script, then up to thirty-one of
+ * those, spaces, and the punctuation a handle has.
+ */
+const DIRECTORY_NAME = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,31}$/u;
+
+/**
+ * The name a directory record carries, as clients show it: `display_name` over `name`,
+ * and only one that is a handle. Unreadable content is a record without a name, not a
+ * record that does not exist.
+ */
+function directoryName(event: Event): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(event.content);
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const { display_name: display, name } = parsed as Record<string, unknown>;
+    return [display, name].find(
+      (value): value is string => typeof value === "string" && DIRECTORY_NAME.test(value),
+    );
+  } catch {
+    return undefined;
   }
 }

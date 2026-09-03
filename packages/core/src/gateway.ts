@@ -120,6 +120,20 @@ export class Gateway {
    * event costs nothing — and the decision never depends on what the message says.
    */
   private onEvent(e: InboundEvent): void {
+    // An answer to something this agent asked on a conversation's behalf comes home instead
+    // of becoming a turn: it goes out as this agent's own message through the guarded path a
+    // reply takes, and that is the whole of what happens to it. Admitting it as well would
+    // have the agent answer, on the far door, a line that was addressed to the person who
+    // asked — and keep an exchange between two agents going there. Only while serving: the
+    // kill switch means silence, and an answer relayed under it is the agent still speaking.
+    if (this.serving) {
+      const link = this.egress.claimLink(e);
+      if (link) {
+        void this.egress.relayHome(link, e);
+        return;
+      }
+    }
+
     // "Arrived but ignored" and "never arrived" look identical from outside, and they
     // have completely different causes — so say which, every time.
     const skip = this.skipReason(e);

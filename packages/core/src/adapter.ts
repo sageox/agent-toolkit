@@ -54,6 +54,25 @@ export interface SurfaceAdapter {
   postTargets?(): readonly ChannelRef[];
 
   /**
+   * Who this surface can vouch for as addressable, by id, with the name people use.
+   *
+   * Optional, and only a surface that holds a roster answers: Buzz reads the relay's
+   * directory records, which is what makes a pubkey mentionable there at all. It is the
+   * surface's knowledge and never the manifest's — the principals an operator named live
+   * in `owner` and `allowlist`, and `SurfaceEgress.address` reads both sources.
+   */
+  principals?(): ReadonlyMap<string, string | undefined>;
+
+  /**
+   * The name people use for an id this surface has seen, or nothing.
+   *
+   * Presentation only — it labels a line brought home from this surface, and is never an
+   * identity check. Slack answers from the member names it has resolved, Buzz from the
+   * directory; an id neither knows is shown as itself.
+   */
+  displayName?(id: string): string | undefined;
+
+  /**
    * Publish a message with no inbound context: a new top-level post, or — given a
    * `threadRoot` this adapter handed back earlier — a reply beneath one of its own.
    *
