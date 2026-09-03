@@ -1604,7 +1604,7 @@ describe("SlackAdapter reads the surface it is on", () => {
     await expect(instance.describeActor!("U0ALICE")).rejects.toThrow(/missing_scope/);
   });
 
-  it("reads a channel oldest first, from one page sized by `limit`", async () => {
+  it("reads a channel oldest first, and asks Slack for a whole page either way", async () => {
     const { instance, api } = adapter();
     api.names = { U0ALICE: "alice" };
     await instance.start(() => {});
@@ -1628,9 +1628,13 @@ describe("SlackAdapter reads the surface it is on", () => {
       ["U0ALICE", "morning"],
       ["U0BOB", "and @alice"],
     ]);
-    // Sized by the caller and satisfied by one page: two readable messages were asked for
-    // and two arrived, so there is nothing to page on for.
-    expect(api.historyCalls).toEqual([{ channel: "GENG", oldest: "0", limit: 2 }]);
+    // The page is sized for the endpoint, not for the request: Slack bills per call, so
+    // asking for 200 to answer a request for 2 costs the same and is what keeps this to one
+    // call. Deriving it from `limit` had it backwards — a small ask made small pages, so
+    // the notices a page can be made of were likelier to fill it.
+    expect(api.historyCalls).toEqual([
+      { channel: "GENG", oldest: "0", limit: 200, cursor: undefined },
+    ]);
   });
 
   it("pages on when the newest records are notices rather than messages", async () => {
@@ -1661,8 +1665,8 @@ describe("SlackAdapter reads the surface it is on", () => {
     );
     expect(messages.map((message) => message.text)).toEqual(["first", "second"]);
     expect(api.historyCalls).toEqual([
-      { channel: "GENG", oldest: "0", limit: 2, cursor: undefined },
-      { channel: "GENG", oldest: "0", limit: 2, cursor: "page2" },
+      { channel: "GENG", oldest: "0", limit: 200, cursor: undefined },
+      { channel: "GENG", oldest: "0", limit: 200, cursor: "page2" },
     ]);
   });
 
@@ -1685,7 +1689,7 @@ describe("SlackAdapter reads the surface it is on", () => {
     // What is true is that this read stopped looking, and the two must not arrive alike.
     await expect(
       instance.readChannel!({ surface: "slack", id: "GENG", isPublic: false }, 5),
-    ).rejects.toThrow(/found 0 of the 5 messages asked for, with more history still to page/);
+    ).rejects.toThrow(/read 1000 records of GENG and found 0 of the 5 messages asked for/);
     expect(api.historyCalls).toHaveLength(5);
   });
 

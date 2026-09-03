@@ -159,6 +159,17 @@ function parseSlackReactionId(nativeId: string): { name: string; message: string
  */
 const MAX_HISTORY_PAGES = 5;
 
+/**
+ * What one `conversations.history` call asks for, whatever the caller wants back.
+ *
+ * Sized for the endpoint rather than for the request, because Slack bills per call and not
+ * per record: asking for 200 to answer a request for 5 costs exactly what asking for 5
+ * costs, and it is what keeps the walk to a single page. Deriving the page from the
+ * caller's `limit` had it backwards — a small ask made small pages, so the notices that a
+ * page can be made of were more likely to fill it, not less.
+ */
+const HISTORY_PAGE = 200;
+
 /** A dedup key only has to outlive Slack's retries and the backfill/live overlap. */
 const SEEN_LIMIT = 2_048;
 
@@ -548,6 +559,8 @@ export class SlackAdapter implements SurfaceAdapter {
    * wrote sitting one page further back. That is silent: the answer is a short history,
    * not an error.
    *
+   * Each page is `HISTORY_PAGE` records regardless of what the caller asked for — Slack
+   * bills per call, so a bigger page is free and is what keeps the walk to one of them.
    * `MAX_HISTORY_PAGES` stops a channel that is nothing but notices from being walked back
    * to its first day, and **running into it throws** rather than answering short. Slack is
    * still offering a cursor at that point, so a short answer here would be the same
@@ -567,7 +580,12 @@ export class SlackAdapter implements SurfaceAdapter {
     let cursor: string | undefined;
     let exhausted = false;
     for (let page = 0; ; page++) {
-      const answered = await this.api.history({ channel: channel.id, oldest: "0", limit, cursor });
+      const answered = await this.api.history({
+        channel: channel.id,
+        oldest: "0",
+        limit: HISTORY_PAGE,
+        cursor,
+      });
       for (const message of answered.messages ?? []) {
         messages.push(message);
         if (this.toChannelLine(message, channel.id)) readable += 1;
@@ -582,10 +600,13 @@ export class SlackAdapter implements SurfaceAdapter {
       }
     }
     if (exhausted) {
+      // No advice, because there is none to give: a smaller `limit` reads the same pages,
+      // and the shape of the channel is not the caller's to change. What the caller can do
+      // is not report this as the channel being quiet.
       throw new Error(
-        `read ${MAX_HISTORY_PAGES} pages of ${channel.id} and found ${readable} of the ` +
-          `${limit} messages asked for, with more history still to page — ask for fewer, ` +
-          "rather than reading this as all the channel holds",
+        `read ${MAX_HISTORY_PAGES * HISTORY_PAGE} records of ${channel.id} and found ` +
+          `${readable} of the ${limit} messages asked for, with more history still to ` +
+          "page — this is a read that gave up, not a channel with that little in it",
       );
     }
 
