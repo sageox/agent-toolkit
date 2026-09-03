@@ -395,6 +395,27 @@ describe("addressing one principal from the brain's post", () => {
     turn.close();
   });
 
+  it("keeps the reservation when the surface failed after taking the post", async () => {
+    const buzz = adapter("buzz", hive);
+    const taken = buzz.value.post!;
+    buzz.value.post = async (...args) => {
+      await taken(...args);
+      throw new Error("relay closed the socket before answering");
+    };
+    const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });
+    const turn = egress.answers(event("slack", "C0123"));
+
+    await expect(egress.address("buzz", "hive", { text: "hi" }, OWNER)).rejects.toThrow(
+      /closed the socket/,
+    );
+    // The message may well be out. Waking a second principal is worse than a lost retry.
+    await expect(egress.address("buzz", "hive", { text: "hi" }, FRIEND)).rejects.toThrow(
+      /already addressed/,
+    );
+    expect(buzz.posted).toHaveLength(1);
+    turn.close();
+  });
+
   it("gives the reservation back when the post was refused, so the brain can try again", async () => {
     const buzz = adapter("buzz", [{ surface: "buzz", id: "town", isPublic: true }, ...hive]);
     const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });

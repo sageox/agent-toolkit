@@ -49,6 +49,19 @@ const FRESH_START_LOOKBACK = 60;
  */
 const THREAD_READ_TIMEOUT_MS = 5000;
 
+/**
+ * How long the directory subscription waits for the relay's EOSE before the channels are
+ * released anyway.
+ *
+ * nostr-tools fires `oneose` from a timer of its own when a relay sends no EOSE, and its
+ * default is tuned for a browser client: 4.4 seconds is short enough to go off on a busy
+ * relay that is still sending records, which would release the channels ahead of the
+ * roster — the very order this subscription exists to keep. Long enough that only a relay
+ * that will never answer reaches it, and short enough that such a relay does not keep the
+ * agent deaf: the same trade `readThread` makes with its own clock.
+ */
+const DIRECTORY_EOSE_TIMEOUT_MS = 30_000;
+
 export interface BuzzAdapterOptions {
   relayUrl: string;
   /**
@@ -152,9 +165,7 @@ export class BuzzAdapter implements SurfaceAdapter {
     this.since ??= Math.floor(Date.now() / 1000) - FRESH_START_LOOKBACK;
 
     this.onEvent = onEvent;
-    // Resolves once the channel REQs are open, so a caller that was told the agent is
-    // listening is not told so a directory round trip early.
-    await this.subscribeAll();
+    this.subscribeAll();
   }
 
   /**
@@ -169,57 +180,67 @@ export class BuzzAdapter implements SurfaceAdapter {
    * Resuming rather than replaying is free here: `since` has advanced with every event
    * received, so the new REQ asks only for the gap.
    *
-   * The directory first, and the channels only once it has answered. A REQ is a
-   * subscription of its own and a relay may interleave two, so a sibling's message
-   * replayed from the backlog could otherwise be normalized before the record that names
-   * it and be admitted past the chain-depth cap as a person's. Waiting for the directory's
-   * EOSE is what makes the order a guarantee. Kind 10100 is replaceable, so that REQ is one
-   * record per author however long the relay has held it, and a `since` on it would hide
-   * every agent registered before this process started.
+   * A channel event is delivered only once the directory has answered **on this socket**.
+   * A REQ is a subscription of its own and a relay may interleave two, so a sibling's
+   * message replayed from the backlog could otherwise be normalized before the record that
+   * names it and be admitted past the chain-depth cap as a person's. The gate is the
+   * directory subscription's own `eosed` flag rather than anything kept here, because
+   * nostr-tools resets that flag on every reconnect before re-firing the REQs — including
+   * the reconnects this adapter never hears about, on a relay that issues no AUTH
+   * challenge — so it says exactly what a replayed message has to wait for. Events that
+   * arrive early are held and released in order when the directory answers. Kind 10100 is
+   * replaceable, so that REQ is one record per author however long the relay has held it,
+   * and a `since` on it would hide every agent registered before this process started.
    */
-  private subscribeAll(): Promise<void> {
+  private subscribeAll(): void {
     const relay = this.relay;
     const onEvent = this.onEvent;
-    if (!relay || !onEvent) return Promise.resolve();
+    if (!relay || !onEvent) return;
 
-    return new Promise((resolve) => {
-      let listening = false;
-      const listen = () => {
-        if (listening) return;
-        listening = true;
-        for (const filter of this.filters()) {
-          relay.subscribe([filter], {
-            onevent: (event: Event) => {
-              // Advance the cursor on everything received, not just what we act on: a
-              // filtered-out event still proves the relay had nothing older left to send.
-              this.since = Math.max(this.since ?? 0, event.created_at);
-              const inbound = toInboundEvent(event, {
-                pubkey: this.pubkey!,
-                privateChannels: this.privateChannels,
-                agents: this.agents,
-              });
-              // An event tagged with two of our channels matches two REQs, and
-              // normalization gives it one channel. Only that channel's REQ delivers it, or
-              // the brain answers the same message once per REQ it arrived on.
-              const subscribed = filter[`#${BUZZ_DEFAULTS.channelTag}`]?.[0];
-              if (subscribed !== undefined && inbound.channel.id !== subscribed) return;
-              this.lastByChannel.set(inbound.channel.id, inbound);
-              onEvent(inbound);
-            },
-          });
-        }
-        resolve();
-      };
-
-      relay.subscribe([{ kinds: [DIRECTORY_KIND] }], {
-        onevent: (event: Event) => this.agents.set(event.pubkey, directoryName(event)),
-        // Either way the channels open: nostr-tools fires `oneose` on a timer of its own
-        // when a relay sends no EOSE, and a relay that refuses the REQ closes it. A
-        // directory that will not answer must not keep the agent deaf.
-        oneose: listen,
-        onclose: listen,
-      });
+    // A relay that refuses the directory REQ closes it, and nothing re-fires a closed
+    // subscription: there is no directory here, and holding on for one would be deafness.
+    let refused = false;
+    const held: Array<() => void> = [];
+    const release = () => {
+      for (const deliver of held.splice(0)) deliver();
+    };
+    const directory = relay.subscribe([{ kinds: [DIRECTORY_KIND] }], {
+      eoseTimeout: DIRECTORY_EOSE_TIMEOUT_MS,
+      onevent: (event: Event) => this.agents.set(event.pubkey, directoryName(event)),
+      oneose: release,
+      onclose: () => {
+        refused = true;
+        release();
+      },
     });
+
+    for (const filter of this.filters()) {
+      relay.subscribe([filter], {
+        onevent: (event: Event) => {
+          const deliver = () => {
+            // Advance the cursor on everything delivered, not just what we act on: a
+            // filtered-out event still proves the relay had nothing older left to send.
+            // On delivery rather than receipt, so a held event a restart loses is one the
+            // cursor still asks for.
+            this.since = Math.max(this.since ?? 0, event.created_at);
+            const inbound = toInboundEvent(event, {
+              pubkey: this.pubkey!,
+              privateChannels: this.privateChannels,
+              agents: this.agents,
+            });
+            // An event tagged with two of our channels matches two REQs, and
+            // normalization gives it one channel. Only that channel's REQ delivers it, or
+            // the brain answers the same message once per REQ it arrived on.
+            const subscribed = filter[`#${BUZZ_DEFAULTS.channelTag}`]?.[0];
+            if (subscribed !== undefined && inbound.channel.id !== subscribed) return;
+            this.lastByChannel.set(inbound.channel.id, inbound);
+            onEvent(inbound);
+          };
+          if (directory.eosed || refused) deliver();
+          else held.push(deliver);
+        },
+      });
+    }
   }
 
   async send(channel: ChannelRef, msg: GuardedMessage, context?: InboundEvent): Promise<void> {

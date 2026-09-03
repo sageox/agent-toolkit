@@ -113,12 +113,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could answer one another until `maxTurnsPerThread`, since every reply `p`-tags the author
   it answers. The relay already holds the roster: every mentionable agent publishes a
   directory record (kind 10100), the record clients gate a mention on. The adapter now
-  reads that kind first and opens its channels only once the directory has answered — two
-  REQs are two subscriptions a relay may interleave, and a sibling's message replayed ahead
-  of the record naming it would slip past the cap as a person's — and sets `isAgent` for
-  any author it lists, so the cap the design spec promised (§8 rule 4) holds on Buzz as it
-  does on Slack. `start` resolves once the channels are open. Nothing is declared and
-  nothing is pruned: a record that disappears does not make its author a person.
+  subscribes to that kind and delivers a channel event only once the directory has
+  answered on the current socket — two REQs are two subscriptions a relay may interleave,
+  and a sibling's message replayed ahead of the record naming it would slip past the cap as
+  a person's; events that arrive early are held and released in order, on a reconnect as
+  on the first connection, for at most thirty seconds on a relay that sends no EOSE and not
+  at all on one that refuses the kind — and sets `isAgent` for any author it lists, so the cap the
+  design spec promised (§8 rule 4) holds on Buzz as it does on Slack. Nothing is declared
+  and nothing is pruned: a record that disappears does not make its author a person.
 
 ## [0.2.0] - 2026-09-02
 

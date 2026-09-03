@@ -252,17 +252,15 @@ export class SurfaceEgress {
       );
     }
 
-    // Reserved before the await, not after: the hosted server handles calls concurrently,
-    // and two that both passed the check above would both wake someone. Given back only
-    // when nothing was posted, so a refusal stays the feedback it is meant to be.
+    // Everything that can refuse with nothing on the wire happens before the reservation,
+    // so a refusal stays the feedback it is meant to be. Then reserved before the send is
+    // awaited — the hosted server handles calls concurrently, and two that both passed the
+    // checks would both wake someone — and kept whatever the send does: a rejection from a
+    // surface can come after the message is out, and a second wake is worse than a lost
+    // retry.
+    const target = this.admit(surface, channelId, msg);
     turn.addressed = true;
-    let ref: EventRef | undefined;
-    try {
-      ref = await this.post(surface, channelId, msg, undefined, [principal.id]);
-    } catch (error) {
-      turn.addressed = false;
-      throw error;
-    }
+    const ref = await this.publish(target, msg, undefined, [principal.id]);
     // The resolved id, on its own line: the tool audit records what the brain asked for,
     // which may be a name, and the post line records how many were addressed.
     console.info(`addressed surface=${surface} channel=${channelId} principal=${principal.id}`);
@@ -428,6 +426,14 @@ export class SurfaceEgress {
     threadRoot?: EventRef,
     mentions?: readonly string[],
   ): Promise<EventRef | undefined> {
+    return this.publish(this.admit(surface, channelId, msg), msg, threadRoot, mentions);
+  }
+
+  /**
+   * Everything a post decides before anything is sent: the adapter, the configured channel
+   * the request resolves to, and the guard's verdict on it. Throws with nothing on the wire.
+   */
+  private admit(surface: string, channelId: string, msg: GuardedMessage): PostTarget {
     const adapter = this.byKind.get(surface);
     if (!adapter?.post || !adapter.postTargets) {
       throw new Error("the target surface does not support top-level posts");
@@ -455,14 +461,29 @@ export class SurfaceEgress {
       );
       throw new Error(`post refused by ${verdict.rule}: ${verdict.reason}`);
     }
+    return { adapter, channel };
+  }
 
-    const ref = await adapter.post(channel, msg, threadRoot, mentions);
+  /**
+   * The send itself, after {@link admit}. A rejection from here is ambiguous — the surface
+   * may have taken the message before it failed — which is why nothing that reserves on a
+   * post gives the reservation back on this path.
+   */
+  private async publish(
+    { adapter, channel }: PostTarget,
+    msg: GuardedMessage,
+    threadRoot?: EventRef,
+    mentions?: readonly string[],
+  ): Promise<EventRef | undefined> {
+    const ref = await adapter.post!(channel, msg, threadRoot, mentions);
     // The resolved id, not what was asked for: the audit line has to say where the
     // message went, and those are now two different strings. The recipient *count* and not
     // the ids: how many were addressed is what separates a roll call that found silence
     // from one that woke nobody, and a list would grow this line with the fleet.
     const addressed = mentions?.length ? ` mentions=${mentions.length}` : "";
-    console.info(`post_message surface=${surface} channel=${channel.id}${addressed} result=sent`);
+    console.info(
+      `post_message surface=${channel.surface} channel=${channel.id}${addressed} result=sent`,
+    );
     return ref;
   }
 
@@ -520,6 +541,12 @@ export function resolveTarget(
   const fold = (value: string) => value.trim().toLowerCase();
   const named = onSurface.filter((target) => target.name && fold(target.name) === fold(wanted));
   return named.length === 1 ? named[0] : undefined;
+}
+
+/** What {@link SurfaceEgress.admit} hands to the send: the adapter and its own channel ref. */
+interface PostTarget {
+  adapter: SurfaceAdapter;
+  channel: ChannelRef;
 }
 
 /** Someone this agent may address: an id on a surface, and the name people use for it. */

@@ -44,6 +44,7 @@ export class FakeRelay {
       rejectAuth?: boolean;
       rejectAuthReason?: string;
       slowDirectoryMs?: number;
+      refuseDirectory?: boolean;
     },
   ) {
     this.wss = wss;
@@ -66,6 +67,8 @@ export class FakeRelay {
        * beside it is answered first — the interleaving a real relay is free to produce.
        */
       slowDirectoryMs?: number;
+      /** Close a directory REQ unanswered — a relay whose conventions do not include one. */
+      refuseDirectory?: boolean;
     } = {},
   ): Promise<FakeRelay> {
     const wss = new WebSocketServer({ port: 0 });
@@ -78,6 +81,7 @@ export class FakeRelay {
       rejectAuth: opts.rejectAuth,
       rejectAuthReason: opts.rejectAuthReason,
       slowDirectoryMs: opts.slowDirectoryMs,
+      refuseDirectory: opts.refuseDirectory,
     });
     relay.backlog.push(...(opts.backlog ?? []));
     return relay;
@@ -144,6 +148,11 @@ export class FakeRelay {
         const directory = filters.some((filter) =>
           Array.isArray(filter.kinds) && (filter.kinds as number[]).includes(10100),
         );
+        if (directory && this.opts.refuseDirectory) {
+          this.openSubs = this.openSubs.filter((sub) => sub.subId !== subId);
+          ws.send(JSON.stringify(["CLOSED", subId, "unsupported: kind 10100"]));
+          return;
+        }
         if (directory && this.opts.slowDirectoryMs) setTimeout(answer, this.opts.slowDirectoryMs);
         else answer();
         return;

@@ -875,14 +875,9 @@ describe("answers come home", () => {
     };
   }
 
-  /**
-   * A relay is fire-and-forget from the gateway's side, so a *negative* claim about it —
-   * nothing else arrived — can only be made after the positive ones have landed and a beat
-   * has passed. Every positive claim below waits on the observable state itself.
-   */
-  async function nothingMore() {
-    await new Promise((r) => setTimeout(r, 20));
-  }
+  // Relays land in the order their events were injected, so a negative claim — that line
+  // was not relayed — is made by injecting one more line that *is*, waiting for it, and
+  // reading what arrived before it.
 
   it("brings the addressed principal's reply into the thread that asked, and nothing else", async () => {
     const slack = surface("slack", "C0123");
@@ -905,13 +900,14 @@ describe("answers come home", () => {
     buzz.inject(at("buzz", "hive", IDA, { text: "passed, 0 failures", mentionsMe: true, ...under }));
     buzz.inject(at("buzz", "hive", "bystander", { text: "me too", ...under }));
     buzz.inject(at("buzz", "hive", IDA, { text: "a top-level aside" }));
-    await vi.waitFor(() => expect(slack.sent).toHaveLength(2));
-    await gw.drain();
-    await nothingMore();
+    buzz.inject(at("buzz", "hive", IDA, { text: "and the logs are clean", ...under }));
+    await vi.waitFor(() => expect(slack.sent).toHaveLength(3));
+    await gw.drain(); // any turn the mention had started would have posted by now
 
     expect(slack.sent.map((s) => s.msg.text)).toEqual([
       "asked ida in hive",
       "ida (buzz · hive): passed, 0 failures",
+      "ida (buzz · hive): and the logs are clean",
     ]);
     // Into the very message that asked, so the surface threads it there.
     expect(slack.sent[1].context?.id).toEqual(asked.id);
@@ -950,7 +946,9 @@ describe("answers come home", () => {
 
     gw.stopServing("operator");
     buzz.inject(at("buzz", "hive", IDA, { text: "one more", ...under }));
-    await nothingMore();
-    expect(slack.sent).toHaveLength(2);
+    gw.resumeServing();
+    buzz.inject(at("buzz", "hive", IDA, { text: "and again", ...under }));
+    await vi.waitFor(() => expect(slack.sent).toHaveLength(3));
+    expect(slack.sent.at(-1)?.msg.text).toBe("ida (buzz · hive): and again"); // "one more" never came
   });
 });

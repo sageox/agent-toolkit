@@ -93,11 +93,11 @@ function chatReqs() {
 }
 
 /** What a registered agent leaves on the relay — the record clients gate a mention on. */
-function directoryRecord(sk: Uint8Array, name: string, displayName?: string) {
+function directoryRecord(sk: Uint8Array, name: string, displayName?: string, at = now - 86400) {
   return finalizeEvent(
     {
       kind: DIRECTORY_KIND,
-      created_at: now - 86400,
+      created_at: at,
       tags: [],
       content: JSON.stringify({
         name,
@@ -479,7 +479,7 @@ describe("BuzzAdapter subscription shape", () => {
     relay = await FakeRelay.start();
     const a = newAdapter();
     await a.start(() => {});
-    await settle();
+    await vi.waitFor(() => expect(relay.reqs.length).toBeGreaterThan(1));
 
     const filter = relay.reqs[0].filters[0];
     expect(filter.kinds).toEqual([DIRECTORY_KIND]);
@@ -493,7 +493,7 @@ describe("BuzzAdapter subscription shape", () => {
   // Two REQs are two subscriptions, and a relay may answer the second before the first. A
   // sibling's message replayed ahead of the record naming it would be admitted as a
   // person's — once, and once is a turn past the cap.
-  it("opens its channels only once the directory has answered, so a replayed sibling is never a person", async () => {
+  it("delivers a replayed message only once the directory has answered, so a sibling is never a person", async () => {
     const siblingSk = generateSecretKey();
     relay = await FakeRelay.start({
       // Stored, not live: it is in the backlog before the adapter connects. Stamped ahead
@@ -503,14 +503,54 @@ describe("BuzzAdapter subscription shape", () => {
     });
     const got: InboundEvent[] = [];
     const a = newAdapter();
-    const started = Date.now();
     await a.start((e) => got.push(e));
-    // `start` resolves once the agent is listening, which is after the directory answered.
-    expect(Date.now() - started).toBeGreaterThanOrEqual(150);
     await vi.waitFor(() => expect(got).toHaveLength(1), { timeout: 3000 });
 
     expect(got.map((e) => [e.text, e.author.isAgent])).toEqual([
       ["replayed while we were down", true],
+    ]);
+    await a.stop();
+  });
+
+  // A relay whose conventions do not include a directory has no records to wait for, and
+  // an agent held for one would be deaf on exactly the relay `probe` exists to find.
+  it("still hears its channels when the relay will not serve a directory", async () => {
+    const siblingSk = generateSecretKey();
+    relay = await FakeRelay.start({
+      refuseDirectory: true,
+      backlog: [said(siblingSk, "from a relay with other conventions")],
+    });
+    const got: InboundEvent[] = [];
+    const a = newAdapter();
+    await a.start((e) => got.push(e));
+
+    await vi.waitFor(() => expect(got).toHaveLength(1), { timeout: 3000 });
+    expect(relay.reqs[0].filters[0].kinds).toEqual([DIRECTORY_KIND]); // it did ask
+    expect(got[0].author.isAgent).toBe(false); // and nothing here can say otherwise
+    await a.stop();
+  });
+
+  // A relay that never challenges reconnects without this adapter hearing about it:
+  // nostr-tools re-fires the REQs itself, all at once. The gate has to hold there too.
+  it("holds the same line across a reconnect it is never told about", async () => {
+    relay = await FakeRelay.start({ slowDirectoryMs: 150 });
+    const got: InboundEvent[] = [];
+    const a = newAdapter();
+    await a.start((e) => got.push(e));
+    await vi.waitFor(() => expect(chatReqs()).toHaveLength(1));
+
+    // nostr-tools waits 10s before its first reconnect, which no test can sit through.
+    (a as unknown as { relay: { resubscribeBackoff: number[] } }).relay.resubscribeBackoff = [10];
+    relay.dropConnections();
+    // While we are down, a new sibling registers and speaks. Both are in the store the
+    // reconnected REQs replay, and the relay answers the channel first.
+    const newcomerSk = generateSecretKey();
+    relay.backlog.push(directoryRecord(newcomerSk, "juno", undefined, now + 60));
+    relay.backlog.push(said(newcomerSk, "sent while we were down", now + 61));
+
+    await vi.waitFor(() => expect(got).toHaveLength(1), { timeout: 3000 });
+    expect(got.map((e) => [e.text, e.author.isAgent])).toEqual([
+      ["sent while we were down", true],
     ]);
     await a.stop();
   });
@@ -522,7 +562,7 @@ describe("BuzzAdapter subscription shape", () => {
     const got: InboundEvent[] = [];
     const a = newAdapter();
     await a.start((e) => got.push(e));
-    await settle();
+    await vi.waitFor(() => expect(chatReqs()).toHaveLength(1));
 
     relay.emit(said(storedSk, "ack from a registered agent", now + 61));
     relay.emit(mention("a person asking", now + 62));
@@ -559,6 +599,7 @@ describe("BuzzAdapter subscription shape", () => {
     const got: InboundEvent[] = [];
     const a = newAdapter();
     await a.start((e) => got.push(e));
+    await vi.waitFor(() => expect(a.principals().has(getPublicKey(plainSk))).toBe(true));
 
     expect(a.principals().has(getPublicKey(loudSk))).toBe(true);
     expect(a.principals().get(getPublicKey(loudSk))).toBeUndefined();
