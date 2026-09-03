@@ -1,7 +1,9 @@
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
 import type {
+  ActorRef,
   ChannelDecl,
+  ChannelHistory,
   ChannelRef,
   EventRef,
   GuardedMessage,
@@ -32,9 +34,28 @@ export interface SlackHistoryPage {
   nextCursor?: string;
 }
 
-export interface SlackDirectPage {
+/** One page of `users.conversations`, as Slack spells a conversation object. */
+export interface SlackConversationPage {
+  channels?: {
+    id?: string;
+    name?: string;
+    is_private?: boolean;
+    is_im?: boolean;
+    is_mpim?: boolean;
+  }[];
+  nextCursor?: string;
+}
+
+/** One page of `conversations.members`. */
+export interface SlackMembersPage {
   ids?: string[];
   nextCursor?: string;
+}
+
+/** What `users.info` says about a member: the name to show, and whether it is a bot. */
+export interface SlackUser {
+  name?: string;
+  isBot: boolean;
 }
 
 /** Narrow API seam: production wraps WebClient and tests never touch the network. */
@@ -42,19 +63,31 @@ export interface SlackApiClient {
   authTest(): Promise<{ userId?: string; botId?: string }>;
   channelIsPrivate(channel: string): Promise<boolean | undefined>;
   /**
-   * One page of the DM conversations this bot has open — the ids no configuration names.
+   * One page of the conversations this bot is a member of, for the `types` asked for —
+   * `im` for the DMs no configuration names, channels for what it was actually invited to.
    * Paged like `history` and `replies`, so the walk stays on the tested side of this seam.
    */
-  openDirectChannels(cursor?: string): Promise<SlackDirectPage>;
-  history(args: { channel: string; oldest: string; cursor?: string }): Promise<SlackHistoryPage>;
+  memberConversations(args: { types: string; cursor?: string }): Promise<SlackConversationPage>;
+  /** One page of a channel's member ids. */
+  channelMembers(args: { channel: string; cursor?: string }): Promise<SlackMembersPage>;
+  /**
+   * `limit` is a page size, not a total: this endpoint answers newest first, so one page
+   * of `n` is the most recent `n`. Unset takes Slack's own default.
+   */
+  history(args: {
+    channel: string;
+    oldest: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<SlackHistoryPage>;
   replies(args: {
     channel: string;
     ts: string;
     oldest: string;
     cursor?: string;
   }): Promise<SlackHistoryPage>;
-  /** The name a person reads for a member id, or `undefined` when Slack will not say. */
-  userName(id: string): Promise<string | undefined>;
+  /** Who a member id is, or `undefined` when Slack will not say. */
+  user(id: string): Promise<SlackUser | undefined>;
   /** Answers with the posted message's `ts`, when Slack reports one. */
   postMessage(args: {
     channel: string;
@@ -117,6 +150,36 @@ function parseSlackReactionId(nativeId: string): { name: string; message: string
   return { name: nativeId.slice(0, at), message: nativeId.slice(at + 1) };
 }
 
+/**
+ * The most `conversations.history` pages one channel read walks before giving up.
+ *
+ * A read pages on only while it is short of readable messages, so this bounds the case
+ * where it never gets there: a channel whose recent history is all join notices would
+ * otherwise be walked to its first day to answer a question about its last hour. Reaching
+ * it is a refusal and not a short answer — see {@link SlackAdapter.readChannel}.
+ */
+const MAX_HISTORY_PAGES = 5;
+
+/**
+ * What one `conversations.history` call asks for, whatever the caller wants back.
+ *
+ * Sized for the endpoint rather than for the request, because Slack bills per call and not
+ * per record: asking for 200 to answer a request for 5 costs exactly what asking for 5
+ * costs, and it is what keeps the walk to a single page. Deriving the page from the
+ * caller's `limit` had it backwards — a small ask made small pages, so the notices that a
+ * page can be made of were more likely to fill it, not less.
+ *
+ * **It is a ceiling, and on some installations a distant one.** Slack cut non-Marketplace
+ * distributed apps to 1 request per minute and 15 objects per request for this endpoint —
+ * new installs from 2025-05-29, and every such install from 2026-03-03. An internal
+ * customer-built app, which is what `docs/guide/chat-surfaces.md` walks an operator
+ * through, is unaffected and still serves a thousand. So a page here comes back anywhere
+ * between 15 and 200 depending on how the app was distributed, the walk has to read
+ * whatever arrives rather than what it asked for, and nothing may be concluded from a page
+ * being short.
+ */
+const HISTORY_PAGE = 200;
+
 /** A dedup key only has to outlive Slack's retries and the backfill/live overlap. */
 const SEEN_LIMIT = 2_048;
 
@@ -154,6 +217,14 @@ export class SlackAdapter implements SurfaceAdapter {
   private readonly memberNames = new Map<string, string>();
   /** Ids Slack would not name, so a second message does not ask about them again. */
   private readonly unnamed = new Set<string>();
+  /**
+   * Ids Slack called a bot, beside the names rather than among them.
+   *
+   * `memberNames` is read for every mention in every message and is handed to
+   * normalization as a `ReadonlyMap<string, string>`, so widening its value would cost a
+   * projection per message to answer a question only the roster read asks.
+   */
+  private readonly botIds = new Set<string>();
   /**
    * One message at a time per conversation, in arrival order.
    *
@@ -399,6 +470,199 @@ export class SlackAdapter implements SurfaceAdapter {
     return limit === undefined ? replies : replies.slice(0, limit);
   }
 
+  /**
+   * The channels Slack reports this bot as a member of — one `users.conversations` walk.
+   *
+   * Channels only, not `im`: the question this answers is whether anyone invited the bot
+   * anywhere, and a DM somebody opened is not an invitation to a channel. Classified by
+   * `privacyOf`, the same rule `conversations.info` answers are read with at startup, so a
+   * channel listed here and the same channel in `postTargets` cannot disagree.
+   */
+  async listChannels(): Promise<readonly ChannelRef[]> {
+    if (!this.started) throw new Error("SlackAdapter.start() must be called before listChannels()");
+    const channels: ChannelRef[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.api.memberConversations({
+        types: "public_channel,private_channel",
+        cursor,
+      });
+      for (const channel of page.channels ?? []) {
+        if (!channel.id) continue;
+        // Unknown is public, as everywhere else here: the guard has to fail closed on a
+        // channel nothing can vouch for.
+        channels.push({
+          surface: SLACK_SURFACE,
+          id: channel.id,
+          isPublic: privacyOf(channel) !== true,
+          ...(channel.name ? { name: channel.name } : {}),
+        });
+      }
+      cursor = page.nextCursor || undefined;
+    } while (cursor);
+    return channels;
+  }
+
+  /**
+   * Who is in one channel this adapter serves — `conversations.members`, then one
+   * `users.info` per member.
+   *
+   * A call per member is what Slack offers: the bulk alternative is `users.list`, which
+   * spends the whole workspace's member table to name the few people in one channel — the
+   * trade `memberNames` already refuses at startup. `learnName` answers from cache for any
+   * id already asked about, so a second read of the same roster costs no calls at all, and
+   * `limit` bounds the first one.
+   *
+   * A member Slack would not name is still in the channel, so they come back by id. What
+   * that costs is `isAgent`, which is `false` for the same reason it is on an author with
+   * no `bot_id` — the only honest default when nothing said otherwise.
+   */
+  async listMembers(channel: ChannelRef, limit?: number): Promise<readonly ActorRef[]> {
+    if (!this.started) throw new Error("SlackAdapter.start() must be called before listMembers()");
+    this.assertChannel(channel);
+
+    const ids: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.api.channelMembers({ channel: channel.id, cursor });
+      ids.push(...(page.ids ?? []));
+      cursor = page.nextCursor || undefined;
+    } while (cursor && (limit === undefined || ids.length < limit));
+
+    const members: ActorRef[] = [];
+    // Sequential, for `learnNames`' reason: `users.info` is rate-limited per workspace, and
+    // a roster is exactly the burst that limit is aimed at.
+    for (const id of limit === undefined ? ids : ids.slice(0, limit)) {
+      members.push(this.actor(id, await this.learnName(id)));
+    }
+    return members;
+  }
+
+  /** One `users.info`. See {@link SurfaceAdapter.describeActor} for what `undefined` means. */
+  async describeActor(id: string): Promise<ActorRef | undefined> {
+    if (!this.started) {
+      throw new Error("SlackAdapter.start() must be called before describeActor()");
+    }
+    let user: SlackUser | undefined;
+    try {
+      user = await this.api.user(id);
+    } catch (error) {
+      // `user_not_found` is the one failure that means what `undefined` means here. A
+      // missing scope or a network fault is a lookup that did not happen, and answering
+      // "nobody" on either would report a real member as a stranger.
+      if (slackErrorCode(error) !== "user_not_found") throw error;
+    }
+    // Into the same cache the roster read consults, though never out of it: this is the
+    // brain asking who an id is, and a cached name is the wrong answer to that question.
+    if (user?.name) this.memberNames.set(id, user.name);
+    if (user?.isBot) this.botIds.add(id);
+    return user && this.actor(id, user);
+  }
+
+  /**
+   * Recent messages in a channel this adapter serves, from `conversations.history`.
+   *
+   * Paged until `limit` **readable** messages are in hand, not `limit` records. Slack
+   * counts a join notice, a channel topic change and a hidden message against the page
+   * size, and `toSlackInboundEvent` drops every one of them — so a page sized at the
+   * caller's limit can normalize to fewer, or to none, with the messages somebody actually
+   * wrote sitting one page further back. That is silent: the answer is a short history,
+   * not an error.
+   *
+   * Each page asks for `HISTORY_PAGE` records regardless of what the caller wants back, and
+   * may be answered with far fewer — see that constant for which installations get 15.
+   * `MAX_HISTORY_PAGES` stops a channel that is nothing but notices from being walked back
+   * to its first day.
+   *
+   * `limit` is a ceiling and not a quota: fewer messages than asked for is an ordinary
+   * answer, and on an installation served fifteen records a page it is the usual one. So
+   * a short read is reported rather than refused, and {@link ChannelHistory.more} says
+   * which kind of short it is — the channel ran out, or this walk did.
+   *
+   * Thread replies are not in it — `conversations.history` returns parents only, the same
+   * Slack fact `backfill` works around — and that is the right answer for a channel read.
+   * {@link readThread} is how one thread is opened.
+   */
+  async readChannel(channel: ChannelRef, limit?: number): Promise<ChannelHistory> {
+    if (!this.started) throw new Error("SlackAdapter.start() must be called before readChannel()");
+    this.assertChannel(channel);
+
+    const messages: SlackMessage[] = [];
+    let readable = 0;
+    let cursor: string | undefined;
+    let exhausted = false;
+    for (let page = 0; ; page++) {
+      const answered = await this.api.history({
+        channel: channel.id,
+        oldest: "0",
+        limit: HISTORY_PAGE,
+        cursor,
+      });
+      for (const message of answered.messages ?? []) {
+        messages.push(message);
+        if (this.toChannelLine(message, channel.id)) readable += 1;
+      }
+      cursor = answered.nextCursor || undefined;
+      // No cursor is the channel's own end. `limit` unset asks for one page, per this
+      // method's contract.
+      if (!cursor || limit === undefined || readable >= limit) break;
+      if (page + 1 >= MAX_HISTORY_PAGES) {
+        exhausted = true;
+        break;
+      }
+    }
+
+    // Sorted on the Slack `ts` rather than the ISO string it becomes, per `readThread`.
+    const ordered = messages.sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
+    // Before the lines are built, not after: `toChannelLine` renders a mention from this
+    // map, and the pass above ran to count readable records rather than to keep them.
+    for (const message of ordered) await this.learnNames(message.text ?? "");
+
+    const replies = ordered.flatMap((message) => this.toChannelLine(message, channel.id) ?? []);
+    return {
+      messages:
+        limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit)),
+      // Stopping on the page bound while Slack was still offering a cursor is the only way
+      // this read comes back short of a channel that had more to give. Running out of
+      // cursor is the channel's own end, and reaching `limit` is the whole of what was
+      // asked for — neither is `more`.
+      more: exhausted,
+    };
+  }
+
+  /**
+   * One history record as a line of channel, or nothing when it is not one.
+   *
+   * The same normalization the inbound path applies, so a join notice is no more a message
+   * here than it is a turn — which is also why it is a *test* of readability and not only a
+   * conversion: the page walk above counts what survives this.
+   */
+  private toChannelLine(message: SlackMessage, channel: string): ThreadReply | undefined {
+    const event = toSlackInboundEvent(
+      { ...message, type: message.type ?? "message", channel },
+      this.normalizeOptions(),
+    );
+    return event ? { author: event.author, text: event.text, ts: event.ts } : undefined;
+  }
+
+  /**
+   * A member id as core names an actor.
+   *
+   * `is_bot` is `toSlackInboundEvent`'s `bot_id` seen from the other side: what makes an
+   * author an agent there is that a bot posted the message, and what makes an id one here
+   * is that Slack calls it a bot.
+   */
+  private actor(id: string, user?: SlackUser): ActorRef {
+    const self = id === this.botUserId;
+    return {
+      surface: SLACK_SURFACE,
+      id,
+      isSelf: self,
+      isAgent: self || user?.isBot === true,
+      ...(user?.name ? { name: user.name } : {}),
+    };
+  }
+
   async react(target: InboundEvent, emoji: string): Promise<ReactionResult | undefined> {
     if (!this.started) return undefined;
     const at = this.locate(target.id);
@@ -588,17 +852,41 @@ export class SlackAdapter implements SurfaceAdapter {
    * otherwise cost a failed call per message forever.
    */
   private async learnNames(text: string): Promise<void> {
+    // Never the bot: its own mention is stripped before rendering, so there is nothing to
+    // name. Every other id is `learnName`'s to decide, cache included.
     for (const id of new Set(slackMentionedMembers(text))) {
-      if (id === this.botUserId || this.memberNames.has(id) || this.unnamed.has(id)) continue;
-      try {
-        const name = await this.api.userName(id);
-        if (name) this.memberNames.set(id, name);
-        else this.unnamed.add(id);
-      } catch (error) {
-        // Only a refusal that will not change on its own. `unnamed` is never cleared, so a
-        // transient failure recorded here renders that member by id for the whole process.
-        if (isPermanentNameFailure(error)) this.unnamed.add(id);
-      }
+      if (id !== this.botUserId) await this.learnName(id);
+    }
+  }
+
+  /**
+   * One `users.info`, answered from cache for any id already asked about.
+   *
+   * All three answers are remembered — the name in `memberNames`, a refusal in `unnamed`,
+   * `is_bot` in `botIds` — and the cache is checked here rather than at the call sites,
+   * because the roster read asks about every member of a channel. Without it a second read
+   * of the same channel spends a call per member, sequentially, against a rate limit the
+   * whole workspace shares.
+   */
+  private async learnName(id: string): Promise<SlackUser | undefined> {
+    const name = this.memberNames.get(id);
+    if (name !== undefined || this.unnamed.has(id)) {
+      // A lookup that was refused is cached as "no name" and nothing else, so `isBot` here
+      // falls back to what an author with no `bot_id` gets. Only a lookup that answered
+      // ever puts an id in `botIds`.
+      return { ...(name !== undefined ? { name } : {}), isBot: this.botIds.has(id) };
+    }
+    try {
+      const user = await this.api.user(id);
+      if (user?.name) this.memberNames.set(id, user.name);
+      else this.unnamed.add(id);
+      if (user?.isBot) this.botIds.add(id);
+      return user;
+    } catch (error) {
+      // Only a refusal that will not change on its own. `unnamed` is never cleared, so a
+      // transient failure recorded here renders that member by id for the whole process.
+      if (isPermanentNameFailure(error)) this.unnamed.add(id);
+      return undefined;
     }
   }
 
@@ -670,8 +958,8 @@ export class SlackAdapter implements SurfaceAdapter {
     try {
       let cursor: string | undefined;
       do {
-        const page = await this.api.openDirectChannels(cursor);
-        ids.push(...(page.ids ?? []));
+        const page = await this.api.memberConversations({ types: "im", cursor });
+        ids.push(...(page.channels ?? []).flatMap((channel) => (channel.id ? [channel.id] : [])));
         cursor = page.nextCursor || undefined;
       } while (cursor && live());
     } catch {
@@ -701,8 +989,11 @@ export class SlackAdapter implements SurfaceAdapter {
     return messages;
   }
 
+  /** The reach every channel-scoped call here has, sending and reading alike. */
   private assertChannel(channel: ChannelRef): void {
-    if (channel.surface !== SLACK_SURFACE) throw new Error("cannot send a Slack message to another surface");
+    if (channel.surface !== SLACK_SURFACE) {
+      throw new Error(`a ${channel.surface} channel names no Slack conversation`);
+    }
     // A DM earns its way in by having spoken first, which is the same reach the
     // configured list grants — never a channel this adapter has not heard from.
     if (!this.allowedChannels.has(channel.id) && !this.dmChannels.has(channel.id)) {
@@ -785,24 +1076,41 @@ export class WebSlackApi implements SlackApiClient {
     return privacyOf((await this.client.conversations.info({ channel })).channel);
   }
 
-  /** `users.conversations` rather than `conversations.list`: the bot's own DMs, not the workspace's. */
-  async openDirectChannels(cursor?: string): Promise<SlackDirectPage> {
+  /** `users.conversations` rather than `conversations.list`: the bot's own, not the workspace's. */
+  async memberConversations(args: {
+    types: string;
+    cursor?: string;
+  }): Promise<SlackConversationPage> {
     const response = await this.client.users.conversations({
-      types: "im",
+      types: args.types,
       exclude_archived: true,
-      ...(cursor ? { cursor } : {}),
+      ...(args.cursor ? { cursor: args.cursor } : {}),
     });
     return {
-      ids: response.channels?.flatMap((channel) => (channel.id ? [channel.id] : [])),
+      channels: response.channels as SlackConversationPage["channels"],
       nextCursor: response.response_metadata?.next_cursor,
     };
   }
 
-  async history(args: { channel: string; oldest: string; cursor?: string }): Promise<SlackHistoryPage> {
+  async channelMembers(args: { channel: string; cursor?: string }): Promise<SlackMembersPage> {
+    const response = await this.client.conversations.members({
+      channel: args.channel,
+      ...(args.cursor ? { cursor: args.cursor } : {}),
+    });
+    return { ids: response.members, nextCursor: response.response_metadata?.next_cursor };
+  }
+
+  async history(args: {
+    channel: string;
+    oldest: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<SlackHistoryPage> {
     const response = await this.client.conversations.history({
       channel: args.channel,
       oldest: args.oldest,
       ...(args.cursor ? { cursor: args.cursor } : {}),
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
     });
     return {
       messages: response.messages as SlackMessage[] | undefined,
@@ -844,9 +1152,13 @@ export class WebSlackApi implements SlackApiClient {
   }
 
   /** `display_name` is what the workspace shows; the rest are Slack's own fallbacks. */
-  async userName(id: string): Promise<string | undefined> {
+  async user(id: string): Promise<SlackUser | undefined> {
     const user = (await this.client.users.info({ user: id })).user;
-    return user?.profile?.display_name || user?.profile?.real_name || user?.name;
+    if (!user) return undefined;
+    return {
+      name: user.profile?.display_name || user.profile?.real_name || user.name,
+      isBot: Boolean(user.is_bot),
+    };
   }
 
   async addReaction(args: { channel: string; timestamp: string; name: string }): Promise<void> {
@@ -939,16 +1251,20 @@ const PERMANENT_NAME_FAILURES = new Set([
 ]);
 
 function isPermanentNameFailure(error: unknown): boolean {
-  const code = (error as { data?: { error?: unknown } } | null)?.data?.error;
-  return typeof code === "string" && PERMANENT_NAME_FAILURES.has(code);
+  const code = slackErrorCode(error);
+  return code !== undefined && PERMANENT_NAME_FAILURES.has(code);
 }
 
 /**
- * `already_reacted` — the one `reactions.add` failure that means the call succeeded.
- *
- * Read off the platform error's `data.error` rather than its message, which is prose and
- * localizable. Anything that is not this shape is not this error.
+ * A platform error's own code, read off `data.error` rather than its message, which is
+ * prose and localizable. Anything not of that shape is not a platform error.
  */
+function slackErrorCode(error: unknown): string | undefined {
+  const code = (error as { data?: { error?: unknown } } | null)?.data?.error;
+  return typeof code === "string" ? code : undefined;
+}
+
+/** `already_reacted` — the one `reactions.add` failure that means the call succeeded. */
 function isAlreadyReacted(error: unknown): boolean {
-  return (error as { data?: { error?: unknown } } | null)?.data?.error === "already_reacted";
+  return slackErrorCode(error) === "already_reacted";
 }

@@ -6,7 +6,13 @@ import { join } from "node:path";
 
 import type { EventRef, ThreadReply } from "../src/events.ts";
 import { jobChannelHandler, type JobChannelOptions } from "../src/job-channel.ts";
-import { JobHost, type JobPoster, type JobReader, type JobRun } from "../src/job-host.ts";
+import {
+  JobHost,
+  type JobMembers,
+  type JobPoster,
+  type JobReader,
+  type JobRun,
+} from "../src/job-host.ts";
 import { loadManifest, type JobConfig } from "../src/manifest.ts";
 import type { McpHandler } from "../src/mcp-http.ts";
 
@@ -60,13 +66,19 @@ describe("the job channel", () => {
       reads.push({ root, limit });
       return [{ author: speaker("drone"), text: "here", ts: "2026-08-30T09:00:00.000Z" }];
     };
+    const rosters: Array<{ channel: string; limit?: number }> = [];
+    const members: JobMembers = async (report, limit) => {
+      rosters.push({ channel: `${report.surface}:${report.channel}`, limit });
+      return [speaker("drone"), speaker("forager")];
+    };
     const handle = jobChannelHandler({
       report: job(PROBES).report!,
       post,
       read,
+      members,
       ...over,
     });
-    return { posts, reads, handle };
+    return { posts, reads, rosters, handle };
   };
 
   /** Calls a tool the way the body does, and parses the JSON it reads back. */
@@ -151,6 +163,39 @@ describe("the job channel", () => {
     // you" must not arrive as the same value, or a roll call names everyone silent.
     await expect(call(handle, "thread_read", { root })).rejects.toThrow(
       /nothing here can read a thread back on the console surface/,
+    );
+  });
+
+  it("reads the roster of the channel the job declared, and of no other", async () => {
+    const { rosters, handle } = feed();
+
+    // No destination argument, so a body has nothing to compute one into — the same shape
+    // `post_message` has, and the same bound.
+    expect(await call(handle, "channel_members", { channel: "somewhere" })).toEqual({
+      members: [speaker("drone"), speaker("forager")],
+    });
+    expect(rosters).toEqual([{ channel: "console:hive", limit: 200 }]);
+
+    // Capped whatever was asked for, because Slack charges a lookup per member.
+    await call(handle, "channel_members", { limit: 5000 });
+    expect(rosters[1].limit).toBe(200);
+
+    // A limit that is not a count is refused before the surface is touched, so a body
+    // cannot turn a malformed argument into a roster read that quietly answers nothing.
+    await expect(call(handle, "channel_members", { limit: 0 })).rejects.toThrow();
+    await expect(call(handle, "channel_members", { limit: 1.5 })).rejects.toThrow();
+    await expect(call(handle, "channel_members", { limit: "all" })).rejects.toThrow();
+    expect(rosters).toHaveLength(2);
+  });
+
+  it("says a surface cannot read a roster rather than answering that nobody is there", async () => {
+    const { handle } = feed({ members: undefined });
+
+    // Sharper than the thread read: an empty roster is a real finding — the channel nobody
+    // joined — so a probe handed `[]` here would report the bring-up failure it was written
+    // to catch as an ordinary empty room.
+    await expect(call(handle, "channel_members", {})).rejects.toThrow(
+      /nothing here can read the membership of a console channel/,
     );
   });
 });

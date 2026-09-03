@@ -14,7 +14,7 @@ import {
 } from "./kill-switch.ts";
 import { passthroughEnv } from "./brain-env.ts";
 import { errorLine } from "./errors.ts";
-import type { EventRef, ThreadReply } from "./events.ts";
+import type { ActorRef, EventRef, ThreadReply } from "./events.ts";
 import { serveJobChannel } from "./job-channel.ts";
 import type { HostedMcp } from "./mcp-http.ts";
 import { withTimeout } from "./gateway.ts";
@@ -186,6 +186,22 @@ export type JobPoster = (
 export type JobReader = (root: EventRef, limit?: number) => Promise<readonly ThreadReply[]>;
 
 /**
+ * How a probing job reads the membership of the channel it reports into.
+ *
+ * Takes the `report` destination rather than a channel of its own, exactly as `post` does:
+ * a body has no field to name a channel with, so there is no value it can compute that
+ * points this anywhere else.
+ *
+ * Unset is not "nobody is in the channel" — it is "no surface here can say", and the job
+ * channel refuses the read. That distinction is the whole reason this exists: a roll call
+ * nobody answered and a channel nobody joined read the same until the roster is asked for.
+ */
+export type JobMembers = (
+  report: NonNullable<JobConfig["report"]>,
+  limit?: number,
+) => Promise<readonly ActorRef[]>;
+
+/**
  * How whoever asked for a detached run hears how it ended.
  *
  * Bound by the door that knows who asked — the chat tool holds the message it was answering
@@ -213,6 +229,11 @@ export interface JobHostOptions {
    * which a `report.probe` job is told plainly rather than left to read as silence.
    */
   read?: JobReader;
+  /**
+   * How a probing job's body reads its report channel's membership — the other half of
+   * diagnosing a silence. Unset is refused rather than answered as an empty roster.
+   */
+  members?: JobMembers;
   /** Where verdict artifacts are written. Defaults to a directory under the system temp. */
   workDir?: string;
   /** Every run record, always — denied and dropped ticks included. */
@@ -965,7 +986,12 @@ export class JobHost {
           `${job.report.surface}:${job.report.channel}`,
       );
     }
-    return serveJobChannel({ report: job.report, post: this.opts.post, read: this.opts.read });
+    return serveJobChannel({
+      report: job.report,
+      post: this.opts.post,
+      read: this.opts.read,
+      members: this.opts.members,
+    });
   }
 
   private spawnBody(job: JobConfig, env: NodeJS.ProcessEnv): Promise<Execution> {

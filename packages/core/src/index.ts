@@ -22,6 +22,7 @@ export * from "./team-server.ts";
 export * from "./mcp-http.ts";
 export * from "./mcp-hosting.ts";
 export * from "./surface-egress.ts";
+export * from "./surface-read.ts";
 export * from "./links.ts";
 export * from "./vault.ts";
 export * from "./verdict.ts";

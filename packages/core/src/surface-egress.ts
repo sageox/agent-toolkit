@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { SurfaceAdapter } from "./adapter.ts";
 import type {
   ActorRef,
+  ChannelHistory,
   ChannelRef,
   EventRef,
   GuardedMessage,
@@ -142,6 +143,32 @@ export class SurfaceEgress {
   /** Whether any surface here can carry a reaction at all. */
   canReact(): boolean {
     return [...this.byKind.values()].some((adapter) => adapter.react);
+  }
+
+  /**
+   * The surfaces that answer at least one of the four reads.
+   *
+   * Any read, not all: a surface answers what it can, and a call to one it does not carry
+   * is refused by name when it is made. Not derived from {@link targets}, which lists only
+   * surfaces with a configured channel to post into — a DM-only Slack agent has none of
+   * those and is a working agent, so naming it from there would tell the brain there was
+   * nowhere to ask.
+   */
+  readableSurfaces(): string[] {
+    return [...this.byKind.values()]
+      .filter(
+        (adapter) =>
+          adapter.listChannels ||
+          adapter.listMembers ||
+          adapter.describeActor ||
+          adapter.readChannel,
+      )
+      .map((adapter) => adapter.kind);
+  }
+
+  /** Whether hosting the read server is worth it at all. */
+  canRead(): boolean {
+    return this.readableSurfaces().length > 0;
   }
 
   /**
@@ -515,9 +542,82 @@ export class SurfaceEgress {
     return adapter.readThread(root, limit);
   }
 
+  /**
+   * Channels the surface itself reports this agent as a member of.
+   *
+   * The one read that is not scoped to a configured channel, because the answer worth
+   * having is where the two lists differ: a channel configured and never joined is an
+   * agent nobody can reach, and no signal anywhere else says so.
+   */
+  async listChannels(surface: string): Promise<readonly ChannelRef[]> {
+    const adapter = this.byKind.get(surface);
+    if (!adapter?.listChannels) throw cannotRead(surface, "say which channels this agent is in");
+    return adapter.listChannels();
+  }
+
+  /** Who is in one configured channel. See {@link SurfaceAdapter.listMembers}. */
+  async listMembers(
+    surface: string,
+    channelId: string,
+    limit?: number,
+  ): Promise<readonly ActorRef[]> {
+    const adapter = this.byKind.get(surface);
+    if (!adapter?.listMembers) throw cannotRead(surface, "say who is in a channel");
+    return adapter.listMembers(this.readTarget(adapter, surface, channelId), limit);
+  }
+
+  /** One actor by id. `undefined` is "not known here", never "cannot look anyone up". */
+  async describeActor(surface: string, id: string): Promise<ActorRef | undefined> {
+    const adapter = this.byKind.get(surface);
+    if (!adapter?.describeActor) throw cannotRead(surface, "look an id up");
+    return adapter.describeActor(id);
+  }
+
+  /** Recent messages in one configured channel. See {@link SurfaceAdapter.readChannel}. */
+  async readChannel(
+    surface: string,
+    channelId: string,
+    limit?: number,
+  ): Promise<ChannelHistory> {
+    const adapter = this.byKind.get(surface);
+    if (!adapter?.readChannel) throw cannotRead(surface, "read a channel back");
+    return adapter.readChannel(this.readTarget(adapter, surface, channelId), limit);
+  }
+
+  /**
+   * The configured channel a read names — {@link admit}'s resolution without its guard.
+   *
+   * The guard rules on what this agent says, and a read says nothing. What survives is the
+   * destination check: a channel read is bounded to the channels an operator configured,
+   * so nothing the brain computes can point a read at a conversation the agent does not
+   * serve. {@link listChannels} is deliberately outside that bound: what it is for is the
+   * channel that is *not* configured, or configured and not joined.
+   */
+  private readTarget(adapter: SurfaceAdapter, surface: string, channelId: string): ChannelRef {
+    const channel = resolveTarget(adapter.postTargets?.() ?? [], surface, channelId);
+    if (!channel) {
+      throw new Error(
+        "that channel is not one this agent is configured for, or its name belongs to " +
+          "more than one — name it by id",
+      );
+    }
+    return channel;
+  }
+
   private evaluate(msg: GuardedMessage, channel: ChannelRef): GuardVerdict {
     return evaluateEgress(msg, channel, this.opts.manifest.guard);
   }
+}
+
+/**
+ * One refusal for every surface read, worded once.
+ *
+ * Never an empty answer, which is the rule {@link SurfaceAdapter.listChannels} states and
+ * {@link SurfaceEgress.readThread} already keeps: a caller handed `[]` reports an empty
+ * channel, and a caller told the surface cannot say reports that instead.
+ */
+function cannotRead(surface: string, question: string): Error {
+  return new Error(`the ${surface} surface cannot ${question}, so nothing here can`);
 }
 
 /**

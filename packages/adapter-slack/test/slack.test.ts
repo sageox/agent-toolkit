@@ -4,7 +4,9 @@ import {
   SlackAdapter,
   privacyOf,
   type SlackApiClient,
-  type SlackDirectPage,
+  type SlackConversationPage,
+  type SlackMembersPage,
+  type SlackUser,
   type SlackHistoryPage,
   type SlackSocketClient,
 } from "../src/slack.ts";
@@ -45,7 +47,7 @@ class FakeSocket implements SlackSocketClient {
 
 class FakeApi implements SlackApiClient {
   histories: SlackHistoryPage[] = [];
-  historyCalls: Array<{ channel: string; oldest: string; cursor?: string }> = [];
+  historyCalls: Array<{ channel: string; oldest: string; cursor?: string; limit?: number }> = [];
   threads: SlackHistoryPage[] = [];
   replyCalls: Array<{ channel: string; ts: string; oldest: string; cursor?: string }> = [];
   posts: Array<{ channel: string; text: string; threadTs?: string }> = [];
@@ -55,16 +57,29 @@ class FakeApi implements SlackApiClient {
   async authTest() {
     return { userId: "UBOT", botId: "BBOT" };
   }
-  dms: SlackDirectPage[] = [];
+  dms: SlackConversationPage[] = [];
   dmCalls: Array<string | undefined> = [];
+  /** Non-`im` pages, so the DM walk and the channel-membership read are told apart. */
+  conversations: SlackConversationPage[] = [];
+  conversationCalls: Array<{ types: string; cursor?: string }> = [];
+  members: SlackMembersPage[] = [];
+  memberCalls: Array<{ channel: string; cursor?: string }> = [];
   async channelIsPrivate(channel: string) {
     return channel.startsWith("G");
   }
-  async openDirectChannels(cursor?: string) {
-    this.dmCalls.push(cursor);
-    return this.dms.shift() ?? {};
+  async memberConversations(args: { types: string; cursor?: string }) {
+    this.conversationCalls.push(args);
+    if (args.types === "im") {
+      this.dmCalls.push(args.cursor);
+      return this.dms.shift() ?? {};
+    }
+    return this.conversations.shift() ?? {};
   }
-  async history(args: { channel: string; oldest: string; cursor?: string }) {
+  async channelMembers(args: { channel: string; cursor?: string }) {
+    this.memberCalls.push(args);
+    return this.members.shift() ?? {};
+  }
+  async history(args: { channel: string; oldest: string; cursor?: string; limit?: number }) {
     this.historyCalls.push(args);
     return this.histories.shift() ?? {};
   }
@@ -73,10 +88,12 @@ class FakeApi implements SlackApiClient {
     return this.threads.shift() ?? {};
   }
   names: Record<string, string> = {};
+  bots = new Set<string>();
   nameCalls: string[] = [];
-  async userName(id: string): Promise<string | undefined> {
+  async user(id: string): Promise<SlackUser | undefined> {
     this.nameCalls.push(id);
-    return this.names[id];
+    if (!(id in this.names) && !this.bots.has(id)) return undefined;
+    return { name: this.names[id], isBot: this.bots.has(id) };
   }
   async postMessage(args: { channel: string; text: string; threadTs?: string }) {
     this.posts.push(args);
@@ -391,7 +408,7 @@ describe("SlackAdapter", () => {
 
     // No `users:read`. Slack reports it on `data.error`, which is how a refusal that will
     // not change is told apart from a request that merely failed.
-    api.userName = async (id: string) => {
+    api.user = async (id: string) => {
       api.nameCalls.push(id);
       throw Object.assign(new Error("missing_scope"), { data: { error: "missing_scope" } });
     };
@@ -414,11 +431,11 @@ describe("SlackAdapter", () => {
     // is usually of this kind — and `unnamed` is never cleared, so caching it would render
     // that member by id for the life of the process.
     let attempts = 0;
-    api.userName = async (id: string) => {
+    api.user = async (id: string) => {
       api.nameCalls.push(id);
       attempts += 1;
       if (attempts === 1) throw new Error("socket hang up");
-      return "alice";
+      return { name: "alice", isBot: false };
     };
     await socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
     await socket.emit(mention("1786761000.000200", { text: "<@UBOT> ask <@U0ALICE>" }));
@@ -438,9 +455,9 @@ describe("SlackAdapter", () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
-    api.userName = async (id: string) => {
+    api.user = async (id: string) => {
       await held;
-      return id === "U0ALICE" ? "alice" : undefined;
+      return id === "U0ALICE" ? { name: "alice", isBot: false } : undefined;
     };
     const first = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
     const second = socket.emit(mention("1786761000.000200", { text: "<@UBOT> second" }));
@@ -481,9 +498,9 @@ describe("SlackAdapter", () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
-    api.userName = async () => {
+    api.user = async () => {
       await held;
-      return "alice";
+      return { name: "alice", isBot: false };
     };
     // GENG is stuck on a lookup. GOPS mentions nobody and must not wait behind it —
     // ordering is what `ChannelQueue` needs per channel, and it runs channels in parallel.
@@ -505,9 +522,9 @@ describe("SlackAdapter", () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
-    api.userName = async () => {
+    api.user = async () => {
       await held;
-      return "alice";
+      return { name: "alice", isBot: false };
     };
     const inFlight = socket.emit(mention("1786761000.000100", { text: "<@UBOT> ask <@U0ALICE>" }));
 
@@ -795,13 +812,13 @@ describe("SlackAdapter", () => {
     const inLookup = new Promise<void>((resolve) => {
       entered = resolve;
     });
-    api.userName = async (id: string) => {
+    api.user = async (id: string) => {
       looked.push(id);
       if (id === "U0ALICE") {
         entered();
         await held;
       }
-      return id.toLowerCase();
+      return { name: id.toLowerCase(), isBot: false };
     };
     await instance.start((event) => got.push(event));
 
@@ -833,10 +850,10 @@ describe("SlackAdapter", () => {
     const inLookup = new Promise<void>((resolve) => {
       entered = resolve;
     });
-    api.userName = async () => {
+    api.user = async () => {
       entered();
       await held;
-      return "alice";
+      return { name: "alice", isBot: false };
     };
     // History pages newest-first, so the replay sorts to 000100 then 000200. Only the
     // first mentions anyone, which is what holds the replay open midway through.
@@ -876,12 +893,12 @@ describe("SlackAdapter", () => {
       entered = resolve;
     });
     const requested: Array<string | undefined> = [];
-    api.openDirectChannels = async (cursor?: string) => {
+    api.memberConversations = async ({ cursor }: { types: string; cursor?: string }) => {
       requested.push(cursor);
-      if (cursor) return { ids: ["DLATE"] };
+      if (cursor) return { channels: [{ id: "DLATE" }] };
       entered();
       await held;
-      return { ids: ["DALICE"], nextCursor: "page2" };
+      return { channels: [{ id: "DALICE" }], nextCursor: "page2" };
     };
 
     const starting = instance.start((event) => got.push(event));
@@ -1144,7 +1161,10 @@ describe("SlackAdapter", () => {
   it("backfills the DMs it has open, which no config could have named", async () => {
     const { instance, api } = adapter({ since: 1786760000 });
     // Paged, so the cursor has to be carried back or the second DM is never enumerated.
-    api.dms = [{ ids: ["DALICE"], nextCursor: "page2" }, { ids: ["DQUIET"] }];
+    api.dms = [
+      { channels: [{ id: "DALICE" }], nextCursor: "page2" },
+      { channels: [{ id: "DQUIET" }] },
+    ];
     api.histories.push(
       { messages: [] }, // GENG
       // A history result carries no `channel_type`; the `D` prefix is what says "DM" here.
@@ -1173,13 +1193,13 @@ describe("SlackAdapter", () => {
 
   it("keeps the DMs it paged in when the lookup fails partway", async () => {
     const { instance, api } = adapter({ since: 1786760000 });
-    api.dms = [{ ids: ["DALICE"], nextCursor: "page2" }];
-    const pages = api.openDirectChannels.bind(api);
+    api.dms = [{ channels: [{ id: "DALICE" }], nextCursor: "page2" }];
+    const pages = api.memberConversations.bind(api);
     // Page two never arrives. Discarding page one on that basis would drop a DM the agent
     // was told about, and take the configured channels down with it.
-    api.openDirectChannels = async (cursor?: string) => {
-      if (!cursor) return pages(cursor);
-      api.dmCalls.push(cursor);
+    api.memberConversations = async (args: { types: string; cursor?: string }) => {
+      if (!args.cursor) return pages(args);
+      api.dmCalls.push(args.cursor);
       throw new Error("ratelimited");
     };
     api.histories.push(
@@ -1200,7 +1220,7 @@ describe("SlackAdapter", () => {
   it("still backfills its channels when it may not ask which DMs are open", async () => {
     const { instance, api } = adapter({ since: 1786760000 });
     // No `im:read`. A channel-only agent must not be taken down by a scope it never needs.
-    api.openDirectChannels = async () => {
+    api.memberConversations = async () => {
       throw new Error("missing_scope");
     };
     api.histories.push({ messages: [mention("1786761000.000100")] });
@@ -1463,5 +1483,267 @@ describe("SlackAdapter", () => {
     expect(instance.postTargets()).toEqual([
       { surface: "slack", id: "GENG", isPublic: false },
     ]);
+  });
+});
+
+describe("SlackAdapter reads the surface it is on", () => {
+  it("lists the channels Slack says it is in, not the ones it was configured for", async () => {
+    const { instance, api } = adapter({
+      channels: [
+        { id: "GENG", reply: "private" },
+        { id: "CLOBBY", reply: "public", name: "lobby" },
+      ],
+    });
+    await instance.start(() => {});
+    api.conversations = [
+      { channels: [{ id: "GENG", name: "eng", is_private: true }], nextCursor: "page2" },
+      { channels: [{ id: "CHIVE", name: "hive", is_private: false }] },
+    ];
+
+    // CLOBBY is configured and nobody invited the bot to it; CHIVE is the other way round.
+    // Neither shows up as an error anywhere, which is why this list has to be Slack's.
+    expect(await instance.listChannels!()).toEqual([
+      { surface: "slack", id: "GENG", isPublic: false, name: "eng" },
+      { surface: "slack", id: "CHIVE", isPublic: true, name: "hive" },
+    ]);
+    expect(instance.postTargets().map((channel) => channel.id)).toEqual(["GENG", "CLOBBY"]);
+    // Channels, not DMs: an open DM is not an invitation to a channel.
+    expect(api.conversationCalls.map((call) => call.types)).toEqual([
+      "public_channel,private_channel",
+      "public_channel,private_channel",
+    ]);
+  });
+
+  it("names a channel's members, including one who has never spoken", async () => {
+    const { instance, api } = adapter();
+    api.names = { U0ALICE: "alice", U0BUILD: "buildbot" };
+    api.bots.add("U0BUILD");
+    await instance.start(() => {});
+    api.members = [{ ids: ["U0ALICE", "UBOT"], nextCursor: "page2" }, { ids: ["U0BUILD"] }];
+
+    const members = await instance.listMembers!({ surface: "slack", id: "GENG", isPublic: false });
+    expect(members).toEqual([
+      { surface: "slack", id: "U0ALICE", isSelf: false, isAgent: false, name: "alice" },
+      { surface: "slack", id: "UBOT", isSelf: true, isAgent: true },
+      { surface: "slack", id: "U0BUILD", isSelf: false, isAgent: true, name: "buildbot" },
+    ]);
+    // `memberNames` only holds ids that were mentioned in a message, and a roster is mostly
+    // people who have not spoken — so the names come from a lookup, cached both ways after.
+    expect(api.nameCalls).toEqual(["U0ALICE", "UBOT", "U0BUILD"]);
+  });
+
+  it("spends no lookup re-reading a roster it has already named", async () => {
+    const { instance, api } = adapter();
+    api.names = { U0ALICE: "alice", U0BUILD: "buildbot" };
+    api.bots.add("U0BUILD");
+    await instance.start(() => {});
+    const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
+    api.members = [{ ids: ["U0ALICE", "U0BUILD"] }, { ids: ["U0ALICE", "U0BUILD"] }];
+
+    const first = await instance.listMembers!(channel);
+    expect(api.nameCalls).toEqual(["U0ALICE", "U0BUILD"]);
+
+    // `users.info` is rate-limited per workspace, so a roster read that re-asked would put
+    // one call per member on that limit every time anyone asks who is in a channel.
+    const second = await instance.listMembers!(channel);
+    expect(api.nameCalls).toEqual(["U0ALICE", "U0BUILD"]);
+    // And the cached answer is the whole actor, not just the name: a bot read out of cache
+    // as a person is a roster that says the fleet is made of people.
+    expect(second).toEqual(first);
+    expect(second.map((member) => member.isAgent)).toEqual([false, true]);
+  });
+
+  it("stops paging and looking members up once `limit` is reached", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    api.members = [{ ids: ["U0A", "U0B"], nextCursor: "page2" }, { ids: ["U0C"] }];
+
+    const members = await instance.listMembers!({ surface: "slack", id: "GENG", isPublic: false }, 2);
+    expect(members.map((member) => member.id)).toEqual(["U0A", "U0B"]);
+    // Slack charges a `users.info` per member, so a bound the caller asked for has to reach
+    // the walk and not just the answer.
+    expect(api.memberCalls).toEqual([{ channel: "GENG", cursor: undefined }]);
+    expect(api.nameCalls).toEqual(["U0A", "U0B"]);
+  });
+
+  it("refuses a read of a channel it does not serve, rather than answering empty", async () => {
+    const { instance } = adapter();
+    const elsewhere = { surface: "slack", id: "GOPS", isPublic: false } as const;
+
+    await expect(instance.listMembers!(elsewhere)).rejects.toThrow(/before listMembers/);
+    await instance.start(() => {});
+    // Zero members and a channel this agent has no reach into look alike to a caller that
+    // is handed `[]` for both — and the first is the failure a roster read exists to find.
+    await expect(instance.listMembers!(elsewhere)).rejects.toThrow(/GOPS is not configured/);
+    await expect(instance.readChannel!(elsewhere)).rejects.toThrow(/GOPS is not configured/);
+  });
+
+  it("looks an id up, and tells `Slack does not know it` from `the lookup failed`", async () => {
+    const { instance, api } = adapter();
+    api.names = { U0ALICE: "alice" };
+    await instance.start(() => {});
+
+    expect(await instance.describeActor!("U0ALICE")).toEqual({
+      surface: "slack",
+      id: "U0ALICE",
+      isSelf: false,
+      isAgent: false,
+      name: "alice",
+    });
+
+    api.user = async () => {
+      throw Object.assign(new Error("user_not_found"), { data: { error: "user_not_found" } });
+    };
+    expect(await instance.describeActor!("U0GHOST")).toBeUndefined();
+
+    // A missing scope is a lookup that did not happen. Answering `undefined` on it reports
+    // a real member as a stranger, which is a worse answer than no answer.
+    api.user = async () => {
+      throw Object.assign(new Error("missing_scope"), { data: { error: "missing_scope" } });
+    };
+    await expect(instance.describeActor!("U0ALICE")).rejects.toThrow(/missing_scope/);
+  });
+
+  it("reads a channel oldest first, and asks Slack for a whole page either way", async () => {
+    const { instance, api } = adapter();
+    api.names = { U0ALICE: "alice" };
+    await instance.start(() => {});
+    // History pages newest-first, and a join notice is no more a message here than a turn.
+    api.histories = [
+      {
+        messages: [
+          { type: "message", user: "U0BOB", text: "and <@U0ALICE>", ts: "1786761003.000000" },
+          { type: "message", subtype: "channel_join", user: "U0LATE", text: "", ts: "1786761002.000000" },
+          { type: "message", user: "U0ALICE", text: "morning", ts: "1786761001.000000" },
+        ],
+        nextCursor: "page2",
+      },
+    ];
+
+    const { messages, more } = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      2,
+    );
+    expect(more).toBe(false);
+    expect(messages.map((message) => [message.author.id, message.text])).toEqual([
+      ["U0ALICE", "morning"],
+      ["U0BOB", "and @alice"],
+    ]);
+    // The page is sized for the endpoint, not for the request: Slack bills per call, so
+    // asking for 200 to answer a request for 2 costs the same and is what keeps this to one
+    // call. Deriving it from `limit` had it backwards — a small ask made small pages, so
+    // the notices a page can be made of were likelier to fill it.
+    expect(api.historyCalls).toEqual([
+      { channel: "GENG", oldest: "0", limit: 200, cursor: undefined },
+    ]);
+  });
+
+  it("pages on when the newest records are notices rather than messages", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    // Slack counts a join notice against the page size and normalization drops it, so a
+    // page sized at the caller's limit can come back with nothing anyone wrote in it —
+    // silently, as a short history rather than an error.
+    api.histories = [
+      {
+        messages: [
+          { type: "message", subtype: "channel_join", user: "U0A", text: "", ts: "1786761004.000000" },
+          { type: "message", subtype: "channel_join", user: "U0B", text: "", ts: "1786761003.000000" },
+        ],
+        nextCursor: "page2",
+      },
+      {
+        messages: [
+          { type: "message", user: "U0BOB", text: "second", ts: "1786761002.000000" },
+          { type: "message", user: "U0ALICE", text: "first", ts: "1786761001.000000" },
+        ],
+      },
+    ];
+
+    const { messages, more } = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      2,
+    );
+    // Satisfied within the bound, so nothing was left behind.
+    expect(more).toBe(false);
+    expect(messages.map((message) => message.text)).toEqual(["first", "second"]);
+    expect(api.historyCalls).toEqual([
+      { channel: "GENG", oldest: "0", limit: 200, cursor: undefined },
+      { channel: "GENG", oldest: "0", limit: 200, cursor: "page2" },
+    ]);
+  });
+
+  it("says `more` rather than answering an empty channel when the bound is reached", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    // Never satisfied, and Slack keeps offering a cursor — so the walk is bounded, and
+    // stopping is not an answer about the channel.
+    api.history = async (args) => {
+      api.historyCalls.push(args);
+      return {
+        messages: [
+          { type: "message", subtype: "channel_join", user: "U0A", text: "", ts: "1786761000.000000" },
+        ],
+        nextCursor: "more",
+      };
+    };
+
+    // A bare `[]` would say "the channel holds nothing", which is a claim about the
+    // channel. What is true is that this read stopped looking, and `more` is what keeps
+    // the two from arriving alike.
+    const history = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      5,
+    );
+    expect(history).toEqual({ messages: [], more: true });
+    expect(api.historyCalls).toHaveLength(5);
+  });
+
+  it("answers short rather than refusing when it found some but not all", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    // A page of 15 is what Slack serves a non-Marketplace distributed app, so on those
+    // installations the bound is 75 records rather than 1000 — and refusing every shortfall
+    // would refuse ordinary reads of ordinary channels. `limit` is a ceiling, not a quota.
+    api.history = async (args) => {
+      api.historyCalls.push(args);
+      const n = api.historyCalls.length;
+      return {
+        messages: [
+          { type: "message", user: "U0A", text: `m${n}`, ts: `178676100${n}.000000` },
+          { type: "message", subtype: "channel_join", user: "U0B", text: "", ts: `178676100${n}.000001` },
+        ],
+        nextCursor: "more",
+      };
+    };
+
+    const { messages, more } = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      50,
+    );
+    // Five pages, one real message each: far short of the fifty asked for. The messages are
+    // real and `more` is what stops them being read as the whole of the channel.
+    expect(messages.map((message) => message.text)).toEqual(["m1", "m2", "m3", "m4", "m5"]);
+    expect(more).toBe(true);
+    expect(api.historyCalls).toHaveLength(5);
+  });
+
+  it("answers short without complaint when the channel itself has run out", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    // No cursor: this is the channel's own end, which is the one short answer that is an
+    // answer — and it must not be confused with having given up.
+    api.histories = [
+      { messages: [{ type: "message", user: "U0ALICE", text: "only one", ts: "1786761001.000000" }] },
+    ];
+
+    const { messages, more } = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      5,
+    );
+    expect(messages.map((message) => message.text)).toEqual(["only one"]);
+    // The channel's own end, which is a complete answer however short it is.
+    expect(more).toBe(false);
+    expect(api.historyCalls).toHaveLength(1);
   });
 });

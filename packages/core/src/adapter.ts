@@ -1,4 +1,6 @@
 import type {
+  ActorRef,
+  ChannelHistory,
   InboundEvent,
   GuardedMessage,
   ChannelRef,
@@ -127,6 +129,56 @@ export interface SurfaceAdapter {
    * only caller is the per-run job channel, which refuses a root that run did not post.
    */
   readThread?(root: EventRef, limit?: number): Promise<readonly ThreadReply[]>;
+
+  /**
+   * Channels this agent is a member of, as the surface itself reports membership.
+   *
+   * Not {@link postTargets}, which is what an operator configured. Slack lists a channel
+   * there that nobody invited the bot to, and the gap between the two lists is the
+   * bring-up failure that has no error anywhere: an agent that joined nothing connects,
+   * authenticates, and is simply never spoken to.
+   *
+   * Optional, and a surface with no join to report omits it rather than answering `[]` —
+   * the {@link readThread} rule, and it bites harder here, because an empty roster is
+   * also what a real answer looks like.
+   */
+  listChannels?(): Promise<readonly ChannelRef[]>;
+
+  /**
+   * Who is in one channel this adapter serves, in no promised order.
+   *
+   * Bounded like {@link readThread}: `limit` is a ceiling on how many come back, and a
+   * surface that cannot answer omits the method. The refs carry a `name` wherever the
+   * surface can put one to the id — a roster of bare ids does not answer the question
+   * anyone asks a membership read.
+   */
+  listMembers?(channel: ChannelRef, limit?: number): Promise<readonly ActorRef[]>;
+
+  /**
+   * One actor by the id this surface uses, or `undefined` when the surface has never
+   * heard of it.
+   *
+   * The lookup behind {@link displayName}, which answers only from what the inbound path
+   * already resolved — so a member who has not spoken has no cached name, and that is
+   * exactly the id somebody asks about. `undefined` is "not known here" and never "this
+   * surface cannot look anyone up"; a surface that cannot look anyone up omits the method.
+   */
+  describeActor?(id: string): Promise<ActorRef | undefined>;
+
+  /**
+   * Recent messages in a channel this adapter serves, oldest first.
+   *
+   * Distinct from {@link readThread}, which is scoped to one rooted thread this adapter
+   * published: this is the channel, and nothing in it was addressed to the agent. `limit`
+   * keeps the most recent that many, because what a reader of a channel wants is the end
+   * of it. The text is untrusted for the same reason and to the same degree.
+   *
+   * `limit` is a ceiling and not a quota, so coming back short is an ordinary answer — and
+   * {@link ChannelHistory.more} is how a short answer says which kind it is. An adapter
+   * that always reads to the end of what it was asked for reports `false` and never has to
+   * think about it.
+   */
+  readChannel?(channel: ChannelRef, limit?: number): Promise<ChannelHistory>;
 
   /**
    * The resume cursor to persist, for surfaces that replay history from one. The CLI

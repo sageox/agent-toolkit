@@ -613,6 +613,42 @@ describe("BuzzAdapter subscription shape", () => {
     await a.stop();
   });
 
+  it("keeps the current directory record when a backlog replays a superseded one", async () => {
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    relay = await FakeRelay.start({
+      // Current first, superseded second. Delivery order is not an order, and last-write-wins
+      // made the name whichever the relay happened to send last — so an agent renamed weeks
+      // ago would be labelled by its old handle for the life of the process.
+      backlog: [
+        directoryRecord(sk, "juno", "Juno Now", now - 60),
+        directoryRecord(sk, "juno", "Juno Then", now - 86400),
+      ],
+    });
+    const a = newAdapter();
+    await a.start(() => {});
+    await vi.waitFor(() => expect(a.principals().has(pk)).toBe(true));
+
+    expect(a.principals().get(pk)).toBe("Juno Now");
+    expect(a.displayName!(pk)).toBe("Juno Now");
+    await a.stop();
+  });
+
+  it("takes a live rename, which is later rather than merely last", async () => {
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    relay = await FakeRelay.start({ backlog: [directoryRecord(sk, "juno", "Juno Then", now - 86400)] });
+    const a = newAdapter();
+    await a.start(() => {});
+    await vi.waitFor(() => expect(a.principals().get(pk)).toBe("Juno Then"));
+
+    // The rule is not "ignore later records" — a genuine update carries a newer timestamp
+    // and must win, or an agent that renamed itself never gets called by its new name.
+    relay.emit(directoryRecord(sk, "juno", "Juno Now", now - 30));
+    await vi.waitFor(() => expect(a.principals().get(pk)).toBe("Juno Now"));
+    await a.stop();
+  });
+
   // A single REQ naming both channels is what made a two-channel agent answer its boot
   // batch and then go deaf, with every health signal still green: the relay served that
   // filter from its store and never pushed to it again.
@@ -1005,7 +1041,186 @@ describe("BuzzAdapter reads back a thread it rooted", () => {
     // EOSE is what makes zero replies an answer. Without it, "nobody has replied yet" and
     // "the relay stopped talking to us" are the same silence, and a probe must not read one
     // as the other.
-    await expect(a.readThread!(root)).rejects.toThrow(/not the whole thread/);
+    await expect(a.readThread!(root)).rejects.toThrow(/not the whole answer/);
     await a.stop();
   }, 10_000);
+});
+
+describe("BuzzAdapter reads the surface it is on", () => {
+  /** A person's NIP-01 metadata — what a pubkey with no directory record still has. */
+  const profile = (sk: Uint8Array, name: string, at = now - 86400) =>
+    finalizeEvent(
+      { kind: BUZZ_DEFAULTS.profileKind, created_at: at, tags: [], content: JSON.stringify({ name }) },
+      sk,
+    );
+
+  /** A directory record naming exactly `channels`, so an agent can be listed out of one. */
+  const registeredIn = (sk: Uint8Array, name: string, channels: string[], at = now - 86400) =>
+    finalizeEvent(
+      {
+        kind: DIRECTORY_KIND,
+        created_at: at,
+        tags: [],
+        content: JSON.stringify({ name, channel_ids: channels, respond_to: "anyone" }),
+      },
+      sk,
+    );
+
+  it("lists only the configured channels its own directory record covers", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter({
+      channels: [
+        { id: "hive", reply: "private" },
+        { id: "lobby", reply: "public" },
+      ],
+    });
+    await a.start();
+    // Registered in hive and not in lobby. Subscribing to lobby is not being in it: a
+    // client gates its mention picker on the record, so nobody there can address this
+    // agent — and nothing on either side reports an error about it.
+    relay.backlog.push(registeredIn(agentSk, "ida", ["hive"]));
+
+    expect((await a.listChannels!()).map((channel) => channel.id)).toEqual(["hive"]);
+    // The configured list still names both, which is what makes the gap readable.
+    expect(a.postTargets!().map((channel) => channel.id)).toEqual(["hive", "lobby"]);
+    await a.stop();
+  });
+
+  it("names the agents whose records list the channel, and nobody else", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    const siblingSk = generateSecretKey();
+    const elsewhereSk = generateSecretKey();
+    relay.backlog.push(registeredIn(siblingSk, "ida", ["hive"]));
+    relay.backlog.push(registeredIn(elsewhereSk, "otto", ["ops"]));
+    // A person who talks in hive has no record, so no client offers their mention there
+    // either — the roster is who a post would have woken.
+    relay.backlog.push(inChannel("hive", "hello"));
+
+    const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false });
+    expect(members.map((member) => member.name)).toEqual(["ida"]);
+    expect(members[0].id).toBe(getPublicKey(siblingSk));
+    expect(members[0].isAgent).toBe(true);
+    await a.stop();
+  });
+
+  it("refuses a membership read of a channel it is not configured for", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+
+    await expect(
+      a.listMembers!({ surface: "buzz", id: "ops", isPublic: true }),
+    ).rejects.toThrow(/ops is not configured/);
+    await a.stop();
+  });
+
+  it("describes an agent from its directory record and a person from their profile", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    const siblingSk = generateSecretKey();
+    relay.backlog.push(registeredIn(siblingSk, "ida", ["hive"]));
+    relay.backlog.push(profile(userSk, "alice"));
+
+    const sibling = await a.describeActor!(getPublicKey(siblingSk));
+    expect(sibling).toMatchObject({ name: "ida", isAgent: true, isSelf: false });
+    // A person publishes no directory record, so without the kind-0 fallback the one
+    // question this tool exists for — put a name to this id — has no answer for a human.
+    const person = await a.describeActor!(getPublicKey(userSk));
+    expect(person).toMatchObject({ name: "alice", isAgent: false });
+    await a.stop();
+  });
+
+  it("answers nothing for a pubkey the relay holds no record of", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+
+    expect(await a.describeActor!(getPublicKey(generateSecretKey()))).toBeUndefined();
+    // Not a pubkey at all names nobody here either, and reports it the same way.
+    expect(await a.describeActor!("alice")).toBeUndefined();
+    await a.stop();
+  });
+
+  it("reads the newest of two records an author left, never whichever arrived first", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter({
+      channels: [
+        { id: "hive", reply: "private" },
+        { id: "lobby", reply: "public" },
+      ],
+    });
+    await a.start();
+    const siblingSk = generateSecretKey();
+    // Kind 10100 is replaceable, so a relay is meant to hold one per author. A relay that
+    // serves both is not an error a caller can see — it is a roster naming a channel the
+    // agent has left, from a read whose whole job is to be trusted about that.
+    relay.backlog.push(registeredIn(agentSk, "ida", ["hive", "lobby"], now - 86400));
+    relay.backlog.push(registeredIn(agentSk, "ida", ["hive"], now - 60));
+    relay.backlog.push(registeredIn(siblingSk, "otto-was", ["ops"], now - 86400));
+    relay.backlog.push(registeredIn(siblingSk, "otto", ["hive"], now - 60));
+
+    // The older record still lists lobby; the current one does not.
+    expect((await a.listChannels!()).map((channel) => channel.id)).toEqual(["hive"]);
+    // The older record put otto in ops, the current one in hive — and names it differently.
+    const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false });
+    expect(members.map((member) => member.name)).toEqual(["ida", "otto"]);
+    expect(await a.describeActor!(getPublicKey(siblingSk))).toMatchObject({ name: "otto" });
+    await a.stop();
+  });
+
+  it("breaks a same-second tie on the event id, not on which arrived first", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter({
+      channels: [
+        { id: "hive", reply: "private" },
+        { id: "lobby", reply: "public" },
+      ],
+    });
+    await a.start();
+
+    // `created_at` is seconds, so one author republishing twice inside a second ties. NIP-01
+    // settles it on the lowest id, and without that rule the winner is whichever the relay
+    // happened to send first — the nondeterminism `newestPerAuthor` exists to remove.
+    const at = now - 60;
+    const both = [
+      registeredIn(agentSk, "ida", ["hive"], at),
+      registeredIn(agentSk, "ida", ["hive", "lobby"], at),
+    ];
+    const lowest = both.reduce((a, b) => (a.id < b.id ? a : b));
+    const expected = JSON.parse(lowest.content).channel_ids as string[];
+
+    // Pushed newest-id-first, so arrival order and the id rule disagree whenever the
+    // lower id is the second one.
+    for (const record of [...both].sort((x, y) => (x.id < y.id ? 1 : -1))) {
+      relay.backlog.push(record);
+    }
+
+    expect((await a.listChannels!()).map((channel) => channel.id)).toEqual(expected);
+    await a.stop();
+  });
+
+  it("reads a channel oldest first and asks the relay for only the newest few", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    relay.backlog.push(inChannel("hive", "second", now + 20));
+    relay.backlog.push(inChannel("hive", "first", now + 10));
+    relay.backlog.push(inChannel("ops", "elsewhere", now + 30));
+
+    const whole = await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false });
+    expect(whole.messages.map((message) => message.text)).toEqual(["first", "second"]);
+    // A REQ ends on the relay's EOSE, so what came back is the whole of what it stores for
+    // the filter — there is no cursor to stop early on and nothing left behind.
+    expect(whole.more).toBe(false);
+
+    const capped = await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false }, 1);
+    expect(capped.messages.map((message) => message.text)).toEqual(["second"]);
+    // Asked for on the wire too: a relay that honours it sends one event rather than the
+    // channel's whole stored history for this to throw away.
+    expect(relay.reqs.at(-1)!.filters[0].limit).toBe(1);
+    await a.stop();
+  });
 });

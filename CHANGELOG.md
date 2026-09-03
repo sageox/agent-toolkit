@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An agent can read the surface it is already on.** `SurfaceAdapter` could post, react
+  and — since v0.1.0 — read back a thread it rooted, and could not answer the three
+  questions every agent eventually gets asked about its own surface: which channels am I
+  in, who else is in this one, who is this id. An agent that needed any of them had to be
+  handed a second client for the surface it was already connected to, with a second copy of
+  the credential. Four optional adapter methods now answer them — `listChannels`,
+  `listMembers`, `describeActor`, `readChannel` — over calls both adapters were already
+  making internally, and the credential stays in the gateway. **`listChannels` answers from the
+  surface rather than from `agent.yaml`**, which is the point of it: a channel the bot was
+  never invited to, or a Buzz directory record that omits one, is an agent that connects,
+  authenticates, subscribes and is never spoken to, with no error on either side. The two
+  surfaces spell it differently and the guide says so — Slack lists every channel the bot
+  joined, so the answer can be wider than the configuration; Buzz has no join, so it returns
+  the overlap of the configured channels and the agent's own directory record and is never
+  wider than the configured list. **Empty and cannot-answer never collapse** — a surface that cannot make a read
+  refuses it by name, because zero members and no membership read look identical to anything
+  handed `[]` for both.
+
+  The brain reaches them through a new built-in `surface-read` server, four tools
+  allowlisted separately (`sageox-agent mcp add surface-read`) and each capped. The two that
+  name a channel, `list_members` and `read_channel`, resolve it against the configured list
+  exactly as a post does, so no id the brain computes reaches a conversation the agent does
+  not serve. The two that do not — `list_channels` and `describe_actor` — are surface-wide by
+  design, and the guide says plainly what granting the second one means: the agent can
+  resolve any id its surface will answer for.
+  Nothing on it publishes, so nothing on it is egress; what comes back is other people's
+  text and is untrusted exactly as an inbound message is. `read_channel` answers `more`
+  beside its messages, because a short list and a quiet channel are otherwise the same list
+  — Slack serves as few as fifteen records a request to an app distributed outside the
+  Marketplace, so coming back short of what was asked for is ordinary there rather than
+  exceptional, and the agent is told which kind of short it is holding. A probing job body gets the one
+  read it was missing on its own per-run channel: `channel_members` takes no destination at
+  all, and is what lets a roll call say whether an agent that did not answer was slow or was
+  never in the room.
+
 - **The job body contract says what a body finds on disk.** A body never writes
   `workspace/` — the repository checkouts and the `ox` index there are built by
   `sageox-agent run`, in its own process, so what a body finds there depends on where it is

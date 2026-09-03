@@ -226,13 +226,14 @@ report:
   probe: true       # this body talks through the channel while it runs
 ```
 
-The body then has `JOB_CHANNEL_URL` and `JOB_CHANNEL_TOKEN`, and two verbs over them —
+The body then has `JOB_CHANNEL_URL` and `JOB_CHANNEL_TOKEN`, and three verbs over them —
 MCP `tools/call` over HTTP, so a `curl` is enough and there is still nothing to import:
 
 | Tool | Takes | Answers |
 |---|---|---|
 | `post_message` | `text`, optionally `mentions` — who to address it to — and optionally a `threadRoot` this run posted | `{"posted": true, "threadRoot": "…"}` — `null` where the surface named no id, so there is nothing to read back |
 | `thread_read` | `root` — a `threadRoot` this run was handed — and optionally `limit` | `{"replies": [{"author", "text", "ts"}, …]}`, oldest first |
+| `channel_members` | optionally `limit`. No destination: the channel is the one `report` names | `{"members": [{"surface", "id", "isSelf", "isAgent", "name"}, …]}` |
 
 ```js
 const call = async (name, args) =>
@@ -253,7 +254,17 @@ const call = async (name, args) =>
     ).result.content[0].text,
   );
 
-const { threadRoot } = await call("post_message", { text: rollCall, mentions: roster });
+// Who is in the channel to be asked. Read first, because it is both what the roll call
+// addresses and what tells a silence apart afterwards: an agent that answered slowly, and
+// one that was never in the room.
+const roster = (await call("channel_members", {})).members;
+
+// **Ids**, never the member objects: a name renders in the text and wakes nobody, and a
+// roll call that woke nobody reads back empty and reports the whole fleet silent.
+const { threadRoot } = await call("post_message", {
+  text: rollCall,
+  mentions: roster.map(({ id }) => id),
+});
 // … wait, on a schedule this body owns …
 
 // `null` means the surface named no id, so there is no thread to read. Report that gate
@@ -262,12 +273,16 @@ const { threadRoot } = await call("post_message", { text: rollCall, mentions: ro
 const replies = threadRoot
   ? (await call("thread_read", { root: threadRoot })).replies
   : null;
+
+// `roster` is what grades the silence: an id on it that did not reply is an agent that was
+// asked and did not answer, and the channel being empty is a different finding entirely.
 ```
 
 **What it is bounded to.** `post_message` reaches the channel `report` names and there is no
 field for a destination, so nothing the body computes can choose one. `thread_read` reads
 only a root **this run** posted; an id from anywhere else is refused, so a body cannot pull
-back a conversation it was never party to. The listener is opened before the body is
+back a conversation it was never party to. `channel_members` reads the `report` channel and
+takes no argument that could name another. The listener is opened before the body is
 spawned, closed when it exits, and its token is minted per run. A job that declares no
 `probe` is spawned into exactly the envelope it had before — no URL, no token.
 
@@ -285,9 +300,10 @@ did. Only a `probe` body has the field: a `report` status post never carries one
 including an instruction addressed to whoever reads it. Count it, match it, tally it; never
 splice it into a prompt or a command line.
 
-**A surface that cannot read a thread says so.** It never answers with an empty one:
-"nobody replied" and "this surface cannot tell you" are different findings, and a probe that
-collapsed them would name every agent silent.
+**A surface that cannot read says so.** It never answers with an empty thread or an empty
+roster: "nobody replied" and "this surface cannot tell you" are different findings, and a
+probe that collapsed them would name every agent silent. The roster is the sharper case —
+an empty one is a real answer, and it is the channel nobody joined.
 
 **The verdict is unmoved.** A probing body writes gates exactly as any other body does, and
 the status word in front of them is still minted by the host from what it ran. Reading a

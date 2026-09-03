@@ -39,10 +39,14 @@ import {
   serveBrokerServer,
   SurfaceEgress,
   serveSurfaceEgress,
+  serveSurfaceRead,
   SURFACE_EGRESS_SERVER,
   SURFACE_EGRESS_TOOL,
   SURFACE_EGRESS_TOOL_NAMES,
+  SURFACE_READ_SERVER,
+  SURFACE_READ_TOOL_NAMES,
   SURFACE_REACT_TOOL,
+  qualifyTool,
   JobHost,
   jobDeadlineMs,
   describeJobRun,
@@ -54,6 +58,7 @@ import {
   type JobConfig,
   type JobParams,
   type JobPoster,
+  type JobMembers,
   type JobReader,
   type JobRun,
   type SwitchSource,
@@ -321,6 +326,21 @@ async function buildBrain(
     addHosted(SURFACE_EGRESS_SERVER, server, `${label} tool`);
   }
 
+  // Allowed *and* carried by some surface, which is the same pair the two tools above are
+  // decided by. The server offers only the allowed reads, so one allowlisted read is enough
+  // to want it — and none means the brain is offered nothing, not an empty server.
+  const reads = SURFACE_READ_TOOL_NAMES.filter(
+    (tool) => policy?.allowsTool(qualifyTool(SURFACE_READ_SERVER, tool)).ok === true,
+  );
+  if (reads.length && egress?.canRead()) {
+    const server = await serveSurfaceRead(egress, policy!, serveAt);
+    addHosted(SURFACE_READ_SERVER, server, `surface read tools (${reads.join(", ")})`);
+  } else if (reads.length) {
+    process.stdout.write(
+      "  note: surface read tools are allowed, but no configured surface answers a read\n",
+    );
+  }
+
   // User-declared MCP servers. The broker holds their credentials, enforces the tool
   // policy, and pins schemas; this only gives the brain a way to reach it.
   if (manifest.mcpServers.length && !policy) {
@@ -378,6 +398,7 @@ async function buildBrain(
       // job would report to `#hive` on a clock and go quiet the moment someone asked.
       post: egress && jobPoster(egress),
       read: egress && jobReader(egress),
+      members: egress && jobMembers(egress),
     });
     const server = await serveJobs(
       {
@@ -540,6 +561,7 @@ async function reposCmd(argv: string[]): Promise<void> {
  */
 const BUILTIN_MCP_SERVERS: Record<string, readonly string[]> = {
   [SURFACE_EGRESS_SERVER]: SURFACE_EGRESS_TOOL_NAMES,
+  [SURFACE_READ_SERVER]: SURFACE_READ_TOOL_NAMES,
   [JOB_SERVER]: [JOB_RUN_TOOL_NAME],
 };
 
@@ -1523,6 +1545,11 @@ function jobReader(egress: SurfaceEgress): JobReader {
   return (root, limit) => egress.readThread(root, limit);
 }
 
+/** How a probing job reads its report channel's roster. Bound beside {@link jobReader}. */
+function jobMembers(egress: SurfaceEgress): JobMembers {
+  return (to, limit) => egress.listMembers(to.surface, to.channel, limit);
+}
+
 /**
  * How a detached run answers the conversation that asked for it: the guarded reply the
  * turn itself would have made, into the same thread. A refusal is thrown so the host counts
@@ -1551,7 +1578,9 @@ async function jobReporter(
   manifest: AgentManifest,
   job: JobConfig,
   secretsDir?: string,
-): Promise<{ post: JobPoster; read: JobReader; stop: () => Promise<void> } | undefined> {
+): Promise<
+  { post: JobPoster; read: JobReader; members: JobMembers; stop: () => Promise<void> } | undefined
+> {
   const kind = job.report?.surface;
   // `loadManifest` already refuses a `report.surface` this agent does not declare.
   const surface = kind && manifest.surfaces.find((s) => s.kind === kind);
@@ -1566,7 +1595,12 @@ async function jobReporter(
   // Slack, put the whole status post behind an inbound connection it does not need.
   await adapter.start();
   const egress = new SurfaceEgress({ manifest, adapters: [adapter] });
-  return { post: jobPoster(egress), read: jobReader(egress), stop: () => adapter.stop() };
+  return {
+    post: jobPoster(egress),
+    read: jobReader(egress),
+    members: jobMembers(egress),
+    stop: () => adapter.stop(),
+  };
 }
 
 /**
@@ -1671,6 +1705,7 @@ async function jobCmd(argv: string[]): Promise<void> {
     switchSource,
     post: reporter?.post,
     read: reporter?.read,
+    members: reporter?.members,
     secretOpts: { dir: jobSecretDirs(argv, secretsDir) },
   });
   let run: JobRun;
