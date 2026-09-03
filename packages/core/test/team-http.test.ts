@@ -145,6 +145,25 @@ describe("ox credential handling", () => {
     expect(oxEnv({ token: () => undefined }, {}).SAGEOX_TOKEN).toBeUndefined();
   });
 
+  it("clears an inherited token when the configured ref reads as nothing", () => {
+    // The gateway's own environment is not this agent's credential. On a host running
+    // several agents each with its own ref, an ambient `SAGEOX_TOKEN` is somebody else's,
+    // and ox would authenticate as them rather than fall back to the auth file.
+    const env = oxEnv({ token: () => undefined, configHome: "/mnt/secrets-store/ox" }, {
+      SAGEOX_TOKEN: "oxp_someone_else",
+      PATH: "/usr/bin",
+    });
+
+    expect(env.SAGEOX_TOKEN).toBeUndefined();
+    expect(env).toMatchObject({ XDG_CONFIG_HOME: "/mnt/secrets-store/ox", PATH: "/usr/bin" });
+  });
+
+  it("leaves an inherited token alone when no ref is configured at all", () => {
+    // A workstation call — `doctor` with no team brain declared — means to use whatever
+    // login this shell already has. Only a configured ref speaks for the agent.
+    expect(oxEnv({ team: "team_x" }, { SAGEOX_TOKEN: "oxp_mine" }).SAGEOX_TOKEN).toBe("oxp_mine");
+  });
+
   it("points ox at a mounted auth file when given one", () => {
     const env = oxEnv({ configHome: "/mnt/secrets-store/ox" }, { PATH: "/usr/bin" });
     expect(env.XDG_CONFIG_HOME).toBe("/mnt/secrets-store/ox");

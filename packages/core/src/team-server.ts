@@ -275,8 +275,17 @@ export function oxCwd(scope: OxScope): string {
 export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...base };
   if (scope.configHome) env.XDG_CONFIG_HOME = scope.configHome;
-  const token = scope.token?.();
-  if (token) env.SAGEOX_TOKEN = token;
+  if (scope.token) {
+    const token = scope.token();
+    // A configured ref is the authority on this agent's credential, including when it
+    // reads as nothing: the child then carries no token and falls back to `configHome`,
+    // never to a `SAGEOX_TOKEN` this process happens to have inherited. On a host running
+    // several agents that ambient value is another agent's credential, and ox would take
+    // it and answer normally as someone else. Deleting matters more now that the ref is
+    // read per child than it did when one boot-time reading stood for the process.
+    if (token) env.SAGEOX_TOKEN = token;
+    else delete env.SAGEOX_TOKEN;
+  }
   return env;
 }
 

@@ -31,7 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that does, which is the honest split. Every other credential still resolves at startup —
   each is held by a connection or a subprocess a rotation would have to re-establish
   anyway — and refreshing the mount remains opt-in: the bootstrap module leaves the CSI
-  driver's rotation reconciler off. `docs/deployment-contract.md` has the split.
+  driver's rotation reconciler off, so on that path a restart is still the rotation step for
+  this credential too. A configured token ref now also speaks for the agent when it reads as
+  nothing: the `ox` child carries no credential and falls back to its auth file, rather than
+  inheriting a `SAGEOX_TOKEN` from the gateway's own environment — which on a host running
+  several agents is another agent's. `docs/deployment-contract.md` has the split.
 
 - **A GitHub Release leads with one line per entry here, not the whole section.** Quoting
   the section put a screen of *why* above the image digest — the one thing a deployment
