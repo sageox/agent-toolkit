@@ -28,9 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handed `[]` for both.
 
   The brain reaches them through a new built-in `surface-read` server, four tools
-  allowlisted separately (`sageox-agent mcp add surface-read`), each capped, and every one
-  but `list_channels` bounded to the channels an operator configured — the resolution a post
-  already uses, so no id the brain computes reaches a conversation the agent does not serve.
+  allowlisted separately (`sageox-agent mcp add surface-read`) and each capped. The two that
+  name a channel, `list_members` and `read_channel`, resolve it against the configured list
+  exactly as a post does, so no id the brain computes reaches a conversation the agent does
+  not serve. The two that do not — `list_channels` and `describe_actor` — are surface-wide by
+  design, and the guide says plainly what granting the second one means: the agent can
+  resolve any id its surface will answer for.
   Nothing on it publishes, so nothing on it is egress; what comes back is other people's
   text and is untrusted exactly as an inbound message is. A probing job body gets the one
   read it was missing on its own per-run channel: `channel_members` takes no destination at

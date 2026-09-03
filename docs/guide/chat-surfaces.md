@@ -656,9 +656,18 @@ list. A configured channel missing from it is one the record does not cover, whi
 Buzz spelling of the same failure: a client gates its mention picker on that record and
 strips the mention at send, so every signal on both sides reports healthy.
 
-The other three are bounded to channels the agent already serves, the same resolution a
-post uses, so no id the agent computes reaches a conversation it is not configured for.
-Each is capped, and a surface that cannot answer a read **refuses it by name** rather than
+**Two of the four are bounded to a configured channel, and two are not.** `list_members`
+and `read_channel` name a channel and resolve it exactly as a post does, so no id the agent
+computes reaches a conversation it is not configured for. `list_channels` and
+`describe_actor` take no channel at all: the first is surface-wide by design, and so is the
+second — it answers about an id, and the whole reason to ask is usually that you do not know
+where that person is. Granting `describe_actor` therefore lets the agent resolve **any id
+its surface will answer for**, which on Slack is any member of the workspace and on Buzz is
+any pubkey holding a record. It returns a name and whether the id is a bot, never messages;
+grant it when you want the agent to say who someone is, and withhold it if a workspace-wide
+directory lookup is not something you want the brain to hold.
+
+Each read is capped, and a surface that cannot answer one **refuses it by name** rather than
 answering with an empty list. That distinction is the point of the whole server: zero
 members and no membership read look identical to anything handed `[]` for both, and the
 first is the failure you were looking for.

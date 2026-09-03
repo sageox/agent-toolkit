@@ -58,9 +58,9 @@ const allowAll = () =>
     [],
   );
 
-/** The full tool declarations, for assertions about what a description actually says. */
 type Declared = { name: string; inputSchema: { properties: { surface: { description: string } } } };
 
+/** The full tool declarations, for assertions about what a description actually says. */
 async function handleTools(adapter: SurfaceAdapter): Promise<Declared[]> {
   const handle = surfaceReadHandler(
     new SurfaceEgress({ manifest, adapters: [adapter] }),

@@ -52,11 +52,18 @@ const MAX_MESSAGES = 200;
  *
  * Reads, and only reads. Nothing on this server publishes, so nothing on it is egress and
  * the guard has nothing to rule on — the guard reads what this agent says, and these are
- * what somebody else said. The bound that remains is reach, and it is the same one every
- * other door here uses: a channel-scoped read resolves against the channels an operator
- * configured, so no id the brain computes reaches a conversation the agent does not serve.
- * {@link SurfaceEgress.listChannels} is deliberately outside that bound, because the answer
- * worth having from it is the channel that is *not* configured, or not joined.
+ * what somebody else said.
+ *
+ * The bound that remains is reach, and **two of the four tools carry it**. `list_members`
+ * and `read_channel` name a channel and resolve it against the configured list, the same
+ * door a post uses, so no id the brain computes reaches a conversation the agent does not
+ * serve. The other two take no channel and are surface-wide on purpose:
+ * {@link SurfaceEgress.listChannels}, because the answer worth having from it is the channel
+ * that is *not* configured or not joined, and {@link SurfaceEgress.describeActor}, because
+ * the reason to ask who an id belongs to is usually that nobody knows which channel to look
+ * in. That makes `describe_actor` a directory lookup over whatever its surface will answer
+ * for, and a policy that grants it is granting that — it is allowlisted on its own so the
+ * decision can be made separately.
  *
  * **Every text field it returns is untrusted**, for `thread_read`'s reason and to the same
  * degree: it is whatever anyone put in a channel, including an instruction addressed to
@@ -124,6 +131,13 @@ const ActorArgs = SurfaceArgs.extend({ id: z.string().min(1) });
 
 type ToolDecl = { name: string; description: string; inputSchema: unknown };
 
+/**
+ * The declarations, with the askable surfaces named in every one of them.
+ *
+ * From {@link SurfaceEgress.readableSurfaces} and never from the post targets: a DM-only
+ * Slack agent configures no channel to post into and is a working agent, so naming them
+ * from there would tell the brain there was nowhere to ask.
+ */
 function tools(egress: SurfaceEgress): ToolDecl[] {
   const where = egress.readableSurfaces().join(", ") || "none";
   const channel = {
