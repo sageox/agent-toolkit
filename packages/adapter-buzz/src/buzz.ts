@@ -393,9 +393,13 @@ export class BuzzAdapter implements SurfaceAdapter {
    * in.
    *
    * The membership kind is addressable, so the newest event at the channel's address is the
-   * current roster. A relay holding none cannot answer, and this throws rather than
-   * returning `[]`: an empty roster is a real finding — the channel nobody joined — and
-   * must not also be what a relay that keeps no rosters looks like.
+   * current roster — newest across publishers rather than per publisher, which leaves the
+   * relay's write policy deciding who may say who is in a channel. Nothing here can check
+   * that: an `authors` filter would need a per-channel owner, and no manifest carries one.
+   *
+   * A relay holding no roster cannot answer, and this throws rather than returning `[]`: an
+   * empty roster is a real finding — the channel nobody joined — and must not also be what a
+   * relay that keeps no rosters looks like.
    */
   async listMembers(channel: ChannelRef, limit?: number): Promise<readonly ActorRef[]> {
     const relay = this.relay;
@@ -420,9 +424,26 @@ export class BuzzAdapter implements SurfaceAdapter {
     // the roster is one event, so a relay-side limit would trim how many rosters came back
     // and not how many people are named in the one that did.
     //
+    // Normalized and deduplicated before `limit`, because both decide who fits under it: one
+    // pubkey tagged twice, or tagged once in hex and once as an npub, would take two of the
+    // slots and come back twice. A tag that is no pubkey at all names nobody here —
+    // `describeActor`'s finding for the same value — and dropping it keeps it out of the
+    // `authors` filter below, which one unusable entry can cost its whole answer.
+    //
     // `"p"` rather than `BUZZ_DEFAULTS.mentionTag`: on this kind the tag names a member, and
     // the two would drift apart the moment a relay spelled either differently.
-    const pubkeys = roster.tags.filter((tag) => tag[0] === "p" && tag[1]).map((tag) => tag[1]);
+    const pubkeys = [
+      ...new Set(
+        roster.tags.flatMap((tag) => {
+          if (tag[0] !== "p" || !tag[1]) return [];
+          try {
+            return [toHexPubkey(tag[1])];
+          } catch {
+            return [];
+          }
+        }),
+      ),
+    ];
     const members = limit === undefined ? pubkeys : pubkeys.slice(0, limit);
     if (members.length === 0) return [];
 

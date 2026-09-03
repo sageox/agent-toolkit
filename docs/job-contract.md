@@ -278,7 +278,8 @@ const replies = threadRoot
 // asked and did not answer, and the channel being empty is a different finding entirely.
 // `mentionable === false` grades it once more, where the surface can say so: that member is
 // in the channel and the mention above would not have woken it, so its silence says nothing
-// about whether it is running.
+// about whether it is running. Absent is that question unanswered for that member and never
+// a no, so test against `false` rather than for falsiness.
 ```
 
 **What it is bounded to.** `post_message` reaches the channel `report` names and there is no

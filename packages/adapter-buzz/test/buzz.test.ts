@@ -1068,15 +1068,23 @@ describe("BuzzAdapter reads the surface it is on", () => {
       sk,
     );
 
-  /** The relay's roster for one channel: `d` names it, one `p` tag per member. */
-  const membersOf = (channel: string, members: Uint8Array[], at = now - 86400) =>
+  /**
+   * The relay's roster for one channel: `d` names it, one `p` tag per member. A string
+   * member is tagged verbatim, so a test can hand it what a relay got wrong.
+   */
+  const membersOf = (channel: string, members: Array<Uint8Array | string>, at = now - 86400) =>
     finalizeEvent(
       {
         kind: BUZZ_DEFAULTS.membershipKind,
         created_at: at,
         tags: [
           ["d", channel],
-          ...members.map((sk) => ["p", getPublicKey(sk), "", "member"]),
+          ...members.map((member) => [
+            "p",
+            typeof member === "string" ? member : getPublicKey(member),
+            "",
+            "member",
+          ]),
         ],
         content: "",
       },
@@ -1144,6 +1152,26 @@ describe("BuzzAdapter reads the surface it is on", () => {
     await a.stop();
   });
 
+  it("reads the newest roster at the channel's address, not whichever arrived first", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    const leftSk = generateSecretKey();
+    const stayedSk = generateSecretKey();
+    // The membership kind is addressable, so a relay is meant to hold one roster per channel
+    // address. One that serves a superseded roster as well is not an error a caller can see
+    // — it is a channel reported to still hold whoever has left it. Pushed oldest first, so
+    // arrival order and the rule disagree and taking whichever came first is a failure here.
+    relay.backlog.push(membersOf("hive", [leftSk], now - 86400));
+    relay.backlog.push(membersOf("hive", [stayedSk], now - 60));
+    relay.backlog.push(registeredIn(stayedSk, "otto", ["hive"]));
+    relay.backlog.push(registeredIn(leftSk, "ida", ["hive"]));
+
+    const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false });
+    expect(members.map((member) => member.name)).toEqual(["otto"]);
+    await a.stop();
+  });
+
   it("refuses a channel the relay keeps no roster for rather than calling it empty", async () => {
     relay = await FakeRelay.start();
     const a = newAdapter();
@@ -1168,6 +1196,25 @@ describe("BuzzAdapter reads the surface it is on", () => {
 
     const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false }, 1);
     expect(members.map((member) => member.id)).toEqual([getPublicKey(first)]);
+    await a.stop();
+  });
+
+  it("normalizes and deduplicates the roster before `limit`, so neither costs a member", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    const firstSk = generateSecretKey();
+    const secondSk = generateSecretKey();
+    // One member tagged twice — once in upper case — and one tag that is no pubkey at all.
+    // Both are the relay's to get wrong, and either takes a slot `limit` owes a real member.
+    relay.backlog.push(
+      membersOf("hive", [firstSk, getPublicKey(firstSk).toUpperCase(), "nobody", secondSk]),
+    );
+    relay.backlog.push(registeredIn(firstSk, "ida", ["hive"]));
+    relay.backlog.push(registeredIn(secondSk, "otto", ["hive"]));
+
+    const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false }, 2);
+    expect(members.map((member) => member.name)).toEqual(["ida", "otto"]);
     await a.stop();
   });
 
