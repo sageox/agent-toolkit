@@ -613,6 +613,42 @@ describe("BuzzAdapter subscription shape", () => {
     await a.stop();
   });
 
+  it("keeps the current directory record when a backlog replays a superseded one", async () => {
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    relay = await FakeRelay.start({
+      // Current first, superseded second. Delivery order is not an order, and last-write-wins
+      // made the name whichever the relay happened to send last — so an agent renamed weeks
+      // ago would be labelled by its old handle for the life of the process.
+      backlog: [
+        directoryRecord(sk, "juno", "Juno Now", now - 60),
+        directoryRecord(sk, "juno", "Juno Then", now - 86400),
+      ],
+    });
+    const a = newAdapter();
+    await a.start(() => {});
+    await vi.waitFor(() => expect(a.principals().has(pk)).toBe(true));
+
+    expect(a.principals().get(pk)).toBe("Juno Now");
+    expect(a.displayName!(pk)).toBe("Juno Now");
+    await a.stop();
+  });
+
+  it("takes a live rename, which is later rather than merely last", async () => {
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    relay = await FakeRelay.start({ backlog: [directoryRecord(sk, "juno", "Juno Then", now - 86400)] });
+    const a = newAdapter();
+    await a.start(() => {});
+    await vi.waitFor(() => expect(a.principals().get(pk)).toBe("Juno Then"));
+
+    // The rule is not "ignore later records" — a genuine update carries a newer timestamp
+    // and must win, or an agent that renamed itself never gets called by its new name.
+    relay.emit(directoryRecord(sk, "juno", "Juno Now", now - 30));
+    await vi.waitFor(() => expect(a.principals().get(pk)).toBe("Juno Now"));
+    await a.stop();
+  });
+
   // A single REQ naming both channels is what made a two-channel agent answer its boot
   // batch and then go deaf, with every health signal still green: the relay served that
   // filter from its store and never pushed to it again.

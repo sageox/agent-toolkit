@@ -119,6 +119,15 @@ export class BuzzAdapter implements SurfaceAdapter {
    * — a record that disappears does not make its author a person.
    */
   private agents = new Map<string, string | undefined>();
+  /**
+   * Which record each entry in `agents` came from, so a later one can be judged against it.
+   *
+   * Beside the names rather than inside them: `agents` is handed to normalization for every
+   * event on the wire as a `ReadonlyMap<string, string | undefined>`, so widening its value
+   * would cost a projection per message to answer a question only this subscription asks.
+   * Written once per directory record and never read on the message path.
+   */
+  private agentRecords = new Map<string, Stamped>();
 
   constructor(private opts: BuzzAdapterOptions) {
     this.since = opts.since;
@@ -209,7 +218,7 @@ export class BuzzAdapter implements SurfaceAdapter {
     };
     const directory = relay.subscribe([{ kinds: [DIRECTORY_KIND] }], {
       eoseTimeout: DIRECTORY_EOSE_TIMEOUT_MS,
-      onevent: (event: Event) => this.agents.set(event.pubkey, directoryRecord(event).name),
+      onevent: (event: Event) => this.vouch(event),
       oneose: release,
       onclose: () => {
         refused = true;
@@ -465,6 +474,26 @@ export class BuzzAdapter implements SurfaceAdapter {
     };
   }
 
+  /**
+   * Records one directory entry, keeping the record NIP-01 says is current.
+   *
+   * Last-write-wins was what this did, and delivery order is not an order: a relay replaying
+   * a backlog may send an author's superseded record after its current one, and the name
+   * that survived was whichever arrived last. A live update still wins, because it genuinely
+   * is later — {@link supersedes} is the same rule the explicit reads apply, and one concept
+   * with two rules in one file is the thing worth avoiding here.
+   *
+   * Only the name is at stake, and it is presentation. `isAgent` reads membership of
+   * `agents` rather than its value, so a record that ties or loses still vouches for its
+   * author.
+   */
+  private vouch(event: Event): void {
+    const held = this.agentRecords.get(event.pubkey);
+    if (held && !supersedes(event, held)) return;
+    this.agentRecords.set(event.pubkey, { created_at: event.created_at, id: event.id });
+    this.agents.set(event.pubkey, directoryRecord(event).name);
+  }
+
   /** Oldest first, named as core names a line read back off a channel. */
   private ordered(events: Event[]): ThreadReply[] {
     return events
@@ -635,8 +664,16 @@ function newestPerAuthor(events: Event[]): Event[] {
   return [...current.values()];
 }
 
-/** NIP-01's replaceable-event rule: later wins, and on a tie the lower id does. */
-function supersedes(event: Event, held: Event): boolean {
+/**
+ * NIP-01's replaceable-event rule: later wins, and on a tie the lower id does.
+ *
+ * Takes the two fields the rule is about rather than whole events, so the directory
+ * subscription — which keeps only those two per author — can apply it without inventing an
+ * event to compare against.
+ */
+type Stamped = Pick<Event, "created_at" | "id">;
+
+function supersedes(event: Stamped, held: Stamped): boolean {
   if (event.created_at !== held.created_at) return held.created_at < event.created_at;
   return event.id < held.id;
 }
