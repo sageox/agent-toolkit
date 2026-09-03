@@ -163,10 +163,14 @@ function tools(egress: SurfaceEgress): ToolDecl[] {
     {
       name: LIST_MEMBERS,
       description:
-        "List who is in one of this agent's configured channels. Answers `{members}`, each " +
-        "`{surface, id, isSelf, isAgent, name?}` — `name` only where the surface could put " +
-        `one to the id. At most ${MAX_MEMBERS}. An empty list means the channel is empty; a ` +
-        "surface that cannot answer refuses instead, so the two never look alike.",
+        "List who is in one of this agent's configured channels, as the surface itself " +
+        "reports membership. Answers `{members}`, each " +
+        "`{surface, id, isSelf, isAgent, name?, mentionable?}` — `name` only where the " +
+        "surface could put one to the id, and `mentionable` only where it can say whether " +
+        "a mention of that id in this channel would reach them, so `mentionable: false` is " +
+        "somebody who is in the channel and would not be woken by being addressed there. " +
+        `At most ${MAX_MEMBERS}. An empty list means the channel is empty; a surface that ` +
+        "cannot answer refuses instead, so the two never look alike.",
       inputSchema: {
         type: "object",
         properties: {

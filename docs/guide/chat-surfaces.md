@@ -649,12 +649,21 @@ authenticates, subscribes, and is simply never spoken to.
 **The two surfaces answer it differently, because "in a channel" means different things.**
 On Slack it is `users.conversations`: every channel the bot was invited to, including ones
 `agent.yaml` never mentions, so the list can be wider than the configuration as well as
-narrower. On Buzz there is no join — the agent hears a channel because it subscribes to a
-configured one, and is addressable there because its directory record lists it — so
-`list_channels` returns the **overlap** of those two and is never wider than the configured
-list. A configured channel missing from it is one the record does not cover, which is the
-Buzz spelling of the same failure: a client gates its mention picker on that record and
-strips the mention at send, so every signal on both sides reports healthy.
+narrower. On Buzz it takes two things being true — the agent hears a channel because it
+subscribes to a configured one, and is addressable there because its directory record lists
+it — so `list_channels` returns the **overlap** of those two and is never wider than the
+configured list. A configured channel missing from it is one the record does not cover,
+which is the Buzz spelling of the same failure: a client gates its mention picker on that
+record and strips the mention at send, so every signal on both sides reports healthy.
+
+`list_members` is a different read and answers the relay rather than the agent: it is the
+channel's own membership record, so an identity that published a directory record naming a
+channel it was never added to does not appear in it. Where the relay holds a directory
+record for a member, the answer also carries `mentionable` — whether a mention of that
+member *in this channel* would reach them. A member with `mentionable: false` is in the room
+and cannot be addressed there, which is the one silence a roll call would otherwise read as
+a dead agent. A channel the relay keeps no membership record for is refused rather than
+answered empty: an empty channel and a relay that keeps no rosters are different findings.
 
 **Two of the four are bounded to a configured channel, and two are not.** `list_members`
 and `read_channel` name a channel and resolve it exactly as a post does, so no id the agent

@@ -233,7 +233,7 @@ MCP `tools/call` over HTTP, so a `curl` is enough and there is still nothing to 
 |---|---|---|
 | `post_message` | `text`, optionally `mentions` — who to address it to — and optionally a `threadRoot` this run posted | `{"posted": true, "threadRoot": "…"}` — `null` where the surface named no id, so there is nothing to read back |
 | `thread_read` | `root` — a `threadRoot` this run was handed — and optionally `limit` | `{"replies": [{"author", "text", "ts"}, …]}`, oldest first |
-| `channel_members` | optionally `limit`. No destination: the channel is the one `report` names | `{"members": [{"surface", "id", "isSelf", "isAgent", "name"}, …]}` |
+| `channel_members` | optionally `limit`. No destination: the channel is the one `report` names | `{"members": [{"surface", "id", "isSelf", "isAgent", "name", "mentionable"}, …]}` |
 
 ```js
 const call = async (name, args) =>
@@ -276,6 +276,10 @@ const replies = threadRoot
 
 // `roster` is what grades the silence: an id on it that did not reply is an agent that was
 // asked and did not answer, and the channel being empty is a different finding entirely.
+// `mentionable === false` grades it once more, where the surface can say so: that member is
+// in the channel and the mention above would not have woken it, so its silence says nothing
+// about whether it is running. Absent is that question unanswered for that member and never
+// a no, so test against `false` rather than for falsiness.
 ```
 
 **What it is bounded to.** `post_message` reaches the channel `report` names and there is no

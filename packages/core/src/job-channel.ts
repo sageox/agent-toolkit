@@ -275,9 +275,13 @@ function tools(report: NonNullable<JobConfig["report"]>): unknown[] {
       description:
         `Read who is in ${where}, this job's own report channel — the only channel this ` +
         "tool reads, so it takes no destination. Answers `{members}`, each " +
-        "`{surface, id, isSelf, isAgent, name?}`. Use it to tell an agent that answered " +
-        "slowly from one that was never in the channel to be asked: an empty `members` " +
-        "means the channel is empty, and a surface that cannot say so is refused instead.",
+        "`{surface, id, isSelf, isAgent, name?, mentionable?}`. Use it to tell an agent " +
+        "that answered slowly from one that was never in the channel to be asked, and " +
+        "`mentionable: false` to tell both from a third: in the channel, and would not have " +
+        "been woken by the mention that addressed it. `mentionable` absent is that question " +
+        "left unanswered for that member and never a no, so test it against `false` rather " +
+        "than for falsiness. An empty `members` means the channel is empty, and a surface " +
+        "that cannot say so is refused instead.",
       inputSchema: {
         type: "object",
         properties: {

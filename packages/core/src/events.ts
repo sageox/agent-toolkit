@@ -39,6 +39,19 @@ export interface ActorRef {
    * bare ids answers nobody's question about who is in a channel.
    */
   name?: string;
+  /**
+   * A mention of this id, posted in the channel this ref was read from, would reach it.
+   *
+   * Channel-scoped, so only `SurfaceAdapter.listMembers` sets it, and only for an id the
+   * surface holds something that answers it about. Absent is "not answered here" and never
+   * "no" — `SurfaceAdapter.readThread`'s rule.
+   *
+   * `false` is the finding worth having, and Buzz is where it happens: an agent can be on a
+   * channel's roster and have no directory record naming that channel, and a client strips
+   * its mention at send. A roll call that addressed it reads back as silence from an agent
+   * that is plainly in the room.
+   */
+  mentionable?: boolean;
 }
 
 export interface InboundEvent {

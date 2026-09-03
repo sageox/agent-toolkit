@@ -23,6 +23,12 @@ export const BUZZ_DEFAULTS = {
   profileKind: 0,
   /** NIP-25 reaction. */
   reactionKind: 7,
+  /**
+   * The relay's channel-membership event: addressable, `d` naming the channel, one `p` tag
+   * per member as `["p", <pubkey>, "", <role>]`. The only roster the relay vouches for — a
+   * directory record is its author's claim about itself.
+   */
+  membershipKind: 39002,
   /** Buzz's ephemeral typing indicator, as built by buzz-acp. */
   typingKind: 20002,
   /** NIP-09 deletion. */
