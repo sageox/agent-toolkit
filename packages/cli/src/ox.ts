@@ -14,7 +14,12 @@ export interface OxStatus {
   gitPatValid?: boolean;
   authFile?: string;
   /**
-   * Which credential actually authenticated.
+   * Which credential this check handed the `ox` child.
+   *
+   * Not a claim about what ox then did with it: a token is bound to one endpoint, and
+   * against any other ox ignores it and falls back to the auth file without saying so —
+   * see `OxScope.token`. Nothing here can tell the two apart, because the endpoint a token
+   * was issued for is not derivable from the token.
    *
    * ox reports `config.auth_file` unconditionally — the path it *would* read for a disk
    * login, whether or not anything is there. Reporting that as the source is wrong in a
@@ -35,10 +40,14 @@ export interface OxStatus {
  * nothing down. So the check happens before the agent runs, not at the first question.
  */
 export async function oxStatus(scope: OxScope = {}): Promise<OxStatus> {
+  // Built once and reported from, never resolved a second time: `OxScope.token` reads a
+  // file that may be rewritten under this process, so a second reading could name a
+  // credential this child never carried.
+  const env = oxEnv(scope);
   try {
     // Same credential the team brain will use, or the check answers a different question
     // than the one asked: a container has no ambient login for ox to fall back on.
-    const { stdout } = await run("ox", ["status", "--json"], { timeout: 30_000, env: oxEnv(scope), cwd: oxCwd(scope) });
+    const { stdout } = await run("ox", ["status", "--json"], { timeout: 30_000, env, cwd: oxCwd(scope) });
     const parsed = JSON.parse(stdout) as {
       auth?: {
         authenticated?: boolean;
@@ -57,7 +66,7 @@ export async function oxStatus(scope: OxScope = {}): Promise<OxStatus> {
       authFile: parsed.config?.auth_file,
       // An env token takes precedence over anything on disk, so if we supplied one and
       // the call authenticated, that is what authenticated it.
-      source: credentialSource(scope),
+      source: credentialSource(env),
     };
   } catch (error) {
     const e = error as { code?: string; message?: string };
@@ -71,11 +80,17 @@ export async function oxStatus(scope: OxScope = {}): Promise<OxStatus> {
 }
 
 /**
- * Which credential authenticated. An env token takes precedence over anything on disk,
- * so supplying one means it is what did the work.
+ * Which credential authenticated, read off the env a child was given. An env token takes
+ * precedence over anything on disk, so a child that carried one is a child it did the work
+ * for.
+ *
+ * The env and not the scope: the scope's token is a reading of a file, and taking it a
+ * second time after the child has exited can answer differently from the one that built
+ * its env — which is the whole premise of resolving per child. `doctor` would then name a
+ * credential the run never used.
  */
-export function credentialSource(scope: OxScope): "SAGEOX_TOKEN" | "auth file" {
-  return scope.token ? "SAGEOX_TOKEN" : "auth file";
+export function credentialSource(env: NodeJS.ProcessEnv): "SAGEOX_TOKEN" | "auth file" {
+  return env.SAGEOX_TOKEN ? "SAGEOX_TOKEN" : "auth file";
 }
 
 /** True when the token is gone or expires within the hour. */

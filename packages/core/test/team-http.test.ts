@@ -127,8 +127,41 @@ describe("origin checks", () => {
 
 describe("ox credential handling", () => {
   it("passes a token supplied out-of-band, for containers with no interactive login", () => {
-    const env = oxEnv({ token: "tok_abc" }, { PATH: "/usr/bin" });
+    const env = oxEnv({ token: () => "tok_abc" }, { PATH: "/usr/bin" });
     expect(env.SAGEOX_TOKEN).toBe("tok_abc");
+  });
+
+  it("reads the token per child, so a mount rewritten under the process is what goes out", () => {
+    let mounted = "tok_old";
+    const scope = { token: () => mounted };
+    expect(oxEnv(scope, {}).SAGEOX_TOKEN).toBe("tok_old");
+    mounted = "tok_new";
+    expect(oxEnv(scope, {}).SAGEOX_TOKEN).toBe("tok_new");
+  });
+
+  it("adds no credential when the secret is not there to read, rather than an empty one", () => {
+    // What `resolveSecret` returns for an unmounted ref. `SAGEOX_TOKEN=` would be a
+    // credential as far as ox is concerned, and it would lose to the auth file silently.
+    expect(oxEnv({ token: () => undefined }, {}).SAGEOX_TOKEN).toBeUndefined();
+  });
+
+  it("clears an inherited token when the configured ref reads as nothing", () => {
+    // The gateway's own environment is not this agent's credential. On a host running
+    // several agents each with its own ref, an ambient `SAGEOX_TOKEN` is somebody else's,
+    // and ox would authenticate as them rather than fall back to the auth file.
+    const env = oxEnv({ token: () => undefined, configHome: "/mnt/secrets-store/ox" }, {
+      SAGEOX_TOKEN: "oxp_someone_else",
+      PATH: "/usr/bin",
+    });
+
+    expect(env.SAGEOX_TOKEN).toBeUndefined();
+    expect(env).toMatchObject({ XDG_CONFIG_HOME: "/mnt/secrets-store/ox", PATH: "/usr/bin" });
+  });
+
+  it("leaves an inherited token alone when no ref is configured at all", () => {
+    // A workstation call — `doctor` with no team brain declared — means to use whatever
+    // login this shell already has. Only a configured ref speaks for the agent.
+    expect(oxEnv({ team: "team_x" }, { SAGEOX_TOKEN: "oxp_mine" }).SAGEOX_TOKEN).toBe("oxp_mine");
   });
 
   it("points ox at a mounted auth file when given one", () => {
@@ -143,7 +176,7 @@ describe("ox credential handling", () => {
   });
 
   it("supports both at once — the token wins in ox, and both are the gateway's to hold", () => {
-    const env = oxEnv({ token: "tok_abc", configHome: "/mnt/secrets-store/ox" }, {});
+    const env = oxEnv({ token: () => "tok_abc", configHome: "/mnt/secrets-store/ox" }, {});
     expect(env).toMatchObject({ SAGEOX_TOKEN: "tok_abc", XDG_CONFIG_HOME: "/mnt/secrets-store/ox" });
   });
 });

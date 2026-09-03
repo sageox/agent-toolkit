@@ -38,4 +38,6 @@ separate clusters cannot collide inside one AWS account. The Pod Identity role t
 policy also requires the exact EKS cluster, namespace, and ServiceAccount session tags.
 
 To rotate a credential, put a new Secrets Manager version and restart the Deployment; the
-new pod mounts the current values.
+new pod mounts the current values. The team brain's SageOx token is read per `ox` child
+rather than at startup, so it recovers without the restart wherever the mount is refreshed
+— which needs the CSI driver's rotation reconciler, off by default in the bootstrap module.

@@ -35,9 +35,10 @@ and `failed` is everything else, where `detail` is the whole story.
 The first two also latch as the `brain.team` capability, because retrying cannot disprove
 either: `run` prints `note: brain.team — …` with what to do, and the agent is told to stop
 answering as if team memory had worked. The next lookup that gets an answer clears the
-reading, so a rotated credential needs no restart. `unreadable` and `failed` do not latch —
-the next lookup may well answer, and an announcement a retry disproves is one people learn
-to skim.
+reading, and it reads the credential from its mount rather than from anything captured at
+boot — so a rotation that reaches the file needs no restart. `unreadable` and `failed` do
+not latch — the next lookup may well answer, and an announcement a retry disproves is one
+people learn to skim.
 
 **`ox_failed … class=failed detail="… permission denied"`.**
 `ox` needs a writable working directory. The gateway runs it from the home directory for

@@ -36,8 +36,13 @@ resource "helm_release" "secrets_store_csi_provider_aws" {
     tolerations = [{ operator = "Exists" }]
     secrets-store-csi-driver = {
       install = true
-      # No rotation reconciler: the runtime resolves credentials at process startup, so
-      # rotation is "seed the new value, restart the Deployment" either way.
+      # No mirror into a Kubernetes Secret: the workload mounts Secrets Manager values
+      # directly, and a second copy in the API is a second thing to authorize. A separate
+      # setting refreshes a mount in place — `enableSecretRotation`, left at its default of
+      # off — so rotation here is "seed the new value, restart the Deployment" for every
+      # credential, the team brain's token included. That token is the one the runtime
+      # re-reads per `ox` child, so enabling the reconciler is what would let it recover
+      # without the restart.
       syncSecret = {
         enabled = false
       }

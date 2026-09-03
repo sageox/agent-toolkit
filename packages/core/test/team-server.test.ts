@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -11,6 +11,7 @@ import {
   TEAM_TOOLS,
   TEAM_TOOL_NAMES,
   type OxFailure,
+  type OxScope,
   type TeamBrain,
   type TeamOx,
   type TeamPassage,
@@ -55,6 +56,9 @@ async function until(condition: () => boolean, what: string): Promise<void> {
 async function withFakeOx<T>(
   script: string | undefined,
   body: (brain: TeamBrain, bin: string) => Promise<T>,
+  // Taken as a function of the directory, because the only scope any test here varies is
+  // the credential, and a credential is a path under it.
+  scope: (bin: string) => OxScope = () => ({}),
 ): Promise<{ value: T; log: string }> {
   const bin = mkdtempSync(join(tmpdir(), "ox-fake-"));
   if (script !== undefined) writeFileSync(join(bin, "ox"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
@@ -63,7 +67,7 @@ async function withFakeOx<T>(
   const logged: string[] = [];
   const warn = vi.spyOn(console, "warn").mockImplementation((line) => void logged.push(String(line)));
   try {
-    const value = await body(makeOxTeam({ team: "team_x", cwd: bin }), bin);
+    const value = await body(makeOxTeam({ team: "team_x", cwd: bin, ...scope(bin) }), bin);
     return { value, log: logged.join("\n") };
   } finally {
     warn.mockRestore();
@@ -324,6 +328,36 @@ describe("the team brain's own capability health", () => {
       return [dead, brain.readings()[0].health];
     });
     expect(value).toEqual(["Unavailable", "Ok"]);
+  });
+
+  it("hands each lookup the credential on disk now, so a rotated secret self-heals", async () => {
+    // The other half of "clears itself on the next answer": that latch only clears if the
+    // next lookup can still get one, and with a token read once at boot it cannot — a
+    // secrets-store CSI driver rewrites the file under the mount and the process goes on
+    // sending the revoked value. The fake records what it was handed.
+    const RECORDS_TOKEN = `printf '%s' "$SAGEOX_TOKEN" > ./seen\necho '{"team_context":{"results":[]}}'`;
+    const { value } = await withFakeOx(
+      RECORDS_TOKEN,
+      async (brain, bin) => {
+        const seen = () => readFileSync(join(bin, "seen"), "utf8");
+        writeFileSync(join(bin, "secret"), "tok_old");
+        await brain.search("x", 5);
+        const before = seen();
+        writeFileSync(join(bin, "secret"), "tok_new");
+        await brain.search("x", 5);
+        return [before, seen()];
+      },
+      // Stands in for `resolveSecret` against a mounted secrets directory, down to
+      // answering `undefined` for a ref with no file — which is what a token captured
+      // before this body wrote one would have carried for the whole process.
+      (bin) => ({
+        token: () => {
+          const path = join(bin, "secret");
+          return existsSync(path) ? readFileSync(path, "utf8").trim() : undefined;
+        },
+      }),
+    );
+    expect(value).toEqual(["tok_old", "tok_new"]);
   });
 
   it("reads an answer with no passages as Ok, never as an empty corpus", async () => {
