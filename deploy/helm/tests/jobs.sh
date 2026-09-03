@@ -133,6 +133,8 @@ fi
 # with empty logs, and `DoesNotExist` keeps another job Pod of the same agent — which
 # carries the same selector labels — from standing in for the Deployment's.
 counted 1 "podAffinity:"
+present "requiredDuringSchedulingIgnoredDuringExecution:"
+absent "preferredDuringSchedulingIgnoredDuringExecution:"
 present "topologyKey: kubernetes.io/hostname"
 present "operator: DoesNotExist"
 present "key: agent-toolkit/job"

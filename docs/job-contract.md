@@ -127,9 +127,12 @@ gave it: on a single host that is the same directory, and in a container deploym
 nothing at all unless the deployment says otherwise, which the chart spells
 `persistence.jobCheckouts`
 ([the chart's README](../deploy/helm/README.md#a-job-that-reads-the-agents-checkouts)).
-One directory per repository, named `<owner>--<repo>` in lower case, and
-`[ -d workspace/repos/acme--widgets/.git ]` is the test — the directory alone can exist
-before `git` has filled it.
+One directory per repository, named `<owner>--<repo>` in lower case, and the test is
+`git -C workspace/repos/acme--widgets rev-parse --verify HEAD`, not the directory: startup
+creates it, and `git clone` creates `.git` inside it, before either has a ref to resolve.
+What that proves is one clone that got as far as writing one — never a lock. The agent
+fast-forwards these trees at every start, so a body reads a snapshot that can move under it,
+and a body that needs one that cannot clones its own.
 
 **A body that needs a tree either way clones one** — shallow, and inside its budget. From
 the mount when there is one: `git clone --depth 1 workspace/repos/acme--widgets ./work` is

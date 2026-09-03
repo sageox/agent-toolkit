@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sageox-agent run`, in its own process, so what a body finds there depends on where it is
   running: a run the brain starts is inside that process and, on an agent whose brain has
   code tools, sees one — while every other run is a standalone `job run`, which builds no
-  workspace whatever its trigger and reads one only where its target mounted it.
+  workspace whatever its trigger and reads one only where its target makes one visible.
   `docs/job-contract.md` has the rule, the test to make before looking, and what to do when
   the answer is no; `job run` is now held to it by a test that fails if it ever starts
   warming a workspace of its own.
