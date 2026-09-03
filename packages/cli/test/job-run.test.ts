@@ -91,8 +91,8 @@ describe("sageox-agent job run", () => {
 
   it("warms no repository workspace, so a body cannot come to depend on one", async () => {
     // Declared and still not built. The clone, the fast-forward and `ox index code` belong
-    // to `run`, and a body that read what they leave behind would work on the chat door —
-    // which runs inside that process — and find nothing on the tick.
+    // to `run`, so a tick sees a checkout only where its deployment mounted one — read-only,
+    // and never one this process built.
     writeFileSync(join(bundle, "repos.conf"), "https://github.com/acme/service\n");
     body('echo "workspace $([ -d workspace ] && echo present || echo absent)"');
     const { stdout, code } = await job("shift");

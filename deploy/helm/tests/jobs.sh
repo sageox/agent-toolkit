@@ -93,6 +93,10 @@ present "mountPath: /mnt/secrets-store"
 counted 2 "emptyDir: {}"
 absent "claimName: agents-harry"
 absent "claimName: agents-ida"
+# And nothing pins a job Pod anywhere, which is what a job that needs no claim buys: it
+# runs on whichever node has room, whatever the agent Pod is doing.
+absent "name: checkouts"
+absent "podAffinity"
 
 # The Deployment keeps the claim. Its `/agents` holds the cursors, local memory, checkouts
 # and indexes the contract calls durable, so gating the mount on the wrong side of `.job`
@@ -101,6 +105,48 @@ rendered=$(helm template agents "$chart" --values "$values" --show-only template
 present "claimName: agents-harry"
 present "claimName: agents-ida"
 absent "emptyDir"
+
+# `persistence.jobCheckouts` mounts the one thing on the claim a scheduled run could not
+# cheaply build for itself: the checkouts the agent Pod clones and fast-forwards. Narrowed
+# by `subPath` to `workspace/repos`, so `workspace/ox-data`, `state.json` and the local
+# memory vault stay in the Deployment Pod — an index `ox` cannot write is reported corrupt
+# and answers a search from nothing, and the other two are not a job's to read.
+render --set agents.harry.persistence.jobCheckouts=true
+counted 2 "name: checkouts"
+present "mountPath: /agents/harry/workspace/repos"
+present "subPath: harry/workspace/repos"
+matched 1 "claimName: agents-harry$"
+# Read-only, and said on the mount. The agent fast-forwards that tree at every start, so a
+# body writing there is a second writer on a tree it does not own — and `ox` pointed at a
+# writable index deletes the store the moment it reads one as corrupt.
+if ! grep -A2 -F "mountPath: /agents/harry/workspace/repos" <<<"$rendered" | grep -qF "readOnly: true"; then
+  fail "the checkouts mount must be read-only"
+fi
+# Not on the claim reference, though: the kubelet creates a missing `subPath` directory
+# through it, and an agent that has never had a repos.conf has no `workspace/repos` yet.
+if grep -A2 -E "claimName: agents-harry$" <<<"$rendered" | grep -qF "readOnly"; then
+  fail "the checkouts claim reference must not be read-only"
+fi
+
+# The claim is ReadWriteOnce, so the Pod has to land where the agent Pod already holds it.
+# Required and not preferred: a Pod scheduled elsewhere waits behind a `Multi-Attach` event
+# with empty logs, and `DoesNotExist` keeps another job Pod of the same agent — which
+# carries the same selector labels — from standing in for the Deployment's.
+counted 1 "podAffinity:"
+present "requiredDuringSchedulingIgnoredDuringExecution:"
+absent "preferredDuringSchedulingIgnoredDuringExecution:"
+present "topologyKey: kubernetes.io/hostname"
+present "operator: DoesNotExist"
+present "key: agent-toolkit/job"
+
+# `/agents` is still each job Pod's own `emptyDir` — the run stages its bundle there, and
+# the claim it now reads supplies one directory inside that tree and nothing else. ida sets
+# nothing, so this is per agent and not a release-wide flip.
+counted 2 "emptyDir: {}"
+rendered=$(helm template agents "$chart" --values "$values" \
+  --set agents.harry.persistence.jobCheckouts=true --show-only templates/deployment.yaml)
+absent "name: checkouts"
+absent "podAffinity"
 
 # Every scheduled Pod stages its own bundle, into the `emptyDir` above. One that waited on
 # the Deployment to have gone first would lose its run on a fresh install, and nothing

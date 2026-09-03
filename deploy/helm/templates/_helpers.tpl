@@ -105,6 +105,12 @@ scheduled run is lost.
 {{- define "agent.agentVolumeMounts" -}}
 - name: agent-data
   mountPath: /agents
+{{- if and .job .agent.persistence.jobCheckouts }}
+- name: checkouts
+  mountPath: /agents/{{ .name }}/workspace/repos
+  subPath: {{ .name }}/workspace/repos
+  readOnly: true
+{{- end }}
 {{- range $volume := .agent.sharedVolumes }}
 - name: {{ $volume.name }}
   mountPath: {{ $volume.mountPath | quote }}
@@ -167,10 +173,22 @@ from under the `Read(//mnt/secrets-store/**)` deny rule's sibling without the re
 claim is `ReadWriteOnce`, which binds it to one node: a job Pod the scheduler placed on any
 other node could not attach it, and sat in `Init:0/1` behind a `Multi-Attach` event until
 `activeDeadlineSeconds` killed it — with nothing in the job's own logs, because the body
-never started. A scheduled run needs nothing that is on the claim: it stages its own bundle
-from `/config`, reads its kill switch through the relay, and writes its verdict under the
-container's own tmpdir. Durable state a job body does share with the agent goes on a
+never started. A scheduled run needs nothing else that is on the claim: it stages its own
+bundle from `/config`, reads its kill switch through the relay, and writes its verdict under
+the container's own tmpdir. Durable state a job body does share with the agent goes on a
 `sharedVolumes` claim, which the operator backs with an access mode that allows it.
+
+`persistence.jobCheckouts` is the one exception, and it is the same claim a second time:
+read-only, and narrowed by `subPath` to `workspace/repos`, the repository checkouts
+`sageox-agent run` clones and fast-forwards. The Pod affinity in `cronjob.yaml` is what
+makes that attachable at all. Narrowed rather than the whole claim, because two things on it
+are not a job's to read: `state.json` and the local memory vault are the agent's own, and
+`workspace/ox-data` is an index `ox` opens read-write — pointed at a store it cannot write,
+it reports corruption and answers a search from nothing, which is worse than having none.
+
+`readOnly` sits on the mount rather than on the claim reference: the kubelet creates a
+missing `subPath` directory on the volume and cannot do that through a read-only attach, and
+an agent that has never had a `repos.conf` has no `workspace/repos` for it to find.
 
 The bundle arrives on whatever volume the consumer named, passed through verbatim: a
 ConfigMap, an image, a claim, a CSI volume. The chart's contract is the directory at
@@ -183,6 +201,11 @@ No volume at all is the case where the bundle rides inside `bundle.stageImage` i
 {{- if .job }}
   emptyDir: {}
 {{- else }}
+  persistentVolumeClaim:
+    claimName: {{ include "agent.claimName" . }}
+{{- end }}
+{{- if and .job .agent.persistence.jobCheckouts }}
+- name: checkouts
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}
 {{- end }}

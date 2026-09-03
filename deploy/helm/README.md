@@ -346,15 +346,58 @@ ServiceAccount, secret mount, shared volumes, and resource numbers. It stages th
 itself, with the same init container the agent Pod runs — a job that waited on the
 Deployment to have gone first would lose its run on a fresh install, and nothing retries it.
 
-What it does not get is the agent's claim. `/agents` in a job Pod is an `emptyDir`, fresh
-for the run and gone with it, because the claim is `ReadWriteOnce` and a job Pod mounting it
-could only attach where the Deployment Pod already ran — anywhere else the Pod sat in
-`Init:0/1` behind a `Multi-Attach error for volume` until `activeDeadlineSeconds` killed it,
-with empty logs, because the body never started. Nothing a run needs is on that claim: it
-stages its own bundle, reads its kill switch through the relay, and writes its verdict
-under the container's own tmpdir. A job body that genuinely shares durable state with the
-agent gets a `sharedVolumes` entry, on a claim you back with an access mode that allows two
-Pods to mount it — `ReadWriteMany` for anything that may land on a second node.
+What it does not get by default is the agent's claim. `/agents` in a job Pod is an
+`emptyDir`, fresh for the run and gone with it, because the claim is `ReadWriteOnce` and a
+job Pod mounting it can only attach where the Deployment Pod already ran — anywhere else the
+Pod sits in `Init:0/1` behind a `Multi-Attach error for volume` until `activeDeadlineSeconds`
+kills it, with empty logs, because the body never started. Nothing the envelope needs is on
+that claim: the run stages its own bundle, reads its kill switch through the relay, and
+writes its verdict under the container's own tmpdir. A job body that genuinely shares
+durable state with the agent gets a `sharedVolumes` entry, on a claim you back with an
+access mode that allows two Pods to mount it — `ReadWriteMany` for anything that may land on
+a second node.
+
+### A job that reads the agent's checkouts
+
+The one thing on that claim a scheduled run cannot cheaply build for itself is the
+repository checkouts under `workspace/repos`. The agent Pod clones them at startup and only
+fast-forwards them afterwards; a job Pod starting from nothing pays the whole clone out of
+its budget, every tick. `persistence.jobCheckouts` mounts them into this agent's CronJob
+Pods, read-only:
+
+```yaml
+agents:
+  beekeeper:
+    persistence:
+      size: 20Gi
+      jobCheckouts: true
+```
+
+A body then finds `workspace/repos/<owner>--<repo>` under its working directory, where a run
+started from chat already finds it
+([the job body contract](../../docs/job-contract.md#what-a-body-finds-on-disk)).
+
+Three things this deliberately does not do.
+
+**It does not hand over the claim.** The mount is `subPath`-narrowed to `workspace/repos`,
+so `state.json` and the local memory vault stay in the Deployment Pod. `workspace/ox-data`
+— the `ox` code index — is left out for a second reason: `ox` opens its store read-write, so
+against a read-only one it reports corruption, `ox code search` errors, and `ox code status`
+answers zeroes over `index_exists: true`. An index that reads as empty is worse for a job
+than no index at all, so a job body's `ox` finds none and says so.
+
+**It does not make the tree writable.** `readOnly` is on the mount, so the kernel refuses:
+the agent fast-forwards those trees at every start, and a body writing there is a second
+writer on a tree it does not own. A body that needs a tree of its own clones from the mount
+— `git clone --depth 1 workspace/repos/<owner>--<repo> ./work` is local, needs no token, and
+costs no network.
+
+**It does not let a run proceed without it.** The claim is `ReadWriteOnce`, so these Pods
+carry a required `podAffinity` onto the node the Deployment Pod runs on. While that Pod is
+missing — a drain, a rescheduling, an agent scaled to zero — the job Pod is unschedulable
+and the tick is lost as a `DeadlineExceeded` Job. That is the intended behaviour: a body
+written to read code, running without the code, is a green run that proved nothing. Leave
+`jobCheckouts` off for an agent whose jobs must fire while the agent itself is down.
 
 ### A job that reads the Kubernetes API
 

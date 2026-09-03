@@ -9,15 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **The job body contract says what a body finds on disk.** A body must not read
+- **The job body contract says what a body finds on disk.** A body never writes
   `workspace/` — the repository checkouts and the `ox` index there are built by
   `sageox-agent run`, in its own process, so what a body finds there depends on where it is
   running: a run the brain starts is inside that process and, on an agent whose brain has
   code tools, sees one — while every other run is a standalone `job run`, which builds no
-  workspace whatever its trigger. A body that reads a checkout works when someone asks for
-  it and fails on its tick. `docs/job-contract.md` has the rule, what to do instead, and
-  why a shared working tree is the wrong fix; `job run` is now held to it by a test that fails if
-  it ever starts warming a workspace of its own.
+  workspace whatever its trigger and reads one only where its target makes one visible.
+  `docs/job-contract.md` has the rule, the test to make before looking, and what to do when
+  the answer is no; `job run` is now held to it by a test that fails if it ever starts
+  warming a workspace of its own.
+
+- **A scheduled job can read the agent's repository checkouts.** A job Pod's `/agents` is an
+  `emptyDir`, so a body on its 3am tick started from nothing — no checkout, and no way to
+  afford the clone inside its budget — while the agent Pod beside it held the same
+  repositories, cloned once and fast-forwarded since, on its claim. The chart's new
+  `persistence.jobCheckouts` mounts `workspace/repos` from that claim into the agent's
+  CronJob Pods, read-only and `subPath`-narrowed, with a required pod affinity onto the
+  agent's node — the price a `ReadWriteOnce` claim charges, and the reason a tick that
+  cannot land there is lost as a `DeadlineExceeded` Job rather than run without the code it
+  was written to read. The `ox` index does not come with them: `ox` opens its store
+  read-write and reports one it cannot write as corrupt, so a shared index would answer a
+  search from nothing rather than fail. Off by default, per agent, and
+  [the chart's README](deploy/helm/README.md#a-job-that-reads-the-agents-checkouts) has the
+  three things it deliberately does not do.
 
 - **A post can wake one person or agent.** `post_message` takes `mention` — one principal,
   by the id on a message's `from` line or a name the surface lists — and the adapter renders
