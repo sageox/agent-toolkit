@@ -14,7 +14,12 @@ export interface OxStatus {
   gitPatValid?: boolean;
   authFile?: string;
   /**
-   * Which credential actually authenticated.
+   * Which credential this check handed the `ox` child.
+   *
+   * Not a claim about what ox then did with it: a token is bound to one endpoint, and
+   * against any other ox ignores it and falls back to the auth file without saying so —
+   * see `OxScope.token`. Nothing here can tell the two apart, because the endpoint a token
+   * was issued for is not derivable from the token.
    *
    * ox reports `config.auth_file` unconditionally — the path it *would* read for a disk
    * login, whether or not anything is there. Reporting that as the source is wrong in a
