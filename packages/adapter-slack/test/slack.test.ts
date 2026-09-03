@@ -1620,10 +1620,11 @@ describe("SlackAdapter reads the surface it is on", () => {
       },
     ];
 
-    const messages = await instance.readChannel!(
+    const { messages, more } = await instance.readChannel!(
       { surface: "slack", id: "GENG", isPublic: false },
       2,
     );
+    expect(more).toBe(false);
     expect(messages.map((message) => [message.author.id, message.text])).toEqual([
       ["U0ALICE", "morning"],
       ["U0BOB", "and @alice"],
@@ -1659,10 +1660,12 @@ describe("SlackAdapter reads the surface it is on", () => {
       },
     ];
 
-    const messages = await instance.readChannel!(
+    const { messages, more } = await instance.readChannel!(
       { surface: "slack", id: "GENG", isPublic: false },
       2,
     );
+    // Satisfied within the bound, so nothing was left behind.
+    expect(more).toBe(false);
     expect(messages.map((message) => message.text)).toEqual(["first", "second"]);
     expect(api.historyCalls).toEqual([
       { channel: "GENG", oldest: "0", limit: 200, cursor: undefined },
@@ -1670,7 +1673,7 @@ describe("SlackAdapter reads the surface it is on", () => {
     ]);
   });
 
-  it("refuses rather than answering short when the page bound is reached", async () => {
+  it("says `more` rather than answering an empty channel when the bound is reached", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});
     // Never satisfied, and Slack keeps offering a cursor — so the walk is bounded, and
@@ -1685,13 +1688,14 @@ describe("SlackAdapter reads the surface it is on", () => {
       };
     };
 
-    // `[]` here would say "the channel holds nothing", which is a claim about the channel.
-    // What is true is that this read stopped looking, and the two must not arrive alike.
-    await expect(
-      instance.readChannel!({ surface: "slack", id: "GENG", isPublic: false }, 5),
-      // The count is what it actually read, not the ceiling it was allowed to: this fake
-      // answers one record per page, so a message naming 1000 would be off by 200x.
-    ).rejects.toThrow(/read 5 records of GENG across 5 pages without finding one message/);
+    // A bare `[]` would say "the channel holds nothing", which is a claim about the
+    // channel. What is true is that this read stopped looking, and `more` is what keeps
+    // the two from arriving alike.
+    const history = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      5,
+    );
+    expect(history).toEqual({ messages: [], more: true });
     expect(api.historyCalls).toHaveLength(5);
   });
 
@@ -1713,13 +1717,14 @@ describe("SlackAdapter reads the surface it is on", () => {
       };
     };
 
-    const messages = await instance.readChannel!(
+    const { messages, more } = await instance.readChannel!(
       { surface: "slack", id: "GENG", isPublic: false },
       50,
     );
-    // Five pages, one real message each: far short of the fifty asked for, and still a true
-    // statement about the recent end of the channel.
+    // Five pages, one real message each: far short of the fifty asked for. The messages are
+    // real and `more` is what stops them being read as the whole of the channel.
     expect(messages.map((message) => message.text)).toEqual(["m1", "m2", "m3", "m4", "m5"]);
+    expect(more).toBe(true);
     expect(api.historyCalls).toHaveLength(5);
   });
 
@@ -1732,11 +1737,13 @@ describe("SlackAdapter reads the surface it is on", () => {
       { messages: [{ type: "message", user: "U0ALICE", text: "only one", ts: "1786761001.000000" }] },
     ];
 
-    const messages = await instance.readChannel!(
+    const { messages, more } = await instance.readChannel!(
       { surface: "slack", id: "GENG", isPublic: false },
       5,
     );
     expect(messages.map((message) => message.text)).toEqual(["only one"]);
+    // The channel's own end, which is a complete answer however short it is.
+    expect(more).toBe(false);
     expect(api.historyCalls).toHaveLength(1);
   });
 });

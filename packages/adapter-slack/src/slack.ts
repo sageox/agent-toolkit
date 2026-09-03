@@ -3,6 +3,7 @@ import { WebClient } from "@slack/web-api";
 import type {
   ActorRef,
   ChannelDecl,
+  ChannelHistory,
   ChannelRef,
   EventRef,
   GuardedMessage,
@@ -574,15 +575,15 @@ export class SlackAdapter implements SurfaceAdapter {
    * to its first day.
    *
    * `limit` is a ceiling and not a quota: fewer messages than asked for is an ordinary
-   * answer about the recent end of a channel. What is **not** an answer is *none* of them
-   * while Slack is still offering a cursor, because a caller handed `[]` reports an empty
-   * channel — so that one case throws.
+   * answer, and on an installation served fifteen records a page it is the usual one. So
+   * a short read is reported rather than refused, and {@link ChannelHistory.more} says
+   * which kind of short it is — the channel ran out, or this walk did.
    *
    * Thread replies are not in it — `conversations.history` returns parents only, the same
    * Slack fact `backfill` works around — and that is the right answer for a channel read.
    * {@link readThread} is how one thread is opened.
    */
-  async readChannel(channel: ChannelRef, limit?: number): Promise<readonly ThreadReply[]> {
+  async readChannel(channel: ChannelRef, limit?: number): Promise<ChannelHistory> {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before readChannel()");
     this.assertChannel(channel);
 
@@ -611,27 +612,6 @@ export class SlackAdapter implements SurfaceAdapter {
       }
     }
 
-    // Only nothing at all is refused, and the bar is deliberately there rather than at
-    // `readable < limit`. `limit` is a ceiling — "the most recent up to this many" — and a
-    // walk that returns twelve of twenty is telling the truth about the recent end of the
-    // channel. A walk that returns *none* while Slack is still offering a cursor is not: a
-    // caller handed `[]` reports an empty channel, which is the one thing this read must
-    // never say on its own account.
-    //
-    // The bar matters most where the pages are smallest. On an installation capped at 15
-    // records a page, `MAX_HISTORY_PAGES` is 75 records rather than 1000, so refusing every
-    // shortfall would refuse ordinary reads of ordinary channels — see {@link HISTORY_PAGE}.
-    if (exhausted && readable === 0) {
-      // No advice, because there is none to give: a smaller `limit` reads the same pages,
-      // and the shape of the channel is not the caller's to change. What the caller can do
-      // is not report this as the channel being quiet.
-      throw new Error(
-        `read ${messages.length} records of ${channel.id} across ${MAX_HISTORY_PAGES} ` +
-          "pages without finding one message, and there is more history still to page — " +
-          "this is a read that gave up, not an empty channel",
-      );
-    }
-
     // Sorted on the Slack `ts` rather than the ISO string it becomes, per `readThread`.
     const ordered = messages.sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
     // Before the lines are built, not after: `toChannelLine` renders a mention from this
@@ -639,7 +619,15 @@ export class SlackAdapter implements SurfaceAdapter {
     for (const message of ordered) await this.learnNames(message.text ?? "");
 
     const replies = ordered.flatMap((message) => this.toChannelLine(message, channel.id) ?? []);
-    return limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit));
+    return {
+      messages:
+        limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit)),
+      // Stopping on the page bound while Slack was still offering a cursor is the only way
+      // this read comes back short of a channel that had more to give. Running out of
+      // cursor is the channel's own end, and reaching `limit` is the whole of what was
+      // asked for — neither is `more`.
+      more: exhausted,
+    };
   }
 
   /**

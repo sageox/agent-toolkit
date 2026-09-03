@@ -35,7 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   design, and the guide says plainly what granting the second one means: the agent can
   resolve any id its surface will answer for.
   Nothing on it publishes, so nothing on it is egress; what comes back is other people's
-  text and is untrusted exactly as an inbound message is. A probing job body gets the one
+  text and is untrusted exactly as an inbound message is. `read_channel` answers `more`
+  beside its messages, because a short list and a quiet channel are otherwise the same list
+  — Slack serves as few as fifteen records a request to an app distributed outside the
+  Marketplace, so coming back short of what was asked for is ordinary there rather than
+  exceptional, and the agent is told which kind of short it is holding. A probing job body gets the one
   read it was missing on its own per-run channel: `channel_members` takes no destination at
   all, and is what lets a roll call say whether an agent that did not answer was slow or was
   never in the room.

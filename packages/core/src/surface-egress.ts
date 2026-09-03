@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { SurfaceAdapter } from "./adapter.ts";
 import type {
   ActorRef,
+  ChannelHistory,
   ChannelRef,
   EventRef,
   GuardedMessage,
@@ -577,7 +578,7 @@ export class SurfaceEgress {
     surface: string,
     channelId: string,
     limit?: number,
-  ): Promise<readonly ThreadReply[]> {
+  ): Promise<ChannelHistory> {
     const adapter = this.byKind.get(surface);
     if (!adapter?.readChannel) throw cannotRead(surface, "read a channel back");
     return adapter.readChannel(this.readTarget(adapter, surface, channelId), limit);

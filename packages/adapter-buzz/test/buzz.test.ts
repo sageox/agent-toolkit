@@ -1174,11 +1174,14 @@ describe("BuzzAdapter reads the surface it is on", () => {
     relay.backlog.push(inChannel("hive", "first", now + 10));
     relay.backlog.push(inChannel("ops", "elsewhere", now + 30));
 
-    const messages = await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false });
-    expect(messages.map((message) => message.text)).toEqual(["first", "second"]);
+    const whole = await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false });
+    expect(whole.messages.map((message) => message.text)).toEqual(["first", "second"]);
+    // A REQ ends on the relay's EOSE, so what came back is the whole of what it stores for
+    // the filter — there is no cursor to stop early on and nothing left behind.
+    expect(whole.more).toBe(false);
 
-    expect((await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false }, 1))
-      .map((message) => message.text)).toEqual(["second"]);
+    const capped = await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false }, 1);
+    expect(capped.messages.map((message) => message.text)).toEqual(["second"]);
     // Asked for on the wire too: a relay that honours it sends one event rather than the
     // channel's whole stored history for this to throw away.
     expect(relay.reqs.at(-1)!.filters[0].limit).toBe(1);

@@ -1,5 +1,6 @@
 import type {
   ActorRef,
+  ChannelHistory,
   InboundEvent,
   GuardedMessage,
   ChannelRef,
@@ -171,8 +172,13 @@ export interface SurfaceAdapter {
    * published: this is the channel, and nothing in it was addressed to the agent. `limit`
    * keeps the most recent that many, because what a reader of a channel wants is the end
    * of it. The text is untrusted for the same reason and to the same degree.
+   *
+   * `limit` is a ceiling and not a quota, so coming back short is an ordinary answer — and
+   * {@link ChannelHistory.more} is how a short answer says which kind it is. An adapter
+   * that always reads to the end of what it was asked for reports `false` and never has to
+   * think about it.
    */
-  readChannel?(channel: ChannelRef, limit?: number): Promise<readonly ThreadReply[]>;
+  readChannel?(channel: ChannelRef, limit?: number): Promise<ChannelHistory>;
 
   /**
    * The resume cursor to persist, for surfaces that replay history from one. The CLI

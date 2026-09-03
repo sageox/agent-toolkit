@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SurfaceAdapter } from "../src/adapter.ts";
-import type { ActorRef, ChannelRef, ThreadReply } from "../src/events.ts";
+import type { ActorRef, ChannelRef } from "../src/events.ts";
 import { loadManifest } from "../src/manifest.ts";
 import { SurfaceEgress } from "../src/surface-egress.ts";
 import {
@@ -45,7 +45,10 @@ function reader(over: Partial<SurfaceAdapter> = {}) {
     readChannel: async (channel, limit) => {
       channels.push(channel.id);
       limits.push(limit);
-      return [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }] as ThreadReply[];
+      return {
+        messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
+        more: false,
+      };
     },
     ...over,
   };
@@ -109,6 +112,25 @@ describe("the surface read server", () => {
     expect(await call("describe_actor", { surface: "buzz", id: IDA.id })).toEqual({ actor: IDA });
     expect(await call("read_channel", { surface: "buzz", channel: "hive" })).toEqual({
       messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
+      more: false,
+    });
+  });
+
+  it("carries `more` to the brain, so a truncated read is not read as a quiet channel", async () => {
+    const truncated = reader({
+      readChannel: async () => ({
+        messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
+        more: true,
+      }),
+    });
+    const { call } = server(truncated.value);
+
+    // One message either way. Dropping `more` here would make "the channel said one thing"
+    // and "I stopped after one thing" the same answer, which is the whole reason the
+    // adapter goes to the trouble of distinguishing them.
+    expect(await call("read_channel", { surface: "buzz", channel: "hive" })).toEqual({
+      messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
+      more: true,
     });
   });
 

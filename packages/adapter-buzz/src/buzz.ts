@@ -5,6 +5,7 @@ import type { Event } from "nostr-tools/pure";
 import type { Filter } from "nostr-tools/filter";
 import type {
   ActorRef,
+  ChannelHistory,
   SurfaceAdapter,
   InboundEvent,
   GuardedMessage,
@@ -441,7 +442,7 @@ export class BuzzAdapter implements SurfaceAdapter {
    * serve. A Nostr `limit` takes the newest that many, which is the end of the channel a
    * reader wants; they are then ordered oldest first, the way a person reads it.
    */
-  async readChannel(channel: ChannelRef, limit?: number): Promise<readonly ThreadReply[]> {
+  async readChannel(channel: ChannelRef, limit?: number): Promise<ChannelHistory> {
     const relay = this.relay;
     if (!relay) throw new Error("BuzzAdapter.start() must be called before readChannel()");
     this.assertConfigured(channel);
@@ -452,9 +453,16 @@ export class BuzzAdapter implements SurfaceAdapter {
       ...(limit !== undefined ? { limit } : {}),
     });
     const replies = this.ordered(events);
-    // From the end, not `slice(-limit)`: a caller that asked for none would get every line
-    // back, because `-0` is not a negative index.
-    return limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit));
+    return {
+      // From the end, not `slice(-limit)`: a caller that asked for none would get every
+      // line back, because `-0` is not a negative index.
+      messages:
+        limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit)),
+      // Never `more`: one REQ ends on the relay's EOSE, which says it has sent everything
+      // it stores for the filter, so a short answer here is the relay's whole answer. There
+      // is no cursor to stop early on and no page bound to run into.
+      more: false,
+    };
   }
 
   /** Oldest first, named as core names a line read back off a channel. */

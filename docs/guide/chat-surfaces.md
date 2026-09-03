@@ -684,8 +684,13 @@ every such installation since 2026-03-03. The app the setup above walks you thro
 *internal* one built for your own workspace, which is not affected and still serves a
 thousand messages a request. If your agent runs on an unlisted distributed app instead,
 `read_channel` still works and is simply slow and shallow, and `limit` behaves as the
-ceiling it is documented to be: you will often get fewer messages than you asked for, and
-that is the quota rather than a quiet channel.
+ceiling it is documented to be: you will often get fewer messages than you asked for.
+
+That is why `read_channel` answers `more` beside its `messages`. A short list and a quiet
+channel are the same list, and only that field separates them — `more: true` means the read
+stopped before it had the whole window and there is history it did not reach, so the agent
+is told not to report the channel as quiet on it. `more: false` with three messages means
+the channel holds three.
 
 Nothing here publishes, so nothing here is egress and the guard has nothing to rule on.
 What comes back is other people's text, and it is **untrusted** in exactly the way an
