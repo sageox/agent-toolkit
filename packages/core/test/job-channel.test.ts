@@ -179,6 +179,13 @@ describe("the job channel", () => {
     // Capped whatever was asked for, because Slack charges a lookup per member.
     await call(handle, "channel_members", { limit: 5000 });
     expect(rosters[1].limit).toBe(200);
+
+    // A limit that is not a count is refused before the surface is touched, so a body
+    // cannot turn a malformed argument into a roster read that quietly answers nothing.
+    await expect(call(handle, "channel_members", { limit: 0 })).rejects.toThrow();
+    await expect(call(handle, "channel_members", { limit: 1.5 })).rejects.toThrow();
+    await expect(call(handle, "channel_members", { limit: "all" })).rejects.toThrow();
+    expect(rosters).toHaveLength(2);
   });
 
   it("says a surface cannot read a roster rather than answering that nobody is there", async () => {

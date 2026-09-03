@@ -360,10 +360,9 @@ export class BuzzAdapter implements SurfaceAdapter {
   async listChannels(): Promise<readonly ChannelRef[]> {
     const relay = this.relay;
     if (!relay) throw new Error("BuzzAdapter.start() must be called before listChannels()");
-    const [record] = await this.query(relay, {
-      kinds: [DIRECTORY_KIND],
-      authors: [this.pubkey!],
-    });
+    const [record] = newestPerAuthor(
+      await this.query(relay, { kinds: [DIRECTORY_KIND], authors: [this.pubkey!] }),
+    );
     const listed = new Set(record ? directoryRecord(record).channels : []);
     return this.postTargets().filter((target) => listed.has(target.id));
   }
@@ -386,13 +385,13 @@ export class BuzzAdapter implements SurfaceAdapter {
     if (!relay) throw new Error("BuzzAdapter.start() must be called before listMembers()");
     this.assertConfigured(channel);
 
-    const current = new Map<string, Event>();
-    for (const event of await this.query(relay, { kinds: [DIRECTORY_KIND] })) {
-      const held = current.get(event.pubkey);
-      if (!held || held.created_at < event.created_at) current.set(event.pubkey, event);
-    }
+    // `limit` is applied after the channel filter and never on the wire, unlike the two
+    // reads below: a relay-side limit trims the newest records regardless of which channel
+    // they name, so it could drop a member of this one and leave the roster short with
+    // nothing to say it had been.
+    const records = newestPerAuthor(await this.query(relay, { kinds: [DIRECTORY_KIND] }));
 
-    const members = [...current.values()].flatMap((event) => {
+    const members = records.flatMap((event) => {
       const record = directoryRecord(event);
       return record.channels.includes(channel.id)
         ? [this.actor(event.pubkey, record.name, true)]
@@ -421,10 +420,12 @@ export class BuzzAdapter implements SurfaceAdapter {
       return undefined;
     }
 
-    const records = await this.query(relay, {
-      kinds: [DIRECTORY_KIND, BUZZ_DEFAULTS.profileKind],
-      authors: [pubkey],
-    });
+    const records = newestPerAuthor(
+      await this.query(relay, {
+        kinds: [DIRECTORY_KIND, BUZZ_DEFAULTS.profileKind],
+        authors: [pubkey],
+      }),
+    );
     const directory = records.find((event) => event.kind === DIRECTORY_KIND);
     const record = directory ?? records.find((event) => event.kind === BUZZ_DEFAULTS.profileKind);
     if (!record) return undefined;
@@ -600,6 +601,26 @@ export class BuzzAdapter implements SurfaceAdapter {
  * those, spaces, and the punctuation a handle has.
  */
 const DIRECTORY_NAME = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,31}$/u;
+
+/**
+ * The newest record per author and kind — what a replaceable kind is supposed to mean.
+ *
+ * NIP-01 says a relay keeps one kind-0 and one 10100 per author and serves that one, so
+ * every read here could take whatever arrived first. It does not, because the cost of a
+ * relay that serves two is silent and specific: an obsolete record names a channel the
+ * agent has since left, and these reads exist to be trusted about exactly that. Keyed on
+ * the kind as well as the author, or `describeActor` — which asks for both kinds at once —
+ * would keep one record and drop the other.
+ */
+function newestPerAuthor(events: Event[]): Event[] {
+  const current = new Map<string, Event>();
+  for (const event of events) {
+    const key = `${event.pubkey}:${event.kind}`;
+    const held = current.get(key);
+    if (!held || held.created_at < event.created_at) current.set(key, event);
+  }
+  return [...current.values()];
+}
 
 /**
  * What a record says about its author: the name clients show — `display_name` over `name`,

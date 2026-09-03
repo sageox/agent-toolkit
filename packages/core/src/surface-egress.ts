@@ -145,17 +145,29 @@ export class SurfaceEgress {
   }
 
   /**
-   * Whether any surface here answers any of the four surface reads.
+   * The surfaces that answer at least one of the four reads.
    *
-   * Any, not all: a surface answers what it can, and a call to a read it does not carry is
-   * refused by name at the time it is made. What this decides is only whether the read
-   * server is worth hosting at all.
+   * Any read, not all: a surface answers what it can, and a call to one it does not carry
+   * is refused by name when it is made. Not derived from {@link targets}, which lists only
+   * surfaces with a configured channel to post into — a DM-only Slack agent has none of
+   * those and is a working agent, so naming it from there would tell the brain there was
+   * nowhere to ask.
    */
+  readableSurfaces(): string[] {
+    return [...this.byKind.values()]
+      .filter(
+        (adapter) =>
+          adapter.listChannels ||
+          adapter.listMembers ||
+          adapter.describeActor ||
+          adapter.readChannel,
+      )
+      .map((adapter) => adapter.kind);
+  }
+
+  /** Whether hosting the read server is worth it at all. */
   canRead(): boolean {
-    return [...this.byKind.values()].some(
-      (adapter) =>
-        adapter.listChannels || adapter.listMembers || adapter.describeActor || adapter.readChannel,
-    );
+    return this.readableSurfaces().length > 0;
   }
 
   /**

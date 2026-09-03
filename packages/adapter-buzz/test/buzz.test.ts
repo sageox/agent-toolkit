@@ -1108,6 +1108,33 @@ describe("BuzzAdapter reads the surface it is on", () => {
     await a.stop();
   });
 
+  it("reads the newest of two records an author left, never whichever arrived first", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter({
+      channels: [
+        { id: "hive", reply: "private" },
+        { id: "lobby", reply: "public" },
+      ],
+    });
+    await a.start();
+    const siblingSk = generateSecretKey();
+    // Kind 10100 is replaceable, so a relay is meant to hold one per author. A relay that
+    // serves both is not an error a caller can see — it is a roster naming a channel the
+    // agent has left, from a read whose whole job is to be trusted about that.
+    relay.backlog.push(registeredIn(agentSk, "ida", ["hive", "lobby"], now - 86400));
+    relay.backlog.push(registeredIn(agentSk, "ida", ["hive"], now - 60));
+    relay.backlog.push(registeredIn(siblingSk, "otto-was", ["ops"], now - 86400));
+    relay.backlog.push(registeredIn(siblingSk, "otto", ["hive"], now - 60));
+
+    // The older record still lists lobby; the current one does not.
+    expect((await a.listChannels!()).map((channel) => channel.id)).toEqual(["hive"]);
+    // The older record put otto in ops, the current one in hive — and names it differently.
+    const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false });
+    expect(members.map((member) => member.name)).toEqual(["ida", "otto"]);
+    expect(await a.describeActor!(getPublicKey(siblingSk))).toMatchObject({ name: "otto" });
+    await a.stop();
+  });
+
   it("reads a channel oldest first and asks the relay for only the newest few", async () => {
     relay = await FakeRelay.start();
     const a = newAdapter();

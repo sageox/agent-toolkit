@@ -149,6 +149,15 @@ function parseSlackReactionId(nativeId: string): { name: string; message: string
   return { name: nativeId.slice(0, at), message: nativeId.slice(at + 1) };
 }
 
+/**
+ * The most `conversations.history` pages one channel read walks.
+ *
+ * A read pages on only while it is short of readable messages, so this bounds the case
+ * where it never gets there: a channel whose recent history is all join notices would
+ * otherwise be walked to its first day to answer a question about its last hour.
+ */
+const MAX_HISTORY_PAGES = 5;
+
 /** A dedup key only has to outlive Slack's retries and the backfill/live overlap. */
 const SEEN_LIMIT = 2_048;
 
@@ -186,6 +195,14 @@ export class SlackAdapter implements SurfaceAdapter {
   private readonly memberNames = new Map<string, string>();
   /** Ids Slack would not name, so a second message does not ask about them again. */
   private readonly unnamed = new Set<string>();
+  /**
+   * Ids Slack called a bot, beside the names rather than among them.
+   *
+   * `memberNames` is read for every mention in every message and is handed to
+   * normalization as a `ReadonlyMap<string, string>`, so widening its value would cost a
+   * projection per message to answer a question only the roster read asks.
+   */
+  private readonly botIds = new Set<string>();
   /**
    * One message at a time per conversation, in arrival order.
    *
@@ -470,8 +487,9 @@ export class SlackAdapter implements SurfaceAdapter {
    *
    * A call per member is what Slack offers: the bulk alternative is `users.list`, which
    * spends the whole workspace's member table to name the few people in one channel — the
-   * trade `memberNames` already refuses at startup. `learnName` caches both answers, so a
-   * second read of the same roster costs nothing, and `limit` bounds the first one.
+   * trade `memberNames` already refuses at startup. `learnName` answers from cache for any
+   * id already asked about, so a second read of the same roster costs no calls at all, and
+   * `limit` bounds the first one.
    *
    * A member Slack would not name is still in the channel, so they come back by id. What
    * that costs is `isAgent`, which is `false` for the same reason it is on an author with
@@ -512,16 +530,23 @@ export class SlackAdapter implements SurfaceAdapter {
       // "nobody" on either would report a real member as a stranger.
       if (slackErrorCode(error) !== "user_not_found") throw error;
     }
+    // Into the same cache the roster read consults, though never out of it: this is the
+    // brain asking who an id is, and a cached name is the wrong answer to that question.
     if (user?.name) this.memberNames.set(id, user.name);
+    if (user?.isBot) this.botIds.add(id);
     return user && this.actor(id, user);
   }
 
   /**
-   * Recent messages in a channel this adapter serves — one page of `conversations.history`.
+   * Recent messages in a channel this adapter serves, from `conversations.history`.
    *
-   * One page and no cursor walk: the endpoint answers newest first, so the page *is* the
-   * recent end of the channel, and paging on would walk back to the channel's first day to
-   * answer a question about its last hour. `limit` is passed to Slack as that page's size.
+   * Paged until `limit` **readable** messages are in hand, not `limit` records. Slack
+   * counts a join notice, a channel topic change and a hidden message against the page
+   * size, and `toSlackInboundEvent` drops every one of them — so a page sized at the
+   * caller's limit can normalize to fewer, or to none, with the messages somebody actually
+   * wrote sitting one page further back. That is silent: the answer is a short history,
+   * not an error. `MAX_HISTORY_PAGES` is what stops a channel that is nothing but notices
+   * from walking back to its first day.
    *
    * Thread replies are not in it — `conversations.history` returns parents only, the same
    * Slack fact `backfill` works around — and that is the right answer for a channel read.
@@ -531,18 +556,42 @@ export class SlackAdapter implements SurfaceAdapter {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before readChannel()");
     this.assertChannel(channel);
 
-    const page = await this.api.history({ channel: channel.id, oldest: "0", limit });
+    const messages: SlackMessage[] = [];
+    let readable = 0;
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_HISTORY_PAGES; page++) {
+      const answered = await this.api.history({ channel: channel.id, oldest: "0", limit, cursor });
+      for (const message of answered.messages ?? []) {
+        messages.push(message);
+        if (this.toChannelLine(message, channel.id)) readable += 1;
+      }
+      cursor = answered.nextCursor || undefined;
+      if (!cursor || limit === undefined || readable >= limit) break;
+    }
+
     // Sorted on the Slack `ts` rather than the ISO string it becomes, per `readThread`.
-    const ordered = [...(page.messages ?? [])].sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
+    const ordered = messages.sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
+    // Before the lines are built, not after: `toChannelLine` renders a mention from this
+    // map, and the pass above ran to count readable records rather than to keep them.
     for (const message of ordered) await this.learnNames(message.text ?? "");
 
-    return ordered.flatMap((message) => {
-      const event = toSlackInboundEvent(
-        { ...message, type: message.type ?? "message", channel: channel.id },
-        this.normalizeOptions(),
-      );
-      return event ? [{ author: event.author, text: event.text, ts: event.ts }] : [];
-    });
+    const replies = ordered.flatMap((message) => this.toChannelLine(message, channel.id) ?? []);
+    return limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit));
+  }
+
+  /**
+   * One history record as a line of channel, or nothing when it is not one.
+   *
+   * The same normalization the inbound path applies, so a join notice is no more a message
+   * here than it is a turn — which is also why it is a *test* of readability and not only a
+   * conversion: the page walk above counts what survives this.
+   */
+  private toChannelLine(message: SlackMessage, channel: string): ThreadReply | undefined {
+    const event = toSlackInboundEvent(
+      { ...message, type: message.type ?? "message", channel },
+      this.normalizeOptions(),
+    );
+    return event ? { author: event.author, text: event.text, ts: event.ts } : undefined;
   }
 
   /**
@@ -752,22 +801,35 @@ export class SlackAdapter implements SurfaceAdapter {
    * otherwise cost a failed call per message forever.
    */
   private async learnNames(text: string): Promise<void> {
+    // Never the bot: its own mention is stripped before rendering, so there is nothing to
+    // name. Every other id is `learnName`'s to decide, cache included.
     for (const id of new Set(slackMentionedMembers(text))) {
-      if (id === this.botUserId || this.memberNames.has(id) || this.unnamed.has(id)) continue;
-      await this.learnName(id);
+      if (id !== this.botUserId) await this.learnName(id);
     }
   }
 
   /**
-   * One `users.info`, with both answers remembered: the name in `memberNames`, a refusal
-   * in `unnamed`. Shared with the roster read, which asks about members who have never
-   * spoken and so are exactly the ids no cache holds.
+   * One `users.info`, answered from cache for any id already asked about.
+   *
+   * All three answers are remembered — the name in `memberNames`, a refusal in `unnamed`,
+   * `is_bot` in `botIds` — and the cache is checked here rather than at the call sites,
+   * because the roster read asks about every member of a channel. Without it a second read
+   * of the same channel spends a call per member, sequentially, against a rate limit the
+   * whole workspace shares.
    */
   private async learnName(id: string): Promise<SlackUser | undefined> {
+    const name = this.memberNames.get(id);
+    if (name !== undefined || this.unnamed.has(id)) {
+      // A lookup that was refused is cached as "no name" and nothing else, so `isBot` here
+      // falls back to what an author with no `bot_id` gets. Only a lookup that answered
+      // ever puts an id in `botIds`.
+      return { ...(name !== undefined ? { name } : {}), isBot: this.botIds.has(id) };
+    }
     try {
       const user = await this.api.user(id);
       if (user?.name) this.memberNames.set(id, user.name);
       else this.unnamed.add(id);
+      if (user?.isBot) this.botIds.add(id);
       return user;
     } catch (error) {
       // Only a refusal that will not change on its own. `unnamed` is never cleared, so a

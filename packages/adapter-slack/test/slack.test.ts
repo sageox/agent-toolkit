@@ -1532,6 +1532,27 @@ describe("SlackAdapter reads the surface it is on", () => {
     expect(api.nameCalls).toEqual(["U0ALICE", "UBOT", "U0BUILD"]);
   });
 
+  it("spends no lookup re-reading a roster it has already named", async () => {
+    const { instance, api } = adapter();
+    api.names = { U0ALICE: "alice", U0BUILD: "buildbot" };
+    api.bots.add("U0BUILD");
+    await instance.start(() => {});
+    const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
+    api.members = [{ ids: ["U0ALICE", "U0BUILD"] }, { ids: ["U0ALICE", "U0BUILD"] }];
+
+    const first = await instance.listMembers!(channel);
+    expect(api.nameCalls).toEqual(["U0ALICE", "U0BUILD"]);
+
+    // `users.info` is rate-limited per workspace, so a roster read that re-asked would put
+    // one call per member on that limit every time anyone asks who is in a channel.
+    const second = await instance.listMembers!(channel);
+    expect(api.nameCalls).toEqual(["U0ALICE", "U0BUILD"]);
+    // And the cached answer is the whole actor, not just the name: a bot read out of cache
+    // as a person is a roster that says the fleet is made of people.
+    expect(second).toEqual(first);
+    expect(second.map((member) => member.isAgent)).toEqual([false, true]);
+  });
+
   it("stops paging and looking members up once `limit` is reached", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});
@@ -1607,10 +1628,62 @@ describe("SlackAdapter reads the surface it is on", () => {
       ["U0ALICE", "morning"],
       ["U0BOB", "and @alice"],
     ]);
-    // One page, sized by the caller: the endpoint answers newest first, so paging on walks
-    // back to the channel's first day to answer a question about its last hour.
+    // Sized by the caller and satisfied by one page: two readable messages were asked for
+    // and two arrived, so there is nothing to page on for.
+    expect(api.historyCalls).toEqual([{ channel: "GENG", oldest: "0", limit: 2 }]);
+  });
+
+  it("pages on when the newest records are notices rather than messages", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    // Slack counts a join notice against the page size and normalization drops it, so a
+    // page sized at the caller's limit can come back with nothing anyone wrote in it —
+    // silently, as a short history rather than an error.
+    api.histories = [
+      {
+        messages: [
+          { type: "message", subtype: "channel_join", user: "U0A", text: "", ts: "1786761004.000000" },
+          { type: "message", subtype: "channel_join", user: "U0B", text: "", ts: "1786761003.000000" },
+        ],
+        nextCursor: "page2",
+      },
+      {
+        messages: [
+          { type: "message", user: "U0BOB", text: "second", ts: "1786761002.000000" },
+          { type: "message", user: "U0ALICE", text: "first", ts: "1786761001.000000" },
+        ],
+      },
+    ];
+
+    const messages = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      2,
+    );
+    expect(messages.map((message) => message.text)).toEqual(["first", "second"]);
     expect(api.historyCalls).toEqual([
-      { channel: "GENG", oldest: "0", limit: 2 },
+      { channel: "GENG", oldest: "0", limit: 2, cursor: undefined },
+      { channel: "GENG", oldest: "0", limit: 2, cursor: "page2" },
     ]);
+  });
+
+  it("stops walking a channel that is nothing but notices", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    // Never satisfied, so only the page bound ends it — without one this asks Slack for the
+    // channel's whole history to answer a question about its last hour.
+    api.history = async (args) => {
+      api.historyCalls.push(args);
+      return {
+        messages: [
+          { type: "message", subtype: "channel_join", user: "U0A", text: "", ts: "1786761000.000000" },
+        ],
+        nextCursor: "more",
+      };
+    };
+
+    expect(
+      await instance.readChannel!({ surface: "slack", id: "GENG", isPublic: false }, 5),
+    ).toEqual([]);
+    expect(api.historyCalls).toHaveLength(5);
   });
 });

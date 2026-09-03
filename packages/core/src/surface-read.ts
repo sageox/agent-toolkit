@@ -125,8 +125,7 @@ const ActorArgs = SurfaceArgs.extend({ id: z.string().min(1) });
 type ToolDecl = { name: string; description: string; inputSchema: unknown };
 
 function tools(egress: SurfaceEgress): ToolDecl[] {
-  const surfaces = [...new Set(egress.targets().map((target) => target.surface))].join(", ");
-  const where = surfaces || "none";
+  const where = egress.readableSurfaces().join(", ") || "none";
   const channel = {
     type: "string",
     description: "Configured channel — its id, or the name shown beside it",

@@ -254,7 +254,17 @@ const call = async (name, args) =>
     ).result.content[0].text,
   );
 
-const { threadRoot } = await call("post_message", { text: rollCall, mentions: roster });
+// Who is in the channel to be asked. Read first, because it is both what the roll call
+// addresses and what tells a silence apart afterwards: an agent that answered slowly, and
+// one that was never in the room.
+const roster = (await call("channel_members", {})).members;
+
+// **Ids**, never the member objects: a name renders in the text and wakes nobody, and a
+// roll call that woke nobody reads back empty and reports the whole fleet silent.
+const { threadRoot } = await call("post_message", {
+  text: rollCall,
+  mentions: roster.map(({ id }) => id),
+});
 // … wait, on a schedule this body owns …
 
 // `null` means the surface named no id, so there is no thread to read. Report that gate
@@ -264,9 +274,8 @@ const replies = threadRoot
   ? (await call("thread_read", { root: threadRoot })).replies
   : null;
 
-// Silence is two findings, and only the roster tells them apart: an agent that was slow,
-// and one that was never in the channel to be asked. Read it before grading the silence.
-const roster = (await call("channel_members", {})).members;
+// `roster` is what grades the silence: an id on it that did not reply is an agent that was
+// asked and did not answer, and the channel being empty is a different finding entirely.
 ```
 
 **What it is bounded to.** `post_message` reaches the channel `report` names and there is no

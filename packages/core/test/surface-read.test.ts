@@ -58,6 +58,22 @@ const allowAll = () =>
     [],
   );
 
+/** The full tool declarations, for assertions about what a description actually says. */
+type Declared = { name: string; inputSchema: { properties: { surface: { description: string } } } };
+
+async function handleTools(adapter: SurfaceAdapter): Promise<Declared[]> {
+  const handle = surfaceReadHandler(
+    new SurfaceEgress({ manifest, adapters: [adapter] }),
+    allowAll(),
+  );
+  return ((await handle({ id: 1, method: "tools/list" }))?.tools ?? []) as Declared[];
+}
+
+/** The one line every tool shows the brain about where it may ask. */
+const askableSurfaces = (declared: Declared[]) => [
+  ...new Set(declared.map((tool) => tool.inputSchema.properties.surface.description)),
+];
+
 function server(adapter: SurfaceAdapter, policy = allowAll()) {
   const egress = new SurfaceEgress({ manifest, adapters: [adapter] });
   const handle = surfaceReadHandler(egress, policy);
@@ -165,6 +181,20 @@ describe("the surface read server", () => {
     await expect(call("list_members", { surface: "buzz", channel: "hive" })).rejects.toThrow(
       /list_members refused/,
     );
+  });
+
+  it("names an askable surface even when it has no channel to post into", async () => {
+    // A DM-only Slack agent configures no channels and is a working agent, so a tool
+    // description built from post targets would tell the brain there was nowhere to ask.
+    const dmOnly = reader({ postTargets: () => [], post: undefined });
+    const { tools, egress } = server(dmOnly.value);
+
+    expect(egress.targets()).toEqual([]);
+    expect(egress.readableSurfaces()).toEqual(["buzz"]);
+    // The `surface` argument is what names them, and it is the only place the brain
+    // learns which surfaces there are to ask about.
+    expect(askableSurfaces(await handleTools(dmOnly.value))).toEqual(["Which surface to ask: buzz"]);
+    expect(await tools()).toContain("list_channels");
   });
 
   it("knows whether any surface here answers a read at all", () => {

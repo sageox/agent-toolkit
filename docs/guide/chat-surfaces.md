@@ -641,13 +641,20 @@ channel history:
 }
 ```
 
-`list_channels` is the one worth granting first, and it is the only one that reaches past
-the configured list — deliberately. It answers with what the *surface* says the agent is a
-member of, so comparing it against the channels in `agent.yaml` is how you find the failure
-that has no error message anywhere: a channel the agent is configured for and nobody
-invited it to. On Buzz the same gap is the directory record, which is what a client gates
-its mention picker on — an agent missing from it connects, authenticates, subscribes, and
-is never spoken to, with every signal on both sides reporting healthy.
+`list_channels` is the one worth granting first: it answers from the surface rather than
+from `agent.yaml`, so comparing the two is how you find the failure that has no error
+message anywhere — an agent that is configured for a channel nobody invited it to connects,
+authenticates, subscribes, and is simply never spoken to.
+
+**The two surfaces answer it differently, because "in a channel" means different things.**
+On Slack it is `users.conversations`: every channel the bot was invited to, including ones
+`agent.yaml` never mentions, so the list can be wider than the configuration as well as
+narrower. On Buzz there is no join — the agent hears a channel because it subscribes to a
+configured one, and is addressable there because its directory record lists it — so
+`list_channels` returns the **overlap** of those two and is never wider than the configured
+list. A configured channel missing from it is one the record does not cover, which is the
+Buzz spelling of the same failure: a client gates its mention picker on that record and
+strips the mention at send, so every signal on both sides reports healthy.
 
 The other three are bounded to channels the agent already serves, the same resolution a
 post uses, so no id the agent computes reaches a conversation it is not configured for.

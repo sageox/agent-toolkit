@@ -16,11 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handed a second client for the surface it was already connected to, with a second copy of
   the credential. Four optional adapter methods now answer them — `listChannels`,
   `listMembers`, `describeActor`, `readChannel` — over calls both adapters were already
-  making internally, and the credential stays in the gateway. **`listChannels` is what the
-  *surface* says**, not what was configured, which is the point of it: a channel in
-  `agent.yaml` that nobody invited the bot to, or a Buzz directory record that omits one, is
-  an agent that connects, authenticates, subscribes and is never spoken to, with no error on
-  either side. **Empty and cannot-answer never collapse** — a surface that cannot make a read
+  making internally, and the credential stays in the gateway. **`listChannels` answers from the
+  surface rather than from `agent.yaml`**, which is the point of it: a channel the bot was
+  never invited to, or a Buzz directory record that omits one, is an agent that connects,
+  authenticates, subscribes and is never spoken to, with no error on either side. The two
+  surfaces spell it differently and the guide says so — Slack lists every channel the bot
+  joined, so the answer can be wider than the configuration; Buzz has no join, so it returns
+  the overlap of the configured channels and the agent's own directory record and is never
+  wider than the configured list. **Empty and cannot-answer never collapse** — a surface that cannot make a read
   refuses it by name, because zero members and no membership read look identical to anything
   handed `[]` for both.
 
