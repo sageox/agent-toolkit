@@ -612,6 +612,66 @@ of carrying them, so it takes either spelling — `:tada:`, `tada`, or one of th
 characters the adapter knows a name for — and refuses a character it cannot name rather
 than letting Slack reject it with `invalid_name`.
 
+### Let the agent read the surface it is on
+
+Everything above is the agent speaking. There are three questions it eventually gets asked
+that it cannot answer at all — *which channels am I in, who else is in this one, who is
+this id* — plus a fourth an operator asks constantly, *what has been said in there lately*.
+Without a way to ask its own transport, an agent has to be handed a second client for the
+surface it is already connected to, with a second copy of the credential. That is the one
+arrangement this toolkit exists to avoid, so the reads are a built-in server:
+
+```bash
+sageox-agent mcp add surface-read --agent harry
+```
+
+Four tools, allowlisted separately, so you can grant the roster read without granting
+channel history:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__surface-read__list_channels",
+      "mcp__surface-read__list_members",
+      "mcp__surface-read__describe_actor",
+      "mcp__surface-read__read_channel"
+    ]
+  }
+}
+```
+
+`list_channels` is the one worth granting first, and it is the only one that reaches past
+the configured list — deliberately. It answers with what the *surface* says the agent is a
+member of, so comparing it against the channels in `agent.yaml` is how you find the failure
+that has no error message anywhere: a channel the agent is configured for and nobody
+invited it to. On Buzz the same gap is the directory record, which is what a client gates
+its mention picker on — an agent missing from it connects, authenticates, subscribes, and
+is never spoken to, with every signal on both sides reporting healthy.
+
+The other three are bounded to channels the agent already serves, the same resolution a
+post uses, so no id the agent computes reaches a conversation it is not configured for.
+Each is capped, and a surface that cannot answer a read **refuses it by name** rather than
+answering with an empty list. That distinction is the point of the whole server: zero
+members and no membership read look identical to anything handed `[]` for both, and the
+first is the failure you were looking for.
+
+On Slack these need no scope the setup above did not already ask for: `channels:read` /
+`groups:read` answer "which channels" and "who is in one", and `users:read` puts a name to
+an id. On Buzz they are reads of the same relay socket the agent is already authenticated
+on. Either way the credential never leaves the gateway.
+
+Nothing here publishes, so nothing here is egress and the guard has nothing to rule on.
+What comes back is other people's text, and it is **untrusted** in exactly the way an
+inbound message is — the tools say so, and an agent that acts on an instruction it read in
+a channel is the failure to watch for.
+
+A job that probes reads the same way, through its own per-run channel rather than this
+server: `channel_members` there takes no destination at all, because a job body has no
+field to name a channel with. It is what lets a roll call say whether an agent that did not
+answer is slow or was never in the room. See
+[the job contract](../job-contract.md).
+
 ---
 
 [← Make it run](run-an-agent.md) · [Give it memory and tools →](memory-and-tools.md)

@@ -4,6 +4,7 @@ import type { Signer } from "nostr-tools/signer";
 import type { Event } from "nostr-tools/pure";
 import type { Filter } from "nostr-tools/filter";
 import type {
+  ActorRef,
   SurfaceAdapter,
   InboundEvent,
   GuardedMessage,
@@ -39,15 +40,16 @@ import {
 const FRESH_START_LOOKBACK = 60;
 
 /**
- * How long {@link BuzzAdapter.readThread} waits for the relay to finish answering.
+ * How long any of this adapter's reads waits for the relay to finish answering.
  *
  * EOSE is what makes a read an answer rather than a guess: it says the relay accepted the
- * REQ and has sent everything it stores for it, so an empty result means nobody replied.
- * Without it there is no way to tell that from a relay that took the query and went quiet
- * — which is why the wait ends in a throw rather than in whatever arrived first. A probe
- * reading a thread it just rooted is asking a question it will act on.
+ * REQ and has sent everything it stores for it, so an empty result means nobody replied,
+ * and an empty roster means nobody is in the channel. Without it there is no way to tell
+ * either from a relay that took the query and went quiet — which is why the wait ends in a
+ * throw rather than in whatever arrived first. A probe reading a thread it just rooted is
+ * asking a question it will act on.
  */
-const THREAD_READ_TIMEOUT_MS = 5000;
+const READ_TIMEOUT_MS = 5000;
 
 /**
  * How long the directory subscription waits for the relay's EOSE before the channels are
@@ -206,7 +208,7 @@ export class BuzzAdapter implements SurfaceAdapter {
     };
     const directory = relay.subscribe([{ kinds: [DIRECTORY_KIND] }], {
       eoseTimeout: DIRECTORY_EOSE_TIMEOUT_MS,
-      onevent: (event: Event) => this.agents.set(event.pubkey, directoryName(event)),
+      onevent: (event: Event) => this.agents.set(event.pubkey, directoryRecord(event).name),
       oneose: release,
       onclose: () => {
         refused = true;
@@ -281,10 +283,7 @@ export class BuzzAdapter implements SurfaceAdapter {
     mentions: readonly string[] = [],
   ): Promise<EventRef | undefined> {
     if (!this.relay) throw new Error("BuzzAdapter.start() must be called before post()");
-    const configured = this.postTargets().some((target) => target.id === channel.id);
-    if (channel.surface !== SURFACE || !configured) {
-      throw new Error(`Buzz channel ${channel.id} is not configured`);
-    }
+    this.assertConfigured(channel);
     // An `EventRef` is surface-qualified and never comparable across surfaces, so a root
     // from somewhere else is not a thread this adapter could anchor to — it is a 64-hex
     // string that happens to fit the tag.
@@ -338,14 +337,162 @@ export class BuzzAdapter implements SurfaceAdapter {
       throw new Error(`a ${root.surface} thread root names no Buzz thread`);
     }
 
-    const filter: Filter = {
+    const events = await this.query(relay, {
       kinds: [BUZZ_DEFAULTS.kind],
       [`#${BUZZ_DEFAULTS.replyTag}`]: [root.nativeId],
       ...(limit !== undefined ? { limit } : {}),
-    };
+    });
+    const replies = this.ordered(events);
+    return limit === undefined ? replies : replies.slice(0, limit);
+  }
 
+  /**
+   * The channels this agent is in, which on Buzz takes both halves being true.
+   *
+   * It hears a channel because `start` opened a REQ for a configured one, and it can be
+   * addressed in a channel because its directory record lists that channel — a client gates
+   * its mention picker on finding it there, and strips the mention at send when it does not
+   * (see `profile.ts`). A channel with only one half is where an agent connects, subscribes,
+   * authenticates and is never spoken to, with every signal on both sides reporting healthy.
+   * So this returns the overlap, and an operator reading it against `postTargets` sees which
+   * configured channel the record does not cover.
+   */
+  async listChannels(): Promise<readonly ChannelRef[]> {
+    const relay = this.relay;
+    if (!relay) throw new Error("BuzzAdapter.start() must be called before listChannels()");
+    const [record] = await this.query(relay, {
+      kinds: [DIRECTORY_KIND],
+      authors: [this.pubkey!],
+    });
+    const listed = new Set(record ? directoryRecord(record).channels : []);
+    return this.postTargets().filter((target) => listed.has(target.id));
+  }
+
+  /**
+   * Who the relay's directory says is in one configured channel.
+   *
+   * That is the membership Buzz has: there is no join, and a record naming the channel is
+   * what makes its author addressable there. So the roster is agents, and a person who
+   * reads the channel is not on it — which is the honest answer to the question a probe is
+   * really asking, "who would a post here have woken".
+   *
+   * Its own REQ rather than the directory subscription `start` opens, because that one is
+   * opened only for a caller that passed a listener: a `job run` starts this adapter to
+   * post one line, and would otherwise read an empty roster and report a channel nobody is
+   * in. Kind 10100 is replaceable, so newest per author is the current record.
+   */
+  async listMembers(channel: ChannelRef, limit?: number): Promise<readonly ActorRef[]> {
+    const relay = this.relay;
+    if (!relay) throw new Error("BuzzAdapter.start() must be called before listMembers()");
+    this.assertConfigured(channel);
+
+    const current = new Map<string, Event>();
+    for (const event of await this.query(relay, { kinds: [DIRECTORY_KIND] })) {
+      const held = current.get(event.pubkey);
+      if (!held || held.created_at < event.created_at) current.set(event.pubkey, event);
+    }
+
+    const members = [...current.values()].flatMap((event) => {
+      const record = directoryRecord(event);
+      return record.channels.includes(channel.id)
+        ? [this.actor(event.pubkey, record.name, true)]
+        : [];
+    });
+    return limit === undefined ? members : members.slice(0, limit);
+  }
+
+  /**
+   * A pubkey's own claim about itself: the directory record that makes it addressable, or
+   * the NIP-01 profile a person publishes. Both carry the handle under the same two keys.
+   *
+   * `undefined` when the relay holds neither, which is the whole of what "never heard of"
+   * can mean here — a pubkey is a well-formed string anyone holding the key can mint, so
+   * there is nothing else about it to be absent.
+   */
+  async describeActor(id: string): Promise<ActorRef | undefined> {
+    const relay = this.relay;
+    if (!relay) throw new Error("BuzzAdapter.start() must be called before describeActor()");
+    let pubkey: string;
+    try {
+      pubkey = toHexPubkey(id);
+    } catch {
+      // Not a pubkey, so it names nobody on this surface — the same finding as a pubkey
+      // the relay holds nothing for, and reported the same way.
+      return undefined;
+    }
+
+    const records = await this.query(relay, {
+      kinds: [DIRECTORY_KIND, BUZZ_DEFAULTS.profileKind],
+      authors: [pubkey],
+    });
+    const directory = records.find((event) => event.kind === DIRECTORY_KIND);
+    const record = directory ?? records.find((event) => event.kind === BUZZ_DEFAULTS.profileKind);
+    if (!record) return undefined;
+    return this.actor(pubkey, directoryRecord(record).name, directory !== undefined);
+  }
+
+  /**
+   * Recent messages in a configured channel — one REQ on the channel tag.
+   *
+   * Not {@link readThread}'s bound, because nothing here was published by this agent and
+   * nothing in it was addressed to it. What bounds it instead is the channel list an
+   * operator configured, so no id a caller computes reaches a channel this agent does not
+   * serve. A Nostr `limit` takes the newest that many, which is the end of the channel a
+   * reader wants; they are then ordered oldest first, the way a person reads it.
+   */
+  async readChannel(channel: ChannelRef, limit?: number): Promise<readonly ThreadReply[]> {
+    const relay = this.relay;
+    if (!relay) throw new Error("BuzzAdapter.start() must be called before readChannel()");
+    this.assertConfigured(channel);
+
+    const events = await this.query(relay, {
+      kinds: [BUZZ_DEFAULTS.kind],
+      [`#${BUZZ_DEFAULTS.channelTag}`]: [channel.id],
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    const replies = this.ordered(events);
+    // From the end, not `slice(-limit)`: a caller that asked for none would get every line
+    // back, because `-0` is not a negative index.
+    return limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit));
+  }
+
+  /** Oldest first, named as core names a line read back off a channel. */
+  private ordered(events: Event[]): ThreadReply[] {
+    return events
+      .sort((a, b) => a.created_at - b.created_at)
+      .map((event) => toThreadReply(event, { pubkey: this.pubkey!, agents: this.agents }));
+  }
+
+  /** A pubkey as core names an actor. Ourselves is always an agent, per `toActorRef`. */
+  private actor(pubkey: string, name: string | undefined, isAgent: boolean): ActorRef {
+    const self = pubkey === this.pubkey;
+    return {
+      surface: SURFACE,
+      id: pubkey,
+      isSelf: self,
+      isAgent: isAgent || self,
+      ...(name ? { name } : {}),
+    };
+  }
+
+  /** The reach every channel-scoped call here has: the channels an operator declared. */
+  private assertConfigured(channel: ChannelRef): void {
+    const configured = this.postTargets().some((target) => target.id === channel.id);
+    if (channel.surface !== SURFACE || !configured) {
+      throw new Error(`Buzz channel ${channel.id} is not configured`);
+    }
+  }
+
+  /**
+   * One REQ on the socket this adapter already holds, ended by the relay's own EOSE.
+   *
+   * EOSE is what makes every read here an answer rather than a guess — see
+   * {@link READ_TIMEOUT_MS}. Written once because a second copy would be a second place
+   * for a silent relay to be mistaken for an empty channel.
+   */
+  private query(relay: Relay, filter: Filter): Promise<Event[]> {
     const events: Event[] = [];
-    await new Promise<void>((resolve, reject) => {
+    return new Promise<Event[]>((resolve, reject) => {
       // `sub.close()` fires `onclose` synchronously, so every path here settles first and
       // closes second — without the guard, finishing normally rejects on its own cleanup.
       let settled = false;
@@ -355,37 +502,32 @@ export class BuzzAdapter implements SurfaceAdapter {
         clearTimeout(timer);
         sub.close();
         if (error) reject(error);
-        else resolve();
+        else resolve(events);
       };
       const timer = setTimeout(
         () =>
           done(
             new Error(
-              `the relay did not finish answering within ${THREAD_READ_TIMEOUT_MS}ms, so what ` +
-                "came back is not the whole thread",
+              `the relay did not finish answering within ${READ_TIMEOUT_MS}ms, so what came ` +
+                "back is not the whole answer",
             ),
           ),
-        THREAD_READ_TIMEOUT_MS,
+        READ_TIMEOUT_MS,
       );
       const sub = relay.subscribe([filter], {
         // nostr-tools fires `oneose` on a timer of its own when the relay sends no EOSE
         // (`baseEoseTimeout`, 4.4s), which would hand back a silent relay's empty answer as
         // though the relay had said there was nothing. Pushed out past this read's own
         // clock so the only EOSE that resolves it is one the relay actually sent.
-        eoseTimeout: THREAD_READ_TIMEOUT_MS * 2,
+        eoseTimeout: READ_TIMEOUT_MS * 2,
         onevent: (event: Event) => void events.push(event),
         oneose: () => done(),
         // The relay's own refusal — `auth-required` on a socket that lost its
         // authentication is the one that actually happens. Never a partial answer passed
         // off as a whole one.
-        onclose: (reason: string) => done(new Error(`the relay closed the thread read: ${reason}`)),
+        onclose: (reason: string) => done(new Error(`the relay closed the read: ${reason}`)),
       });
     });
-
-    const replies = events
-      .sort((a, b) => a.created_at - b.created_at)
-      .map((event) => toThreadReply(event, { pubkey: this.pubkey!, agents: this.agents }));
-    return limit === undefined ? replies : replies.slice(0, limit);
   }
 
   /**
@@ -460,19 +602,29 @@ export class BuzzAdapter implements SurfaceAdapter {
 const DIRECTORY_NAME = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,31}$/u;
 
 /**
- * The name a directory record carries, as clients show it: `display_name` over `name`,
- * and only one that is a handle. Unreadable content is a record without a name, not a
- * record that does not exist.
+ * What a record says about its author: the name clients show — `display_name` over `name`,
+ * and only one that is a handle — and the channels it answers in.
+ *
+ * Both keys are read the same way out of a kind-10100 directory record and a NIP-01
+ * kind-0 profile, which is why {@link BuzzAdapter.describeActor} can fall back to the
+ * second for a person, who publishes no first. Only a directory record carries
+ * `channel_ids`; unreadable content is a record that says nothing, not one that is absent.
  */
-function directoryName(event: Event): string | undefined {
+function directoryRecord(event: Event): { name?: string; channels: readonly string[] } {
   try {
     const parsed: unknown = JSON.parse(event.content);
-    if (!parsed || typeof parsed !== "object") return undefined;
-    const { display_name: display, name } = parsed as Record<string, unknown>;
-    return [display, name].find(
-      (value): value is string => typeof value === "string" && DIRECTORY_NAME.test(value),
-    );
+    if (!parsed || typeof parsed !== "object") return { channels: [] };
+    const record = parsed as Record<string, unknown>;
+    const { display_name: display, name, channel_ids: channels } = record;
+    return {
+      name: [display, name].find(
+        (value): value is string => typeof value === "string" && DIRECTORY_NAME.test(value),
+      ),
+      channels: Array.isArray(channels)
+        ? channels.filter((id): id is string => typeof id === "string")
+        : [],
+    };
   } catch {
-    return undefined;
+    return { channels: [] };
   }
 }

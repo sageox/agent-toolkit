@@ -121,7 +121,7 @@ Use the relevant command, then rerun doctor:
 ./bin/sageox-agent memory add local --agent <agent-name>
 ./bin/sageox-agent memory add private --owner <org-npub-or-hex> --agent <agent-name>
 ./bin/sageox-agent memory add shared --with <agents> --agent <agent-name>
-./bin/sageox-agent mcp add <github|surface-egress> --agent <agent-name>
+./bin/sageox-agent mcp add <github|surface-egress|surface-read> --agent <agent-name>
 ./bin/sageox-agent repos add <https-url> --agent <agent-name>
 ```
 

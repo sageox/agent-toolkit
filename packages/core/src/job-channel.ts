@@ -1,11 +1,12 @@
 import { z } from "zod";
-import type { JobPoster, JobReader } from "./job-host.ts";
+import type { JobMembers, JobPoster, JobReader } from "./job-host.ts";
 import type { JobConfig } from "./manifest.ts";
 import { mcpToolServer, serveMcp, type HostedMcp, type McpHandler } from "./mcp-http.ts";
 
 export const JOB_CHANNEL_SERVER = "job-channel";
 const POST_MESSAGE = "post_message";
 const THREAD_READ = "thread_read";
+const CHANNEL_MEMBERS = "channel_members";
 
 /**
  * The most replies one read hands back, whatever the caller asked for.
@@ -28,6 +29,17 @@ const MAX_REPLIES = 500;
  */
 const MAX_MENTIONS = 64;
 
+/**
+ * The most members one roll call reads back, whatever the body asked for.
+ *
+ * Above {@link MAX_MENTIONS} rather than matching it, because the roster is the room and
+ * the mentions are who was spoken to — a probe reads this to find out that somebody it
+ * never addressed was there all along. Bounded at all because Slack charges one lookup per
+ * member for the name, so an unbounded read of a busy channel is a burst against the
+ * workspace's rate limit.
+ */
+const MAX_MEMBERS = 200;
+
 export interface JobChannelOptions {
   /** The one channel this run may speak into — the job's own declared destination. */
   report: NonNullable<JobConfig["report"]>;
@@ -38,6 +50,13 @@ export interface JobChannelOptions {
    * `thread_read` says so rather than answering with an empty thread.
    */
   read?: JobReader;
+  /**
+   * How the report channel's membership is read. Unset means no surface in this process
+   * can, and `channel_members` says so rather than answering with an empty roster — the
+   * failure it exists to find is a channel nobody joined, which is what an empty roster
+   * looks like.
+   */
+  members?: JobMembers;
 }
 
 /**
@@ -61,6 +80,10 @@ export interface JobChannelOptions {
  * - `thread_read` reads only a root **this run** posted. The set is built from what this
  *   server handed back, so a body cannot name an id it read somewhere and pull back
  *   channel history it was never party to.
+ * - `channel_members` reads the one channel `jobs[].report` names, and takes no argument
+ *   that could name another. It is what lets a probe *diagnose* the silence it just found
+ *   rather than only report it: an agent that did not answer a roll call is slow, or was
+ *   never in the room, and only the roster tells those apart.
  *
  * It is not the gateway's tool surface and must not become one. The brain's servers live
  * as long as the process; this one is opened before the body is spawned, closed when it
@@ -76,7 +99,7 @@ export interface JobChannelOptions {
  * that an LLM composed the tally wrong.
  */
 export function jobChannelHandler(opts: JobChannelOptions): McpHandler {
-  const { report, post, read } = opts;
+  const { report, post, read, members } = opts;
   /**
    * Native ids this run rooted, which is the whole of what it may read.
    *
@@ -98,7 +121,11 @@ export function jobChannelHandler(opts: JobChannelOptions): McpHandler {
     // undeclared argument is written as its shape, so a list of recipients lands as
     // `<array 12>`. The count is the number that answers "did this roll call address
     // anybody", and it stays one bounded field however long the roster gets.
-    audit: { [POST_MESSAGE]: ["threadRoot"], [THREAD_READ]: ["root", "limit"] },
+    audit: {
+      [POST_MESSAGE]: ["threadRoot"],
+      [THREAD_READ]: ["root", "limit"],
+      [CHANNEL_MEMBERS]: ["limit"],
+    },
     call: async (tool, args) => {
       if (tool === POST_MESSAGE) {
         const { text, threadRoot, mentions } = PostArgs.parse(args);
@@ -116,6 +143,21 @@ export function jobChannelHandler(opts: JobChannelOptions): McpHandler {
         // that was never a root. It is the same distinction `post` itself draws.
         if (ref) rooted.add(ref.nativeId);
         return JSON.stringify({ posted: true, threadRoot: ref?.nativeId ?? null });
+      }
+      if (tool === CHANNEL_MEMBERS) {
+        const { limit } = MembersArgs.parse(args);
+        if (!members) {
+          // Never `{"members":[]}`, for `thread_read`'s reason and one sharper: an empty
+          // roster is a real finding here — it is the channel nobody joined, which is the
+          // most common way an agent comes up healthy and is never spoken to.
+          throw new Error(
+            `nothing here can read the membership of a ${report.surface} channel, so this ` +
+              "run cannot find out who was in it",
+          );
+        }
+        return JSON.stringify({
+          members: await members(report, Math.min(limit ?? MAX_MEMBERS, MAX_MEMBERS)),
+        });
       }
       if (tool !== THREAD_READ) throw new Error(`unknown tool ${tool}`);
 
@@ -165,6 +207,9 @@ const ReadArgs = z.object({
   root: z.string().min(1),
   limit: z.number().int().min(1).optional(),
 });
+
+/** No channel argument: the destination is the job's own, as it is for `post_message`. */
+const MembersArgs = z.object({ limit: z.number().int().min(1).optional() });
 
 function tools(report: NonNullable<JobConfig["report"]>): unknown[] {
   const where = `${report.surface}:${report.channel}`;
@@ -223,6 +268,26 @@ function tools(report: NonNullable<JobConfig["report"]>): unknown[] {
           },
         },
         required: ["root"],
+      },
+    },
+    {
+      name: CHANNEL_MEMBERS,
+      description:
+        `Read who is in ${where}, this job's own report channel — the only channel this ` +
+        "tool reads, so it takes no destination. Answers `{members}`, each " +
+        "`{surface, id, isSelf, isAgent, name?}`. Use it to tell an agent that answered " +
+        "slowly from one that was never in the channel to be asked: an empty `members` " +
+        "means the channel is empty, and a surface that cannot say so is refused instead.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_MEMBERS,
+            description: `At most this many members. Capped at ${MAX_MEMBERS}.`,
+          },
+        },
       },
     },
   ];

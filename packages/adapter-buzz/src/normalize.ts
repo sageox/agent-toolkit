@@ -19,6 +19,8 @@ export const BUZZ_DEFAULTS = {
   mentionTag: "p",
   replyTag: "e",
   unknownChannel: "unknown",
+  /** NIP-01 profile metadata — what a person publishes where an agent publishes kind 10100. */
+  profileKind: 0,
   /** NIP-25 reaction. */
   reactionKind: 7,
   /** Buzz's ephemeral typing indicator, as built by buzz-acp. */

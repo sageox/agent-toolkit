@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An agent can read the surface it is already on.** `SurfaceAdapter` could post, react
+  and — since v0.1.0 — read back a thread it rooted, and could not answer the three
+  questions every agent eventually gets asked about its own surface: which channels am I
+  in, who else is in this one, who is this id. An agent that needed any of them had to be
+  handed a second client for the surface it was already connected to, with a second copy of
+  the credential. Four optional adapter methods now answer them — `listChannels`,
+  `listMembers`, `describeActor`, `readChannel` — over calls both adapters were already
+  making internally, and the credential stays in the gateway. **`listChannels` is what the
+  *surface* says**, not what was configured, which is the point of it: a channel in
+  `agent.yaml` that nobody invited the bot to, or a Buzz directory record that omits one, is
+  an agent that connects, authenticates, subscribes and is never spoken to, with no error on
+  either side. **Empty and cannot-answer never collapse** — a surface that cannot make a read
+  refuses it by name, because zero members and no membership read look identical to anything
+  handed `[]` for both.
+
+  The brain reaches them through a new built-in `surface-read` server, four tools
+  allowlisted separately (`sageox-agent mcp add surface-read`), each capped, and every one
+  but `list_channels` bounded to the channels an operator configured — the resolution a post
+  already uses, so no id the brain computes reaches a conversation the agent does not serve.
+  Nothing on it publishes, so nothing on it is egress; what comes back is other people's
+  text and is untrusted exactly as an inbound message is. A probing job body gets the one
+  read it was missing on its own per-run channel: `channel_members` takes no destination at
+  all, and is what lets a roll call say whether an agent that did not answer was slow or was
+  never in the room.
+
 - **The job body contract says what a body finds on disk.** A body never writes
   `workspace/` — the repository checkouts and the `ox` index there are built by
   `sageox-agent run`, in its own process, so what a body finds there depends on where it is

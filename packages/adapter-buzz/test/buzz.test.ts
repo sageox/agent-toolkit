@@ -1005,7 +1005,125 @@ describe("BuzzAdapter reads back a thread it rooted", () => {
     // EOSE is what makes zero replies an answer. Without it, "nobody has replied yet" and
     // "the relay stopped talking to us" are the same silence, and a probe must not read one
     // as the other.
-    await expect(a.readThread!(root)).rejects.toThrow(/not the whole thread/);
+    await expect(a.readThread!(root)).rejects.toThrow(/not the whole answer/);
     await a.stop();
   }, 10_000);
+});
+
+describe("BuzzAdapter reads the surface it is on", () => {
+  /** A person's NIP-01 metadata — what a pubkey with no directory record still has. */
+  const profile = (sk: Uint8Array, name: string, at = now - 86400) =>
+    finalizeEvent(
+      { kind: BUZZ_DEFAULTS.profileKind, created_at: at, tags: [], content: JSON.stringify({ name }) },
+      sk,
+    );
+
+  /** A directory record naming exactly `channels`, so an agent can be listed out of one. */
+  const registeredIn = (sk: Uint8Array, name: string, channels: string[], at = now - 86400) =>
+    finalizeEvent(
+      {
+        kind: DIRECTORY_KIND,
+        created_at: at,
+        tags: [],
+        content: JSON.stringify({ name, channel_ids: channels, respond_to: "anyone" }),
+      },
+      sk,
+    );
+
+  it("lists only the configured channels its own directory record covers", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter({
+      channels: [
+        { id: "hive", reply: "private" },
+        { id: "lobby", reply: "public" },
+      ],
+    });
+    await a.start();
+    // Registered in hive and not in lobby. Subscribing to lobby is not being in it: a
+    // client gates its mention picker on the record, so nobody there can address this
+    // agent — and nothing on either side reports an error about it.
+    relay.backlog.push(registeredIn(agentSk, "ida", ["hive"]));
+
+    expect((await a.listChannels!()).map((channel) => channel.id)).toEqual(["hive"]);
+    // The configured list still names both, which is what makes the gap readable.
+    expect(a.postTargets!().map((channel) => channel.id)).toEqual(["hive", "lobby"]);
+    await a.stop();
+  });
+
+  it("names the agents whose records list the channel, and nobody else", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    const siblingSk = generateSecretKey();
+    const elsewhereSk = generateSecretKey();
+    relay.backlog.push(registeredIn(siblingSk, "ida", ["hive"]));
+    relay.backlog.push(registeredIn(elsewhereSk, "otto", ["ops"]));
+    // A person who talks in hive has no record, so no client offers their mention there
+    // either — the roster is who a post would have woken.
+    relay.backlog.push(inChannel("hive", "hello"));
+
+    const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false });
+    expect(members.map((member) => member.name)).toEqual(["ida"]);
+    expect(members[0].id).toBe(getPublicKey(siblingSk));
+    expect(members[0].isAgent).toBe(true);
+    await a.stop();
+  });
+
+  it("refuses a membership read of a channel it is not configured for", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+
+    await expect(
+      a.listMembers!({ surface: "buzz", id: "ops", isPublic: true }),
+    ).rejects.toThrow(/ops is not configured/);
+    await a.stop();
+  });
+
+  it("describes an agent from its directory record and a person from their profile", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    const siblingSk = generateSecretKey();
+    relay.backlog.push(registeredIn(siblingSk, "ida", ["hive"]));
+    relay.backlog.push(profile(userSk, "alice"));
+
+    const sibling = await a.describeActor!(getPublicKey(siblingSk));
+    expect(sibling).toMatchObject({ name: "ida", isAgent: true, isSelf: false });
+    // A person publishes no directory record, so without the kind-0 fallback the one
+    // question this tool exists for — put a name to this id — has no answer for a human.
+    const person = await a.describeActor!(getPublicKey(userSk));
+    expect(person).toMatchObject({ name: "alice", isAgent: false });
+    await a.stop();
+  });
+
+  it("answers nothing for a pubkey the relay holds no record of", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+
+    expect(await a.describeActor!(getPublicKey(generateSecretKey()))).toBeUndefined();
+    // Not a pubkey at all names nobody here either, and reports it the same way.
+    expect(await a.describeActor!("alice")).toBeUndefined();
+    await a.stop();
+  });
+
+  it("reads a channel oldest first and asks the relay for only the newest few", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    relay.backlog.push(inChannel("hive", "second", now + 20));
+    relay.backlog.push(inChannel("hive", "first", now + 10));
+    relay.backlog.push(inChannel("ops", "elsewhere", now + 30));
+
+    const messages = await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false });
+    expect(messages.map((message) => message.text)).toEqual(["first", "second"]);
+
+    expect((await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false }, 1))
+      .map((message) => message.text)).toEqual(["second"]);
+    // Asked for on the wire too: a relay that honours it sends one event rather than the
+    // channel's whole stored history for this to throw away.
+    expect(relay.reqs.at(-1)!.filters[0].limit).toBe(1);
+    await a.stop();
+  });
 });

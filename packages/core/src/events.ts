@@ -30,6 +30,15 @@ export interface ActorRef {
   isSelf: boolean;
   /** Another autonomous agent — subject to the chain-depth cap. */
   isAgent: boolean;
+  /**
+   * The name people use for this id, when the surface was asked and put one to it.
+   *
+   * Presentation only, and absent on the author of a message: nothing on the inbound path
+   * looks a name up, and `SurfaceAdapter.displayName` is how one is rendered there. Filled
+   * by the reads that do ask — `listMembers` and `describeActor` — because a roster of
+   * bare ids answers nobody's question about who is in a channel.
+   */
+  name?: string;
 }
 
 export interface InboundEvent {
