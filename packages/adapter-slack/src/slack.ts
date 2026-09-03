@@ -604,9 +604,10 @@ export class SlackAdapter implements SurfaceAdapter {
       // and the shape of the channel is not the caller's to change. What the caller can do
       // is not report this as the channel being quiet.
       throw new Error(
-        `read ${MAX_HISTORY_PAGES * HISTORY_PAGE} records of ${channel.id} and found ` +
-          `${readable} of the ${limit} messages asked for, with more history still to ` +
-          "page — this is a read that gave up, not a channel with that little in it",
+        `read ${messages.length} records of ${channel.id} across ${MAX_HISTORY_PAGES} ` +
+          `pages and found ${readable} of the ${limit} messages asked for, with more ` +
+          "history still to page — this is a read that gave up, not a channel with that " +
+          "little in it",
       );
     }
 

@@ -1689,7 +1689,9 @@ describe("SlackAdapter reads the surface it is on", () => {
     // What is true is that this read stopped looking, and the two must not arrive alike.
     await expect(
       instance.readChannel!({ surface: "slack", id: "GENG", isPublic: false }, 5),
-    ).rejects.toThrow(/read 1000 records of GENG and found 0 of the 5 messages asked for/);
+      // The count is what it actually read, not the ceiling it was allowed to: this fake
+      // answers one record per page, so a message naming 1000 would be off by 200x.
+    ).rejects.toThrow(/read 5 records of GENG across 5 pages and found 0 of the 5 messages/);
     expect(api.historyCalls).toHaveLength(5);
   });
 
