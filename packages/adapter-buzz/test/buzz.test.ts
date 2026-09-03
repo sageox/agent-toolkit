@@ -1135,6 +1135,37 @@ describe("BuzzAdapter reads the surface it is on", () => {
     await a.stop();
   });
 
+  it("breaks a same-second tie on the event id, not on which arrived first", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter({
+      channels: [
+        { id: "hive", reply: "private" },
+        { id: "lobby", reply: "public" },
+      ],
+    });
+    await a.start();
+
+    // `created_at` is seconds, so one author republishing twice inside a second ties. NIP-01
+    // settles it on the lowest id, and without that rule the winner is whichever the relay
+    // happened to send first — the nondeterminism `newestPerAuthor` exists to remove.
+    const at = now - 60;
+    const both = [
+      registeredIn(agentSk, "ida", ["hive"], at),
+      registeredIn(agentSk, "ida", ["hive", "lobby"], at),
+    ];
+    const lowest = both.reduce((a, b) => (a.id < b.id ? a : b));
+    const expected = JSON.parse(lowest.content).channel_ids as string[];
+
+    // Pushed newest-id-first, so arrival order and the id rule disagree whenever the
+    // lower id is the second one.
+    for (const record of [...both].sort((x, y) => (x.id < y.id ? 1 : -1))) {
+      relay.backlog.push(record);
+    }
+
+    expect((await a.listChannels!()).map((channel) => channel.id)).toEqual(expected);
+    await a.stop();
+  });
+
   it("reads a channel oldest first and asks the relay for only the newest few", async () => {
     relay = await FakeRelay.start();
     const a = newAdapter();

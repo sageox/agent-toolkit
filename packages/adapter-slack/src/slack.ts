@@ -150,11 +150,12 @@ function parseSlackReactionId(nativeId: string): { name: string; message: string
 }
 
 /**
- * The most `conversations.history` pages one channel read walks.
+ * The most `conversations.history` pages one channel read walks before giving up.
  *
  * A read pages on only while it is short of readable messages, so this bounds the case
  * where it never gets there: a channel whose recent history is all join notices would
- * otherwise be walked to its first day to answer a question about its last hour.
+ * otherwise be walked to its first day to answer a question about its last hour. Reaching
+ * it is a refusal and not a short answer — see {@link SlackAdapter.readChannel}.
  */
 const MAX_HISTORY_PAGES = 5;
 
@@ -545,8 +546,13 @@ export class SlackAdapter implements SurfaceAdapter {
    * size, and `toSlackInboundEvent` drops every one of them — so a page sized at the
    * caller's limit can normalize to fewer, or to none, with the messages somebody actually
    * wrote sitting one page further back. That is silent: the answer is a short history,
-   * not an error. `MAX_HISTORY_PAGES` is what stops a channel that is nothing but notices
-   * from walking back to its first day.
+   * not an error.
+   *
+   * `MAX_HISTORY_PAGES` stops a channel that is nothing but notices from being walked back
+   * to its first day, and **running into it throws** rather than answering short. Slack is
+   * still offering a cursor at that point, so a short answer here would be the same
+   * collapse this whole server refuses everywhere else: "the channel holds this much" and
+   * "I stopped looking" are different findings, and only one of them is about the channel.
    *
    * Thread replies are not in it — `conversations.history` returns parents only, the same
    * Slack fact `backfill` works around — and that is the right answer for a channel read.
@@ -559,14 +565,28 @@ export class SlackAdapter implements SurfaceAdapter {
     const messages: SlackMessage[] = [];
     let readable = 0;
     let cursor: string | undefined;
-    for (let page = 0; page < MAX_HISTORY_PAGES; page++) {
+    let exhausted = false;
+    for (let page = 0; ; page++) {
       const answered = await this.api.history({ channel: channel.id, oldest: "0", limit, cursor });
       for (const message of answered.messages ?? []) {
         messages.push(message);
         if (this.toChannelLine(message, channel.id)) readable += 1;
       }
       cursor = answered.nextCursor || undefined;
+      // No cursor is the channel's own end, and it is the only short answer that is an
+      // answer. `limit` unset asks for one page, per this method's contract.
       if (!cursor || limit === undefined || readable >= limit) break;
+      if (page + 1 >= MAX_HISTORY_PAGES) {
+        exhausted = true;
+        break;
+      }
+    }
+    if (exhausted) {
+      throw new Error(
+        `read ${MAX_HISTORY_PAGES} pages of ${channel.id} and found ${readable} of the ` +
+          `${limit} messages asked for, with more history still to page — ask for fewer, ` +
+          "rather than reading this as all the channel holds",
+      );
     }
 
     // Sorted on the Slack `ts` rather than the ISO string it becomes, per `readThread`.

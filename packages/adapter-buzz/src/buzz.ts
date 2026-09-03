@@ -611,15 +611,26 @@ const DIRECTORY_NAME = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,31}$/u;
  * agent has since left, and these reads exist to be trusted about exactly that. Keyed on
  * the kind as well as the author, or `describeActor` — which asks for both kinds at once —
  * would keep one record and drop the other.
+ *
+ * `created_at` is seconds, so two records from one author can tie, and a tie broken by
+ * arrival order is not a decision — it is whichever the relay happened to send first, which
+ * is the nondeterminism this function exists to remove. NIP-01 settles it: on equal
+ * timestamps the **lowest id in lexical order** is the one retained.
  */
 function newestPerAuthor(events: Event[]): Event[] {
   const current = new Map<string, Event>();
   for (const event of events) {
     const key = `${event.pubkey}:${event.kind}`;
     const held = current.get(key);
-    if (!held || held.created_at < event.created_at) current.set(key, event);
+    if (!held || supersedes(event, held)) current.set(key, event);
   }
   return [...current.values()];
+}
+
+/** NIP-01's replaceable-event rule: later wins, and on a tie the lower id does. */
+function supersedes(event: Event, held: Event): boolean {
+  if (event.created_at !== held.created_at) return held.created_at < event.created_at;
+  return event.id < held.id;
 }
 
 /**

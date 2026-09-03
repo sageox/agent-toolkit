@@ -1666,11 +1666,11 @@ describe("SlackAdapter reads the surface it is on", () => {
     ]);
   });
 
-  it("stops walking a channel that is nothing but notices", async () => {
+  it("refuses rather than answering short when the page bound is reached", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});
-    // Never satisfied, so only the page bound ends it — without one this asks Slack for the
-    // channel's whole history to answer a question about its last hour.
+    // Never satisfied, and Slack keeps offering a cursor — so the walk is bounded, and
+    // stopping is not an answer about the channel.
     api.history = async (args) => {
       api.historyCalls.push(args);
       return {
@@ -1681,9 +1681,28 @@ describe("SlackAdapter reads the surface it is on", () => {
       };
     };
 
-    expect(
-      await instance.readChannel!({ surface: "slack", id: "GENG", isPublic: false }, 5),
-    ).toEqual([]);
+    // `[]` here would say "the channel holds nothing", which is a claim about the channel.
+    // What is true is that this read stopped looking, and the two must not arrive alike.
+    await expect(
+      instance.readChannel!({ surface: "slack", id: "GENG", isPublic: false }, 5),
+    ).rejects.toThrow(/found 0 of the 5 messages asked for, with more history still to page/);
     expect(api.historyCalls).toHaveLength(5);
+  });
+
+  it("answers short without complaint when the channel itself has run out", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    // No cursor: this is the channel's own end, which is the one short answer that is an
+    // answer — and it must not be confused with having given up.
+    api.histories = [
+      { messages: [{ type: "message", user: "U0ALICE", text: "only one", ts: "1786761001.000000" }] },
+    ];
+
+    const messages = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      5,
+    );
+    expect(messages.map((message) => message.text)).toEqual(["only one"]);
+    expect(api.historyCalls).toHaveLength(1);
   });
 });
