@@ -10,6 +10,7 @@ import type {
 } from "./events.ts";
 import type { AgentManifest } from "./manifest.ts";
 import { evaluateEgress, type GuardVerdict } from "./guard.ts";
+import { Links, type Link } from "./links.ts";
 import {
   mcpToolServer,
   serveMcp,
@@ -42,9 +43,14 @@ export interface SurfaceEgressTools {
   react: boolean;
 }
 
-/** One in-flight turn, as the reaction path needs it. */
+/** One in-flight turn, as the reaction and addressing paths need it. */
 interface LiveTurn {
   event: InboundEvent;
+  /**
+   * Whether this turn has already addressed someone. One admitted inbound message wakes
+   * at most one principal, which is what bounds paging without a counter of its own.
+   */
+  addressed: boolean;
   /**
    * Reactions the brain put on the message, by the ref the surface answered with.
    *
@@ -107,6 +113,8 @@ export class SurfaceEgress {
    * know is that it is mid-turn, and the gateway knows which message that turn is for.
    */
   private answering = new Map<string, LiveTurn>();
+  /** Posts made on a conversation's behalf, and where their answers go. See `links.ts`. */
+  private links = new Links();
 
   constructor(private opts: SurfaceEgressOptions) {
     for (const adapter of opts.adapters) this.byKind.set(adapter.kind, adapter);
@@ -145,7 +153,7 @@ export class SurfaceEgress {
    */
   answers(event: InboundEvent): LiveTurnHandle {
     const key = `${event.surface}:${event.channel.id}`;
-    const turn: LiveTurn = { event, claimed: new Set(), reacting: new Map() };
+    const turn: LiveTurn = { event, addressed: false, claimed: new Set(), reacting: new Map() };
     this.answering.set(key, turn);
     return {
       claimed: turn.claimed,
@@ -173,8 +181,128 @@ export class SurfaceEgress {
    * says during the turn reaches it.
    */
   asking(): ActorRef | null {
+    return this.answeringEvent()?.author ?? null;
+  }
+
+  /**
+   * The message this agent is answering, when exactly one turn is live — the same rule as
+   * {@link asking}, for a caller that will answer it after the turn is over.
+   */
+  answeringEvent(): InboundEvent | null {
+    return this.liveTurn()?.event ?? null;
+  }
+
+  /**
+   * The one turn in flight, or `null` when there is none or more than one.
+   *
+   * A channel runs its turns one at a time, so a single live turn is exact; two at once
+   * cannot say which one a tool call belongs to, and ambiguity is refused rather than
+   * guessed at by every caller here.
+   */
+  private liveTurn(): LiveTurn | null {
     const live = [...this.answering.values()];
-    return live.length === 1 ? live[0].event.author : null;
+    return live.length === 1 ? live[0] : null;
+  }
+
+  /**
+   * Everyone this agent may address by name on `surface`: the principals the manifest
+   * names, and whoever the surface itself can vouch for.
+   *
+   * A manifest id carries no surface — `owner` is "one id per surface for the same
+   * person" — so it is offered on every surface, and the adapter's own validation refuses
+   * the shape that does not belong there. A surface's roster is that surface's alone.
+   */
+  principals(surface: string): Principal[] {
+    const { owner = [], allowlist = [] } = this.opts.manifest;
+    const named = [...owner, ...allowlist].map((id) => ({ surface, id }));
+    const roster = this.byKind.get(surface)?.principals?.() ?? new Map();
+    return [...named, ...[...roster].map(([id, name]) => ({ surface, id, name }))];
+  }
+
+  /**
+   * A top-level post on behalf of the live turn, addressed to one principal so they wake.
+   *
+   * The brain supplies who and what; the same resolution rule as `post` applies to who —
+   * an id the manifest or the surface already knows, or a name that maps to exactly one —
+   * and the adapter renders the address as its own primitive. Bound to the live turn for
+   * the termination proof: one admitted message can wake one principal, and a call with no
+   * turn behind it (a prompt still running after its timeout) can wake nobody.
+   */
+  async address(
+    surface: string,
+    channelId: string,
+    msg: GuardedMessage,
+    wanted: string,
+  ): Promise<EventRef | undefined> {
+    const turn = this.liveTurn();
+    if (!turn) {
+      throw new Error(
+        "there is no single conversation mid-turn to address someone on behalf of, so " +
+          "nobody can be woken",
+      );
+    }
+    if (turn.addressed) {
+      throw new Error("this turn has already addressed someone; one message wakes one principal");
+    }
+    const principal = resolvePrincipal(this.principals(surface), wanted);
+    if (!principal) {
+      throw new Error(
+        "the mention names nobody this agent may address on that surface — an owner, an " +
+          "allowlisted id, or an agent the surface lists — or a name shared by more than one",
+      );
+    }
+
+    const ref = await this.post(surface, channelId, msg, undefined, [principal.id]);
+    turn.addressed = true;
+    // The resolved id, on its own line: the tool audit records what the brain asked for,
+    // which may be a name, and the post line records how many were addressed.
+    console.info(`addressed surface=${surface} channel=${channelId} principal=${principal.id}`);
+    // Whatever the principal answers under this post comes home to the turn that asked. A
+    // surface that named no id has nothing a reply could be under, so nothing is opened.
+    if (ref) this.links.open(ref, turn.event, principal.id);
+    return ref;
+  }
+
+  /** The link an inbound event answers, if it is one — see {@link Links.claim}. */
+  claimLink(event: InboundEvent): Link | undefined {
+    return this.links.claim(event);
+  }
+
+  /**
+   * Brings an answer home: the addressed principal's line, attributed, into the
+   * conversation that asked for it.
+   *
+   * Deterministic — no brain reads it, and the text is the reply verbatim under a label the
+   * gateway wrote. It leaves as this agent's own message through the same guarded path a
+   * reply takes: public consent and the leak scan on the *home* channel, and the adapter's
+   * own escaping, so a mention inside the relayed text addresses nobody. Being the agent's
+   * own, it can never wake the agent. Never throws: a relay that fails is a log line, and
+   * whatever turn the same event may start is not its business.
+   */
+  async relayHome(link: Link, event: InboundEvent): Promise<void> {
+    const { home } = link;
+    const from = `${event.surface}:${event.channel.id}`;
+    const at = `${home.surface}:${home.channel.id}`;
+    const source = this.byKind.get(event.surface);
+    const who = source?.displayName?.(event.author.id) ?? event.author.id;
+    const channel =
+      source?.postTargets?.().find((target) => target.id === event.channel.id)?.name ??
+      event.channel.id;
+    const text = `${who} (${event.surface} · ${channel}): ${event.text}`;
+    try {
+      const verdict = await this.replyTo(home, { text });
+      if (!verdict.ok) {
+        console.warn(
+          `relay from=${from} home=${at} result=refused rule=${verdict.rule} ` +
+            `reason="${verdict.reason}"`,
+        );
+        return;
+      }
+      console.info(`relay from=${from} home=${at} result=sent`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "unknown";
+      console.warn(`relay from=${from} home=${at} result=failed reason="${reason}"`);
+    }
   }
 
   /**
@@ -266,6 +394,13 @@ export class SurfaceEgress {
     if (!verdict.ok) return verdict;
     await adapter.send(event.channel, msg, event);
     return verdict;
+  }
+
+  /** {@link reply}, for a caller that holds the event and not the adapter it came through. */
+  async replyTo(event: InboundEvent, msg: GuardedMessage): Promise<GuardVerdict> {
+    const adapter = this.byKind.get(event.surface);
+    if (!adapter) throw new Error(`no ${event.surface} surface to reply on`);
+    return this.reply(adapter, event, msg);
   }
 
   /**
@@ -378,10 +513,42 @@ export function resolveTarget(
   return named.length === 1 ? named[0] : undefined;
 }
 
+/** Someone this agent may address: an id on a surface, and the name people use for it. */
+export interface Principal {
+  surface: string;
+  id: string;
+  name?: string;
+}
+
+/**
+ * The principal a request names, by id or by display name — `resolveTarget`'s rule.
+ *
+ * Ids win over names so a name that collides with someone's id cannot redirect a page, and
+ * an ambiguous name resolves to nothing: waking the wrong one of two agents called "ida"
+ * is exactly the mistake worth failing on.
+ */
+export function resolvePrincipal(
+  principals: readonly Principal[],
+  wanted: string,
+): Principal | undefined {
+  const byId = principals.find((principal) => principal.id === wanted);
+  if (byId) return byId;
+
+  const fold = (value: string) => value.trim().toLowerCase();
+  const named = principals.filter((p) => p.name && fold(p.name) === fold(wanted));
+  return named.length === 1 ? named[0] : undefined;
+}
+
 const PostArgs = z.object({
   surface: z.string().min(1),
   channel: z.string().min(1),
   text: z.string().min(1),
+  /**
+   * One principal, never a list: a message wakes one person or agent (design spec §8, a
+   * handoff names at most one downstream agent). A roll call that addresses a roster is a
+   * job's capability, with its own bound, and stays `mentions` on the job channel.
+   */
+  mention: z.string().min(1).optional(),
 });
 
 /**
@@ -403,6 +570,14 @@ function postTool(egress: SurfaceEgress) {
     .targets()
     .map((target) => `${target.surface}:${target.id}${target.name ? ` (${target.name})` : ""}`)
     .join(", ");
+  // Only the ones a surface can put a name to. A manifest id is listed by nobody here: the
+  // brain reads it off the `from …` line of the message it is answering, which is the
+  // case that matters — the person asking to be reached.
+  const addressable = [...new Set(egress.targets().map((target) => target.surface))]
+    .flatMap((surface) => egress.principals(surface))
+    .filter((principal) => principal.name)
+    .map((principal) => `${principal.surface}:${principal.id} (${principal.name})`)
+    .join(", ");
   return {
     name: POST_MESSAGE,
     description:
@@ -410,7 +585,10 @@ function postTool(egress: SurfaceEgress) {
       "only when the user explicitly asks you to post or relay something there. Your normal " +
       "response is already sent back to the conversation that invoked you, so never use this " +
       "tool for an ordinary reply — including when the target is the channel you are already " +
-      `answering in. Configured targets: ${targets || "none"}.`,
+      `answering in. Configured targets: ${targets || "none"}. ` +
+      "A post wakes nobody unless `mention` names one person or agent; use it only when the " +
+      "asker wants that principal reached. Besides the ids on the `from` line of messages " +
+      `you answer, you may address: ${addressable || "no one by name"}.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -420,6 +598,12 @@ function postTool(egress: SurfaceEgress) {
           description: "Configured target channel — its id, or the name shown beside it",
         },
         text: { type: "string", description: "Exact message to post" },
+        mention: {
+          type: "string",
+          description:
+            "One principal to wake with this post — their id as it appears on a `from` " +
+            "line, or a name listed above. Omit it for a post that wakes nobody.",
+        },
       },
       required: ["surface", "channel", "text"],
     },
@@ -461,6 +645,11 @@ export function surfaceEgressHandler(
     // Where it posted, never what it said: the destination is the accountability question
     // and `text` is a message the guard has already ruled on. See `tool-audit.ts`.
     //
+    // `mention` is undeclared for the reason `emoji` is below: it is a string the brain
+    // chose, and a refused call is audited as readily as an allowed one, so declaring it
+    // would put whatever a turn was talked into passing on this line. Whom a post actually
+    // woke is the resolved id on the `addressed …` line, which only an allowed call writes.
+    //
     // `emoji` is undeclared for the same reason `text` is. It reads like a glyph and is
     // typed as free text the brain chose, so declaring it would put whatever a turn was
     // talked into sending on this line — on the way to refusing it, too, since a refused
@@ -480,8 +669,12 @@ export function surfaceEgressHandler(
       const allowed = policy.allowsTool(SURFACE_EGRESS_TOOL);
       if (!allowed.ok) throw new ToolRefused(`post tool refused: ${allowed.reason}`);
       const post = PostArgs.parse(args);
-      await egress.post(post.surface, post.channel, { text: post.text });
-      return `Posted to ${post.surface}:${post.channel}.`;
+      if (post.mention === undefined) {
+        await egress.post(post.surface, post.channel, { text: post.text });
+        return `Posted to ${post.surface}:${post.channel}.`;
+      }
+      await egress.address(post.surface, post.channel, { text: post.text }, post.mention);
+      return `Posted to ${post.surface}:${post.channel}, addressed to ${post.mention}.`;
     },
   });
 }

@@ -77,6 +77,8 @@ describe("assembleTurnPrompt", () => {
     expect(p).toContain("mcp__surface-egress__post_message");
     expect(p).toContain("explicitly asks");
     expect(p).toContain("normal response");
+    // A post wakes nobody by default, and the brain has to know that to reach anyone.
+    expect(p).toContain("wakes nobody unless you set");
     expect(fenced(p)).toContain("post this to Slack");
   });
 

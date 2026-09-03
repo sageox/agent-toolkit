@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { JobHost, type JobRun } from "../src/job-host.ts";
-import type { ActorRef, EventRef } from "../src/events.ts";
+import type { ActorRef, EventRef, InboundEvent } from "../src/events.ts";
 import type { SwitchSource } from "../src/kill-switch.ts";
 import { jobHandler, JOB_RUN_TOOL, JOB_RUN_TOOL_NAME } from "../src/job-server.ts";
 import { loadManifest, type JobConfig } from "../src/manifest.ts";
@@ -112,8 +112,20 @@ let posts: string[];
  * itself — the flag is a false negative there, which is why `owner` and not this decides who
  * a person is.
  */
-const turnAuthor = (by?: Partial<ActorRef>) => (): ActorRef | null =>
-  by ? { surface: "buzz", id: "npub1abc", isSelf: false, isAgent: false, ...by } : null;
+const turnAuthor = (by?: Partial<ActorRef>) => (): InboundEvent | null =>
+  by ? asked({ surface: "buzz", id: "npub1abc", isSelf: false, isAgent: false, ...by }) : null;
+
+/** The message a person sent to start a job — what a run that outlasts the turn answers. */
+const asked = (author: ActorRef): InboundEvent => ({
+  id: { surface: author.surface, nativeId: "m1" },
+  surface: author.surface,
+  channel: { surface: author.surface, id: "hive", isPublic: false },
+  author,
+  text: "@whittle run shift",
+  mentionsMe: true,
+  ts: "2026-09-02T00:00:00Z",
+  raw: null,
+});
 
 /** The one person this agent's manifest names. Every other author is automation. */
 const OWNER = ["npub1ryan"];
@@ -126,7 +138,8 @@ const call = async (
     policy = ALLOWED,
     turnTimeoutMs = PATIENT_TURN,
     host = jobHost(),
-    asking = turnAuthor(),
+    answering = turnAuthor(),
+    reply = undefined as ((home: InboundEvent, text: string) => Promise<void>) | undefined,
     owner = OWNER,
   } = {},
 ): Promise<string> => {
@@ -135,7 +148,8 @@ const call = async (
     policy,
     host,
     agentName: "whittle",
-    asking,
+    answering,
+    reply,
     owner,
     turnTimeoutMs,
   });
@@ -441,9 +455,9 @@ describe("provenance", () => {
 
   it("records the person the turn is answering, and runs their job though it is parked", async () => {
     const host = jobHost({ switchSource: parked });
-    const asking = turnAuthor({ id: "npub1ryan" });
+    const answering = turnAuthor({ id: "npub1ryan" });
     const declared = [withBody(jobs(CLOSED)[0], PROVES)];
-    const text = await call(declared, { job: "shift" }, { host, asking });
+    const text = await call(declared, { job: "shift" }, { host, answering });
 
     // They asked, they are waiting on the answer, and they can stop it: not the unattended
     // work a kill switch parks.
@@ -464,9 +478,9 @@ describe("provenance", () => {
     // does not serve — so a sibling agent arrives here indistinguishable from a stranger,
     // and neither is the person §6.3 rule 2 reserves the bypass for.
     const host = jobHost({ switchSource: parked });
-    const asking = turnAuthor({ id: "npub1monty" });
+    const answering = turnAuthor({ id: "npub1monty" });
     const declared = [withBody(jobs(CLOSED)[0], SILENT)];
-    const text = await call(declared, { job: "shift" }, { host, asking });
+    const text = await call(declared, { job: "shift" }, { host, answering });
 
     expect(text).toContain("job shift denied-switch");
     expect(text).toContain("this run did not count as an owner's request");
@@ -479,9 +493,9 @@ describe("provenance", () => {
     const host = jobHost({ switchSource: parked });
     // Named as an owner *and* flagged an agent: where a surface can tell the two apart, the
     // flag it sets is real evidence and only ever narrows this.
-    const asking = turnAuthor({ id: "npub1bot", isAgent: true });
+    const answering = turnAuthor({ id: "npub1bot", isAgent: true });
     const declared = [withBody(jobs(CLOSED)[0], SILENT)];
-    const text = await call(declared, { job: "shift" }, { host, asking, owner: ["npub1bot"] });
+    const text = await call(declared, { job: "shift" }, { host, answering, owner: ["npub1bot"] });
 
     // `on-request` is a trigger, not an authorization — a sibling asking is automation.
     expect(text).toContain("job shift denied-switch");
@@ -494,9 +508,9 @@ describe("provenance", () => {
 
   it("runs a parked job that has no clock for the switch to park", async () => {
     const host = jobHost({ switchSource: parked });
-    const asking = turnAuthor({ id: "npub1ryan" });
+    const answering = turnAuthor({ id: "npub1ryan" });
     const declared = [withBody(jobs(SCHEDULELESS)[0], PROVES)];
-    const text = await call(declared, { job: "sweep" }, { host, asking });
+    const text = await call(declared, { job: "sweep" }, { host, answering });
 
     expect(text).toContain("job sweep completed");
     expect(argv()).toHaveLength(1);
@@ -508,9 +522,9 @@ describe("provenance", () => {
     // A deadline past the turn takes `startRequest`, the tool's other call site for the
     // requester — and the one that answers before the admission has been recorded.
     const host = jobHost({ switchSource: parked });
-    const asking = turnAuthor({ id: "npub1ryan" });
+    const answering = turnAuthor({ id: "npub1ryan" });
     const declared = [withBody(jobs(CLOSED)[0], PROVES)];
-    const text = await call(declared, { job: "shift" }, { host, asking, turnTimeoutMs: 1000 });
+    const text = await call(declared, { job: "shift" }, { host, answering, turnTimeoutMs: 1000 });
 
     expect(text).toContain("job shift is running now");
     await vi.waitFor(() => expect(runs).toHaveLength(1), { timeout: 5000 });
@@ -595,6 +609,75 @@ describe("a job that outlasts a turn", () => {
 
     expect(text).toContain("PROVEN: ci passed"); // whoever asked already has the verdict
     expect(posts).toEqual([]);
+  });
+
+  it("answers the conversation that asked when the run lands, and spares the channel", async () => {
+    const answers: { home: InboundEvent; text: string }[] = [];
+    const reply = async (home: InboundEvent, text: string) => {
+      answers.push({ home, text });
+    };
+    const answering = turnAuthor({ id: "npub1ryan" });
+    const text = await call(
+      [withBody(jobs(REPORTING)[0], PROVES)],
+      { job: "shift" },
+      { ...impatient, answering, reply },
+    );
+    expect(text).toContain("posted back into this conversation");
+
+    await vi.waitFor(() => expect(answers).toHaveLength(1), { timeout: 5000 });
+    // The same text a waited-for call returns, into the very message that asked.
+    expect(answers[0].text).toContain("job shift completed");
+    expect(answers[0].text).toContain("PROVEN: ci passed");
+    expect(answers[0].home.id).toEqual({ surface: "buzz", nativeId: "m1" });
+    // Answered where it was asked, so the channel is spared a clean verdict — exactly as
+    // it is for a run whose caller waited.
+    await vi.waitFor(() => expect(runs).toHaveLength(1), { timeout: 5000 });
+    expect(posts).toEqual([]);
+  });
+
+  it("lets the status post carry a verdict the asker could not be given", async () => {
+    const reply = async () => {
+      throw new Error("the home channel is gone");
+    };
+    await call(
+      [withBody(jobs(REPORTING)[0], PROVES)],
+      { job: "shift" },
+      { ...impatient, answering: turnAuthor({ id: "npub1ryan" }), reply },
+    );
+
+    await vi.waitFor(() => expect(posts).toHaveLength(3), { timeout: 5000 });
+    expect(posts[0]).toContain("job shift completed");
+  });
+
+  it("tells the asker, too, when the host is told to stop", async () => {
+    const answers: string[] = [];
+    const host = jobHost();
+    await call(
+      [withBody(jobs(REPORTING)[0], LINGERS)],
+      { job: "shift" },
+      {
+        ...impatient,
+        host,
+        answering: turnAuthor({ id: "npub1ryan" }),
+        reply: async (_home, text) => {
+          answers.push(text);
+        },
+      },
+    );
+
+    await host.abandon();
+    // Settled inside the shutdown's own wait, not after it.
+    expect(answers).toHaveLength(1);
+    expect(answers[0]).toContain("job shift abandoned");
+    expect(answers[0]).toContain("NOT PROVEN");
+  });
+
+  it("promises no answer when the gateway can name no one conversation", async () => {
+    const reply = async () => {};
+    const text = await call([withBody(jobs(REPORTING)[0], PROVES)], { job: "shift" }, { ...impatient, reply });
+
+    expect(text).not.toContain("posted back");
+    await vi.waitFor(() => expect(posts).toHaveLength(3), { timeout: 5000 });
   });
 
   it("says plainly when a job it started has nowhere to say what it found", async () => {

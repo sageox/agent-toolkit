@@ -73,6 +73,12 @@ export interface NormalizeOptions {
   pubkey: string;
   /** Channels listed `reply: private`. Anything else is public, so the guard fails closed. */
   privateChannels?: ReadonlySet<string>;
+  /**
+   * Pubkeys that have published a directory record — the relay's own roster of agents,
+   * each with the name its record carries. Absent, only the agent itself is recognised as
+   * one. See `BuzzAdapter.subscribeAll`.
+   */
+  agents?: ReadonlyMap<string, string | undefined>;
 }
 
 function firstTag(event: Event, name: string): string | undefined {
@@ -80,15 +86,15 @@ function firstTag(event: Event, name: string): string | undefined {
 }
 
 /** Who signed an event, as core names an actor. */
-function toActorRef(event: Event, pubkey: string): ActorRef {
+function toActorRef(event: Event, opts: NormalizeOptions): ActorRef {
   return {
     surface: SURFACE,
     id: event.pubkey,
-    isSelf: event.pubkey === pubkey,
-    // Recognising *other* agents needs a roster the relay can give us; until then this
-    // is only ever true for ourselves, so the chain-depth cap protects against a
-    // self-loop but not yet against an agent-to-agent one (§8 rule 4).
-    isAgent: event.pubkey === pubkey,
+    isSelf: event.pubkey === opts.pubkey,
+    // Another agent is one the relay's directory lists, which is what lets the chain-depth
+    // cap apply to a sibling (§8 rule 4). Ourselves regardless, so a self-loop is caught
+    // before the directory has answered.
+    isAgent: event.pubkey === opts.pubkey || opts.agents?.has(event.pubkey) === true,
   };
 }
 
@@ -102,7 +108,7 @@ function toActorRef(event: Event, pubkey: string): ActorRef {
  */
 export function toThreadReply(event: Event, opts: NormalizeOptions): ThreadReply {
   return {
-    author: toActorRef(event, opts.pubkey),
+    author: toActorRef(event, opts),
     text: event.content,
     ts: new Date(event.created_at * 1000).toISOString(),
   };
@@ -121,7 +127,7 @@ export function toInboundEvent(event: Event, opts: NormalizeOptions): InboundEve
       // Unknown means public: the guard must fail closed on a channel we cannot vouch for.
       isPublic: opts.privateChannels?.has(channelId) !== true,
     },
-    author: toActorRef(event, opts.pubkey),
+    author: toActorRef(event, opts),
     text: event.content,
     mentionsMe: mentions.includes(opts.pubkey),
     threadRoot: threadRootOf(event),

@@ -110,8 +110,9 @@ describe("SurfaceEgress", () => {
     await egress.post("buzz", "hive", { text: "roll call" }, undefined, ["drone", "forager"]);
     expect(buzz.posted[0].mentions).toEqual(["drone", "forager"]);
 
-    // The brain's `post_message` has no such field, and a call that names one is dropped
-    // by the schema rather than reaching a surface: being addressed is a job's capability.
+    // A list is a job's capability. The brain's field is `mention`, one principal — below
+    // — and a `mentions` list on its call is dropped by the schema rather than reaching a
+    // surface.
     await surfaceEgressHandler(egress, new ToolPolicy([SURFACE_EGRESS_TOOL], []), SERVE_BOTH)({
       method: "tools/call",
       params: {
@@ -294,6 +295,117 @@ describe("cross-posting by display name", () => {
       /publicChannel/,
     );
     expect(buzz.posted).toHaveLength(0);
+  });
+});
+
+describe("addressing one principal from the brain's post", () => {
+  const hive: ChannelRef[] = [{ surface: "buzz", id: "hive", isPublic: false }];
+  const OWNER = "a".repeat(64);
+  const FRIEND = "b".repeat(64);
+  const IDA = "c".repeat(64);
+  const JUNO = "d".repeat(64);
+  const named = () => manifest(`owner: ["${OWNER}"]\nallowlist: ["${FRIEND}"]`);
+  const handler = (egress: SurfaceEgress) =>
+    surfaceEgressHandler(egress, new ToolPolicy([SURFACE_EGRESS_TOOL], []), SERVE_BOTH);
+  const call = (mention: string) => ({
+    method: "tools/call",
+    params: {
+      name: "post_message",
+      arguments: { surface: "buzz", channel: "hive", text: "sweep ok?", mention },
+    },
+  });
+
+  it("wakes a principal the manifest names, on behalf of the turn that asked", async () => {
+    const buzz = adapter("buzz", hive);
+    const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });
+    const turn = egress.answers(event("slack", "C0123"));
+
+    const result = await handler(egress)(call(OWNER));
+    expect(buzz.posted.map((p) => p.mentions)).toEqual([[OWNER]]);
+    expect(result).toEqual({
+      content: [{ type: "text", text: `Posted to buzz:hive, addressed to ${OWNER}.` }],
+    });
+    turn.close();
+
+    const again = egress.answers(event("slack", "C0123", false, "m2"));
+    await handler(egress)(call(FRIEND));
+    expect(buzz.posted[1].mentions).toEqual([FRIEND]);
+    again.close();
+  });
+
+  it("refuses a stranger, and posts nothing", async () => {
+    const buzz = adapter("buzz", hive);
+    const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });
+    const turn = egress.answers(event("slack", "C0123"));
+
+    await expect(handler(egress)(call("e".repeat(64)))).rejects.toThrow(/names nobody/);
+    expect(buzz.posted).toHaveLength(0);
+    turn.close();
+  });
+
+  it("resolves a name the surface vouches for, and refuses one shared by two", async () => {
+    const buzz = adapter("buzz", hive);
+    buzz.value.principals = () =>
+      new Map([
+        [IDA, "ida"],
+        [JUNO, "juno"],
+      ]);
+    const egress = new SurfaceEgress({ manifest: manifest(), adapters: [buzz.value] });
+    const turn = egress.answers(event("slack", "C0123"));
+
+    await handler(egress)(call(" Ida "));
+    expect(buzz.posted[0].mentions).toEqual([IDA]);
+    turn.close();
+
+    buzz.value.principals = () =>
+      new Map([
+        [IDA, "ida"],
+        [JUNO, "ida"],
+      ]);
+    const twins = egress.answers(event("slack", "C0123", false, "m2"));
+    await expect(handler(egress)(call("ida"))).rejects.toThrow(/names nobody/);
+    expect(buzz.posted).toHaveLength(1);
+    twins.close();
+  });
+
+  // One admitted message wakes at most one principal: that is the whole termination proof,
+  // and it needs no counter beyond the turn itself.
+  it("wakes at most one principal per turn, and a plain post does not spend it", async () => {
+    const buzz = adapter("buzz", hive);
+    const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });
+    const turn = egress.answers(event("slack", "C0123"));
+
+    await egress.post("buzz", "hive", { text: "fyi" });
+    await handler(egress)(call(OWNER));
+    await expect(handler(egress)(call(FRIEND))).rejects.toThrow(/already addressed/);
+    expect(buzz.posted.map((p) => p.mentions)).toEqual([undefined, [OWNER]]);
+    turn.close();
+  });
+
+  it("wakes nobody with no turn behind the call, or two", async () => {
+    const buzz = adapter("buzz", [...hive, { surface: "buzz", id: "town", isPublic: false }]);
+    const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });
+
+    await expect(handler(egress)(call(OWNER))).rejects.toThrow(/no single conversation/);
+
+    const first = egress.answers(event("buzz", "hive"));
+    const second = egress.answers(event("buzz", "town", false, "m2"));
+    await expect(handler(egress)(call(OWNER))).rejects.toThrow(/no single conversation/);
+    expect(buzz.posted).toHaveLength(0);
+    first.close();
+    second.close();
+  });
+
+  it("lists the principals a surface can name, and not the manifest's ids", async () => {
+    const buzz = adapter("buzz", hive);
+    buzz.value.principals = () => new Map([[IDA, "ida"]]);
+    const egress = new SurfaceEgress({ manifest: named(), adapters: [buzz.value] });
+
+    const listed = await handler(egress)({ method: "tools/list" });
+    const [tool] = (listed as { tools: Array<{ description: string }> }).tools;
+    expect(tool.description).toContain(`buzz:${IDA} (ida)`);
+    expect(tool.description).not.toContain(OWNER);
+    expect(tool.description).toContain("wakes nobody unless");
   });
 });
 

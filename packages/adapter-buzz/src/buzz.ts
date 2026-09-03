@@ -14,6 +14,7 @@ import type {
   ThreadReply,
 } from "@sageox/agent-toolkit-core";
 import { toHexPubkey } from "./identity.ts";
+import { DIRECTORY_KIND } from "./profile.ts";
 import {
   toInboundEvent,
   toChannelPostTemplate,
@@ -94,6 +95,14 @@ export class BuzzAdapter implements SurfaceAdapter {
   private lastByChannel = new Map<string, InboundEvent>();
   /** The ids the relay can never vouch for privacy on, so normalization does not re-derive it. */
   private readonly privateChannels: ReadonlySet<string>;
+  /**
+   * Pubkeys the relay's directory lists, with the name each record carries, so a sibling's
+   * message carries `isAgent` and the chain-depth cap applies to it, and so a person can
+   * ask for it by name. Learned from the relay rather than declared: the toolkit owns no
+   * roster, and a directory record is what makes a pubkey mentionable at all. Never pruned
+   * — a record that disappears does not make its author a person.
+   */
+  private agents = new Map<string, string | undefined>();
 
   constructor(private opts: BuzzAdapterOptions) {
     this.since = opts.since;
@@ -163,6 +172,15 @@ export class BuzzAdapter implements SurfaceAdapter {
     const onEvent = this.onEvent;
     if (!relay || !onEvent) return;
 
+    // The directory before the channels: on a relay that answers REQs in the order they
+    // arrived, a sibling's message replayed from the backlog is normalized after the record
+    // that names it. Kind 10100 is replaceable, so this is one record per author however
+    // long the relay has held it, and a `since` would hide every agent registered before
+    // this process started.
+    relay.subscribe([{ kinds: [DIRECTORY_KIND] }], {
+      onevent: (event: Event) => this.agents.set(event.pubkey, directoryName(event)),
+    });
+
     for (const filter of this.filters()) {
       relay.subscribe([filter], {
         onevent: (event: Event) => {
@@ -172,6 +190,7 @@ export class BuzzAdapter implements SurfaceAdapter {
           const inbound = toInboundEvent(event, {
             pubkey: this.pubkey!,
             privateChannels: this.privateChannels,
+            agents: this.agents,
           });
           // An event tagged with two of our channels matches two REQs, and normalization
           // gives it one channel. Only that channel's REQ delivers it, or the brain
@@ -195,6 +214,16 @@ export class BuzzAdapter implements SurfaceAdapter {
     }
     const signed = await this.opts.signer.signEvent(toReplyTemplate(msg, inReplyTo));
     await this.relay.publish(signed);
+  }
+
+  /** The relay's directory, as {@link SurfaceAdapter.principals} — see `agents`. */
+  principals(): ReadonlyMap<string, string | undefined> {
+    return this.agents;
+  }
+
+  /** The directory's name for an agent; a person's pubkey has none here. */
+  displayName(id: string): string | undefined {
+    return this.agents.get(id);
   }
 
   postTargets(): ChannelRef[] {
@@ -316,7 +345,7 @@ export class BuzzAdapter implements SurfaceAdapter {
 
     const replies = events
       .sort((a, b) => a.created_at - b.created_at)
-      .map((event) => toThreadReply(event, { pubkey: this.pubkey! }));
+      .map((event) => toThreadReply(event, { pubkey: this.pubkey!, agents: this.agents }));
     return limit === undefined ? replies : replies.slice(0, limit);
   }
 
@@ -376,5 +405,20 @@ export class BuzzAdapter implements SurfaceAdapter {
       ...base,
       [`#${BUZZ_DEFAULTS.channelTag}`]: [channel.id],
     }));
+  }
+}
+
+/**
+ * The name a directory record carries, as clients show it: `display_name` over `name`.
+ * Unreadable content is a record without a name, not a record that does not exist.
+ */
+function directoryName(event: Event): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(event.content);
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const { display_name: display, name } = parsed as Record<string, unknown>;
+    return typeof display === "string" ? display : typeof name === "string" ? name : undefined;
+  } catch {
+    return undefined;
   }
 }

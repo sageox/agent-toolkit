@@ -43,7 +43,9 @@ const POST_MECHANICS = [
   "Only when the user explicitly asks you to post or relay something into a configured chat",
   "channel, call mcp__surface-egress__post_message with the destination and exact text, then",
   "briefly confirm the result in your normal response. That includes the channel you are",
-  "already in: posting there is still not how you reply.",
+  "already in: posting there is still not how you reply. A post wakes nobody unless you set",
+  "mention to the one person or agent the asker wants reached — an id from a `from` line, or",
+  "a name the tool lists.",
 ];
 
 /**

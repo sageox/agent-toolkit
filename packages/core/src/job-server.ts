@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ActorRef } from "./events.ts";
+import type { InboundEvent } from "./events.ts";
 import type { JobRequester } from "./kill-switch.ts";
 import {
   describeJobRun,
@@ -72,13 +72,19 @@ export interface JobToolOptions {
    */
   agentName: string;
   /**
-   * Who this agent is answering, or `null` when the gateway cannot name one person.
+   * The message this agent is answering, or `null` when the gateway cannot name one.
    *
-   * An {@link ActorRef} the gateway resolved from an inbound event, never a
-   * {@link JobRequester}: a caller that could pass the kind could pass `human`, and the kind
-   * is what decides whether a parked job runs.
+   * An {@link InboundEvent} the gateway received, never a {@link JobRequester}: a caller
+   * that could pass the kind could pass `human`, and the kind is what decides whether a
+   * parked job runs. The whole event rather than its author, because a run that outlasts
+   * the turn answers this message once the turn has forgotten it.
    */
-  asking?: () => ActorRef | null;
+  answering?: () => InboundEvent | null;
+  /**
+   * How a detached run's verdict reaches the message that asked for it — the gateway's
+   * guarded reply, bound in the CLI. Unset, the status post is the only answer, as before.
+   */
+  reply?: (home: InboundEvent, text: string) => Promise<void>;
   /** `manifest.owner`, normalized. The whole of what {@link requester} calls a person. */
   owner?: readonly string[];
   /**
@@ -118,10 +124,10 @@ export interface JobToolOptions {
  */
 function requester(
   agentName: string,
-  asking: JobToolOptions["asking"],
+  answering: JobToolOptions["answering"],
   owner: readonly string[],
 ): JobRequester {
-  const author = asking?.() ?? null;
+  const author = answering?.()?.author ?? null;
   if (!author) return { kind: "agent", id: agentName };
   const person = !author.isAgent && owner.includes(author.id);
   return { kind: person ? "human" : "agent", id: author.id };
@@ -281,7 +287,7 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
  * difference between an attempt somebody can find at 3am and one that never happened.
  */
 export function jobHandler(opts: JobToolOptions): McpHandler {
-  const { jobs, policy, host, agentName, asking, owner = [], turnTimeoutMs } = opts;
+  const { jobs, policy, host, agentName, answering, reply, owner = [], turnTimeoutMs } = opts;
   return mcpToolServer({
     name: JOB_SERVER,
     tools: () => tools(jobs, turnTimeoutMs),
@@ -316,10 +322,22 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
       // could disagree with either number. A job that fits inside a turn is waited for and
       // quoted; one that cannot is started, and answers where it declared it would.
       if (jobDeadlineMs(job) > turnTimeoutMs) {
-        const start = await host.startRequest(job, requester(agentName, asking, owner), params);
-        return start.refused ? describeRun(start.refused) : describeStart(job, start);
+        // Read now, not when the run lands: by then the turn is over and the gateway has
+        // forgotten which message it was answering. The verdict goes back as the same text
+        // a waited-for call returns, so the two shapes read alike where they arrive.
+        const home = answering?.() ?? null;
+        const answer = home && reply ? (run: JobRun) => reply(home, describeRun(run)) : undefined;
+        const start = await host.startRequest(
+          job,
+          requester(agentName, answering, owner),
+          params,
+          answer,
+        );
+        return start.refused
+          ? describeRun(start.refused)
+          : describeStart(job, start, answer !== undefined);
       }
-      return describeRun(await host.request(job, requester(agentName, asking, owner), params));
+      return describeRun(await host.request(job, requester(agentName, answering, owner), params));
     },
   });
 }
@@ -353,18 +371,22 @@ function describeRun(run: JobRun): string {
  * for the person in the channel to discover by waiting. `doctor` flags the same job before
  * a deploy; this is the honest thing to say when one is running anyway.
  */
-function describeStart(job: JobConfig, start: JobStart): string {
+function describeStart(job: JobConfig, start: JobStart, answered: boolean): string {
   const lands = job.report
     ? `the result will post to ${job.report.channel} on the ${job.report.surface} surface ` +
       "when the run lands"
     : "this job declares no `report`, so its result will reach no channel at all — it will " +
       "only be in the run record, where an operator has to go and look for it";
+  // Promised only when it is wired: a reply needs a message to answer, and a call the
+  // gateway could not pin to one conversation has none.
+  const home = answered ? "  it will also be posted back into this conversation\n" : "";
   return (
     `job ${job.slug} is running now — run id ${start.runId}; nothing has finished yet, so ` +
     "there is no verdict to read.\n" +
     `  its budget allows ${jobDeadlineMs(job)}ms, longer than this turn, so this tool ` +
     "started it instead of waiting for it\n" +
     `  ${lands}\n` +
+    home +
     "  tell whoever asked that it is running and that you will report back; you have not " +
     "read a result and must not describe one\n"
   );

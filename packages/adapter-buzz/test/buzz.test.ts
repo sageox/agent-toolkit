@@ -5,6 +5,7 @@ import { PlainKeySigner } from "nostr-tools/signer";
 import type { InboundEvent } from "@sageox/agent-toolkit-core";
 import { BuzzAdapter } from "../src/buzz.ts";
 import { BUZZ_DEFAULTS, toInboundEvent } from "../src/normalize.ts";
+import { DIRECTORY_KIND } from "../src/profile.ts";
 import { FakeRelay } from "./fake-relay.ts";
 
 const agentSk = generateSecretKey();
@@ -68,6 +69,26 @@ async function settle(ms = 60) {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+/** The REQs that listen for chat. The directory REQ `start` opens first is not one. */
+function chatReqs() {
+  return relay.reqs.filter((req) =>
+    (req.filters[0].kinds as number[]).includes(BUZZ_DEFAULTS.kind),
+  );
+}
+
+/** What a registered agent leaves on the relay — the record clients gate a mention on. */
+function directoryRecord(sk: Uint8Array, name: string) {
+  return finalizeEvent(
+    {
+      kind: DIRECTORY_KIND,
+      created_at: now - 86400,
+      tags: [],
+      content: JSON.stringify({ name, channel_ids: ["hive"], respond_to: "anyone" }),
+    },
+    sk,
+  );
+}
+
 describe("BuzzAdapter", () => {
   beforeEach(async () => {
     relay = await FakeRelay.start();
@@ -78,7 +99,7 @@ describe("BuzzAdapter", () => {
     await a.start(() => {});
     await settle();
 
-    const filter = relay.reqs[0].filters[0];
+    const filter = chatReqs()[0].filters[0];
     expect(filter.kinds).toEqual([BUZZ_DEFAULTS.kind]);
     expect(filter["#p"]).toEqual([agentPk]);
     await a.stop();
@@ -335,7 +356,7 @@ describe("BuzzAdapter since cursor", () => {
 
     // Bounded, not muted: the fresh message still comes through the same filter.
     expect(got.map((e) => e.text)).toEqual(["just arrived"]);
-    expect(relay.reqs[0].filters[0].since).toBeGreaterThanOrEqual(now - 60);
+    expect(chatReqs()[0].filters[0].since).toBeGreaterThanOrEqual(now - 60);
     await a.stop();
   });
 
@@ -427,9 +448,58 @@ describe("BuzzAdapter subscription shape", () => {
     await a.start(() => {});
     await settle();
 
-    const filter = relay.reqs[0].filters[0];
+    const filter = chatReqs()[0].filters[0];
     expect(filter["#h"]).toEqual(["hive"]);
     expect(filter["#p"]).toBeUndefined();
+    await a.stop();
+  });
+
+  it("asks the relay for its whole directory before any channel", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start(() => {});
+    await settle();
+
+    const filter = relay.reqs[0].filters[0];
+    expect(filter.kinds).toEqual([DIRECTORY_KIND]);
+    expect(filter.since).toBeUndefined(); // a record predates this process by design
+    expect(filter.authors).toBeUndefined(); // every agent's, not only our own
+    await a.stop();
+  });
+
+  // Every reply `p`-tags the author it answers, so two agents that allowlist each other
+  // answer one another until `maxTurnsPerThread` unless the gateway can see they are agents.
+  it("recognises a sibling by its directory record, whether stored or published later", async () => {
+    const storedSk = generateSecretKey();
+    const laterSk = generateSecretKey();
+    relay = await FakeRelay.start({ backlog: [directoryRecord(storedSk, "ida")] });
+    const got: InboundEvent[] = [];
+    const a = newAdapter();
+    await a.start((e) => got.push(e));
+    await settle();
+
+    const from = (sk: Uint8Array, text: string, at: number) =>
+      finalizeEvent(
+        { kind: BUZZ_DEFAULTS.kind, created_at: at, tags: [["h", "hive"], ["p", agentPk]], content: text },
+        sk,
+      );
+    relay.emit(from(storedSk, "ack from a registered agent", now + 61));
+    relay.emit(mention("a person asking", now + 62));
+    relay.emit(from(laterSk, "not yet registered", now + 63));
+    relay.emit(directoryRecord(laterSk, "juno"));
+    relay.emit(from(laterSk, "registered now", now + 64));
+    await settle();
+
+    expect(got.map((e) => [e.text, e.author.isAgent])).toEqual([
+      ["ack from a registered agent", true],
+      ["a person asking", false],
+      ["not yet registered", false],
+      ["registered now", true],
+    ]);
+    // The same roster is what a person addresses by name — the record's own name.
+    expect(a.principals().get(getPublicKey(storedSk))).toBe("ida");
+    expect(a.principals().get(getPublicKey(laterSk))).toBe("juno");
+    expect(a.principals().has(getPublicKey(userSk))).toBe(false);
     await a.stop();
   });
 
@@ -447,9 +517,9 @@ describe("BuzzAdapter subscription shape", () => {
     await a.start(() => {});
     await settle();
 
-    expect(relay.reqs).toHaveLength(2);
-    expect(relay.reqs.map((req) => req.filters.length)).toEqual([1, 1]);
-    expect(relay.reqs.map((req) => req.filters[0]["#h"])).toEqual([["hive"], ["eng"]]);
+    expect(chatReqs()).toHaveLength(2);
+    expect(chatReqs().map((req) => req.filters.length)).toEqual([1, 1]);
+    expect(chatReqs().map((req) => req.filters[0]["#h"])).toEqual([["hive"], ["eng"]]);
     await a.stop();
   });
 
@@ -540,7 +610,7 @@ describe("BuzzAdapter subscription shape", () => {
     await a.start(() => {});
     await settle();
 
-    expect(relay.reqs[0].filters[0]["#p"]).toEqual([agentPk]);
+    expect(chatReqs()[0].filters[0]["#p"]).toEqual([agentPk]);
     await a.stop();
   });
 });

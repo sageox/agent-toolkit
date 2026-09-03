@@ -48,6 +48,14 @@ describe("toInboundEvent", () => {
     expect(toInboundEvent(own, { pubkey: mePk }).author.isAgent).toBe(false);
   });
 
+  it("recognises a pubkey the relay's directory lists as another agent", () => {
+    const listed = toInboundEvent(chatEvent(), { pubkey: mePk, agents: new Map([[authorPk, "ida"]]) });
+    expect(listed.author.isAgent).toBe(true);
+    expect(listed.author.isSelf).toBe(false);
+    const unlisted = toInboundEvent(chatEvent(), { pubkey: mePk, agents: new Map() });
+    expect(unlisted.author.isAgent).toBe(false);
+  });
+
   it("marks a channel public unless it is one the config called private", () => {
     const opts = { pubkey: mePk, privateChannels: new Set(["hive"]) };
     expect(toInboundEvent(chatEvent({ channel: "hive" }), opts).channel.isPublic).toBe(false);

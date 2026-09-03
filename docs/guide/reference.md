@@ -85,8 +85,12 @@ never a behaviour: a job whose work a caller can switch is two jobs with two slu
 waited for and the tool answers with its verdict; a job whose `wallClockMs +
 deadlineHeadroomMs` is longer than `limits.turnTimeoutMs` is **started** instead, and the
 tool answers with the run id and nothing that reads as a verdict — the verdict arrives later,
-as the job's ordinary status post. Give such a job a `report` destination, or it has
-nowhere to answer and `doctor` will say so. Add it with `sageox-agent mcp add jobs`, which
+posted back into the conversation that asked, in the thread it was asked in, and as the
+job's ordinary status post where `report` says. A run answered that way is announced as a
+waited-for one is, so a clean verdict is spared the channel. Give such a job a `report`
+destination all the same: the reply can be refused by the home channel's guard, or the call
+may have arrived while no one conversation could be named, and then the post is the only
+answer — `doctor` says so when there is none. Add it with `sageox-agent mcp add jobs`, which
 refuses when no job has armed that door — the tool is served for those jobs and no others,
 so allowing it first writes a permission for something that will never exist. The reverse,
 a job that declares `trigger.onRequest` while the policy denies the tool, is a `doctor`
