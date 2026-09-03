@@ -21,9 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never invited to, or a Buzz directory record that omits one, is an agent that connects,
   authenticates, subscribes and is never spoken to, with no error on either side. The two
   surfaces spell it differently and the guide says so — Slack lists every channel the bot
-  joined, so the answer can be wider than the configuration; Buzz has no join, so it returns
-  the overlap of the configured channels and the agent's own directory record and is never
-  wider than the configured list. **Empty and cannot-answer never collapse** — a surface that cannot make a read
+  joined, so the answer can be wider than the configuration; on Buzz being in a channel and
+  being addressable in it are two facts, so it returns the overlap of the configured channels
+  and the agent's own directory record and is never wider than the configured list.
+  **`listMembers` is the surface's own roster on both**, `conversations.members` on Slack and
+  the relay's channel-membership event on Buzz — never a directory record, which is its
+  author's claim about itself and would confirm membership for a key that was never granted
+  any. Where a surface can also say whether a mention of a member *in that channel* would
+  reach them, the ref carries `mentionable`: `false` is somebody in the room who cannot be
+  addressed there, which is the silence a roll call would otherwise grade as a dead agent.
+  **Empty and cannot-answer never collapse** — a surface that cannot make a read
   refuses it by name, because zero members and no membership read look identical to anything
   handed `[]` for both.
 

@@ -145,12 +145,20 @@ export interface SurfaceAdapter {
   listChannels?(): Promise<readonly ChannelRef[]>;
 
   /**
-   * Who is in one channel this adapter serves, in no promised order.
+   * Who is in one channel this adapter serves, as the surface reports membership, in no
+   * promised order.
+   *
+   * The surface's roster and never an actor's own claim about itself — Slack reads
+   * `conversations.members`, Buzz the relay's channel-membership event. An identity that
+   * published a record naming the channel but was never granted membership is not in it,
+   * and a read that said otherwise would confirm membership on the agent's own say-so:
+   * exactly the case {@link listChannels} exists to catch.
    *
    * Bounded like {@link readThread}: `limit` is a ceiling on how many come back, and a
    * surface that cannot answer omits the method. The refs carry a `name` wherever the
    * surface can put one to the id — a roster of bare ids does not answer the question
-   * anyone asks a membership read.
+   * anyone asks a membership read — and {@link ActorRef.mentionable} wherever the surface
+   * can also say whether a mention there would reach them.
    */
   listMembers?(channel: ChannelRef, limit?: number): Promise<readonly ActorRef[]>;
 

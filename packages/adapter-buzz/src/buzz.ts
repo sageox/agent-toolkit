@@ -378,36 +378,79 @@ export class BuzzAdapter implements SurfaceAdapter {
   }
 
   /**
-   * Who the relay's directory says is in one configured channel.
+   * Who the relay says is in one configured channel — its channel-membership event.
    *
-   * That is the membership Buzz has: there is no join, and a record naming the channel is
-   * what makes its author addressable there. So the roster is agents, and a person who
-   * reads the channel is not on it — which is the honest answer to the question a probe is
-   * really asking, "who would a post here have woken".
+   * The relay's roster, which is the question `SlackAdapter.listMembers` answers from
+   * `conversations.members`. Not the directory: a record naming this channel is its
+   * author's claim about itself, so a key that was never granted membership can publish
+   * one, and a caller diagnosing the failure {@link listChannels} describes would be told
+   * membership was confirmed on the agent's own say-so. What the directory does answer is
+   * `mentionable`, read below off the same records that put names to the roster.
    *
    * Its own REQ rather than the directory subscription `start` opens, because that one is
    * opened only for a caller that passed a listener: a `job run` starts this adapter to
    * post one line, and would otherwise read an empty roster and report a channel nobody is
-   * in. Kind 10100 is replaceable, so newest per author is the current record.
+   * in.
+   *
+   * The membership kind is addressable, so the newest event at the channel's address is the
+   * current roster. A relay holding none cannot answer, and this throws rather than
+   * returning `[]`: an empty roster is a real finding — the channel nobody joined — and
+   * must not also be what a relay that keeps no rosters looks like.
    */
   async listMembers(channel: ChannelRef, limit?: number): Promise<readonly ActorRef[]> {
     const relay = this.relay;
     if (!relay) throw new Error("BuzzAdapter.start() must be called before listMembers()");
     this.assertConfigured(channel);
 
-    // `limit` is applied after the channel filter and never on the wire, unlike the two
-    // reads below: a relay-side limit trims the newest records regardless of which channel
-    // they name, so it could drop a member of this one and leave the roster short with
-    // nothing to say it had been.
-    const records = newestPerAuthor(await this.query(relay, { kinds: [DIRECTORY_KIND] }));
+    const roster = newest(
+      await this.query(relay, {
+        kinds: [BUZZ_DEFAULTS.membershipKind],
+        // NIP-01's identifier tag, which on this kind is the channel the roster is for.
+        "#d": [channel.id],
+      }),
+    );
+    if (!roster) {
+      throw new Error(
+        `the relay holds no membership record for Buzz channel ${channel.id}, so who is ` +
+          "in it cannot be read",
+      );
+    }
 
-    const members = records.flatMap((event) => {
-      const record = directoryRecord(event);
-      return record.channels.includes(channel.id)
-        ? [this.actor(event.pubkey, record.name, true)]
-        : [];
+    // `limit` bounds the members and never the wire, unlike `readThread` and `readChannel`:
+    // the roster is one event, so a relay-side limit would trim how many rosters came back
+    // and not how many people are named in the one that did.
+    //
+    // `"p"` rather than `BUZZ_DEFAULTS.mentionTag`: on this kind the tag names a member, and
+    // the two would drift apart the moment a relay spelled either differently.
+    const pubkeys = roster.tags.filter((tag) => tag[0] === "p" && tag[1]).map((tag) => tag[1]);
+    const members = limit === undefined ? pubkeys : pubkeys.slice(0, limit);
+    if (members.length === 0) return [];
+
+    // One REQ for the whole roster, over the two kinds `describeActor` reads for one id: an
+    // agent publishes a directory record, a person only the NIP-01 profile.
+    const records = newestPerAuthor(
+      await this.query(relay, {
+        kinds: [DIRECTORY_KIND, BUZZ_DEFAULTS.profileKind],
+        authors: members,
+      }),
+    );
+
+    return members.map((pubkey) => {
+      const own = records.filter((event) => event.pubkey === pubkey);
+      const directory = own.find((event) => event.kind === DIRECTORY_KIND);
+      if (!directory) {
+        // Nothing here answers `mentionable` for a pubkey with no directory record, so it
+        // is left unset rather than false: what makes a person mentionable on this relay is
+        // not something the directory says.
+        const profile = own[0];
+        return this.actor(pubkey, profile ? directoryRecord(profile).name : undefined, false);
+      }
+      const record = directoryRecord(directory);
+      return {
+        ...this.actor(pubkey, record.name, true),
+        mentionable: record.channels.includes(channel.id),
+      };
     });
-    return limit === undefined ? members : members.slice(0, limit);
   }
 
   /**
@@ -662,6 +705,14 @@ function newestPerAuthor(events: Event[]): Event[] {
     if (!held || supersedes(event, held)) current.set(key, event);
   }
   return [...current.values()];
+}
+
+/** The current event among several at one address, by {@link supersedes}. */
+function newest(events: Event[]): Event | undefined {
+  return events.reduce<Event | undefined>(
+    (held, event) => (!held || supersedes(event, held) ? event : held),
+    undefined,
+  );
 }
 
 /**

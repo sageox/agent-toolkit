@@ -11,6 +11,8 @@ import { FakeRelay } from "./fake-relay.ts";
 const agentSk = generateSecretKey();
 const agentPk = getPublicKey(agentSk);
 const userSk = generateSecretKey();
+/** Whoever the relay lets write a channel's roster — never this agent, and never a member. */
+const channelOwnerSk = generateSecretKey();
 
 let relay: FakeRelay;
 afterEach(async () => {
@@ -1066,6 +1068,21 @@ describe("BuzzAdapter reads the surface it is on", () => {
       sk,
     );
 
+  /** The relay's roster for one channel: `d` names it, one `p` tag per member. */
+  const membersOf = (channel: string, members: Uint8Array[], at = now - 86400) =>
+    finalizeEvent(
+      {
+        kind: BUZZ_DEFAULTS.membershipKind,
+        created_at: at,
+        tags: [
+          ["d", channel],
+          ...members.map((sk) => ["p", getPublicKey(sk), "", "member"]),
+        ],
+        content: "",
+      },
+      channelOwnerSk,
+    );
+
   it("lists only the configured channels its own directory record covers", async () => {
     relay = await FakeRelay.start();
     const a = newAdapter({
@@ -1086,22 +1103,71 @@ describe("BuzzAdapter reads the surface it is on", () => {
     await a.stop();
   });
 
-  it("names the agents whose records list the channel, and nobody else", async () => {
+  it("names who the relay's roster says is in the channel, not who claims to be", async () => {
     relay = await FakeRelay.start();
     const a = newAdapter();
     await a.start();
     const siblingSk = generateSecretKey();
-    const elsewhereSk = generateSecretKey();
+    const claimantSk = generateSecretKey();
+    relay.backlog.push(membersOf("hive", [siblingSk, userSk]));
     relay.backlog.push(registeredIn(siblingSk, "ida", ["hive"]));
-    relay.backlog.push(registeredIn(elsewhereSk, "otto", ["ops"]));
-    // A person who talks in hive has no record, so no client offers their mention there
-    // either — the roster is who a post would have woken.
-    relay.backlog.push(inChannel("hive", "hello"));
+    relay.backlog.push(profile(userSk, "alice"));
+    // A record naming hive is its author's claim about itself, and anyone holding a key can
+    // publish one. The roster is what the relay vouches for, so this key is not in it.
+    relay.backlog.push(registeredIn(claimantSk, "otto", ["hive"]));
 
     const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false });
-    expect(members.map((member) => member.name)).toEqual(["ida"]);
-    expect(members[0].id).toBe(getPublicKey(siblingSk));
-    expect(members[0].isAgent).toBe(true);
+    expect(members.map((member) => member.id)).toEqual([
+      getPublicKey(siblingSk),
+      getPublicKey(userSk),
+    ]);
+    expect(members[0]).toMatchObject({ name: "ida", isAgent: true, mentionable: true });
+    // A person publishes no directory record, so nothing here answers whether a mention
+    // would reach them — which is not the same answer as no.
+    expect(members[1]).toMatchObject({ name: "alice", isAgent: false });
+    expect(members[1].mentionable).toBeUndefined();
+    await a.stop();
+  });
+
+  it("marks a member the directory does not make addressable in this channel", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    const siblingSk = generateSecretKey();
+    relay.backlog.push(membersOf("hive", [siblingSk]));
+    // On the roster and registered elsewhere: a client strips the mention at send, so a roll
+    // call that addressed it reads back as silence from an agent plainly in the room.
+    relay.backlog.push(registeredIn(siblingSk, "ida", ["ops"]));
+
+    const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false });
+    expect(members).toMatchObject([{ name: "ida", isAgent: true, mentionable: false }]);
+    await a.stop();
+  });
+
+  it("refuses a channel the relay keeps no roster for rather than calling it empty", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    // The channel nobody joined is the failure these reads exist to find, and an empty list
+    // is what it looks like — so a relay that keeps no roster must not answer with one.
+    relay.backlog.push(registeredIn(generateSecretKey(), "ida", ["hive"]));
+
+    await expect(
+      a.listMembers!({ surface: "buzz", id: "hive", isPublic: false }),
+    ).rejects.toThrow(/no membership record for Buzz channel hive/);
+    await a.stop();
+  });
+
+  it("bounds the roster by `limit`, which the one-event read cannot ask the relay for", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    const first = generateSecretKey();
+    relay.backlog.push(membersOf("hive", [first, generateSecretKey()]));
+    relay.backlog.push(registeredIn(first, "ida", ["hive"]));
+
+    const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false }, 1);
+    expect(members.map((member) => member.id)).toEqual([getPublicKey(first)]);
     await a.stop();
   });
 
@@ -1157,6 +1223,7 @@ describe("BuzzAdapter reads the surface it is on", () => {
     // Kind 10100 is replaceable, so a relay is meant to hold one per author. A relay that
     // serves both is not an error a caller can see — it is a roster naming a channel the
     // agent has left, from a read whose whole job is to be trusted about that.
+    relay.backlog.push(membersOf("hive", [agentSk, siblingSk]));
     relay.backlog.push(registeredIn(agentSk, "ida", ["hive", "lobby"], now - 86400));
     relay.backlog.push(registeredIn(agentSk, "ida", ["hive"], now - 60));
     relay.backlog.push(registeredIn(siblingSk, "otto-was", ["ops"], now - 86400));
@@ -1167,6 +1234,8 @@ describe("BuzzAdapter reads the surface it is on", () => {
     // The older record put otto in ops, the current one in hive — and names it differently.
     const members = await a.listMembers!({ surface: "buzz", id: "hive", isPublic: false });
     expect(members.map((member) => member.name)).toEqual(["ida", "otto"]);
+    // Read off the current record too: the older one would have made otto unaddressable here.
+    expect(members.map((member) => member.mentionable)).toEqual([true, true]);
     expect(await a.describeActor!(getPublicKey(siblingSk))).toMatchObject({ name: "otto" });
     await a.stop();
   });
