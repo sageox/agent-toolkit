@@ -677,6 +677,16 @@ On Slack these need no scope the setup above did not already ask for: `channels:
 an id. On Buzz they are reads of the same relay socket the agent is already authenticated
 on. Either way the credential never leaves the gateway.
 
+One Slack quota is worth knowing before you rely on `read_channel`. Slack restricts
+`conversations.history` for apps **distributed commercially outside the Marketplace** to one
+request per minute returning at most 15 messages — new installations since 2025-05-29, and
+every such installation since 2026-03-03. The app the setup above walks you through is an
+*internal* one built for your own workspace, which is not affected and still serves a
+thousand messages a request. If your agent runs on an unlisted distributed app instead,
+`read_channel` still works and is simply slow and shallow, and `limit` behaves as the
+ceiling it is documented to be: you will often get fewer messages than you asked for, and
+that is the quota rather than a quiet channel.
+
 Nothing here publishes, so nothing here is egress and the guard has nothing to rule on.
 What comes back is other people's text, and it is **untrusted** in exactly the way an
 inbound message is — the tools say so, and an agent that acts on an instruction it read in

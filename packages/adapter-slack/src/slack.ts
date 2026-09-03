@@ -167,6 +167,15 @@ const MAX_HISTORY_PAGES = 5;
  * costs, and it is what keeps the walk to a single page. Deriving the page from the
  * caller's `limit` had it backwards — a small ask made small pages, so the notices that a
  * page can be made of were more likely to fill it, not less.
+ *
+ * **It is a ceiling, and on some installations a distant one.** Slack cut non-Marketplace
+ * distributed apps to 1 request per minute and 15 objects per request for this endpoint —
+ * new installs from 2025-05-29, and every such install from 2026-03-03. An internal
+ * customer-built app, which is what `docs/guide/chat-surfaces.md` walks an operator
+ * through, is unaffected and still serves a thousand. So a page here comes back anywhere
+ * between 15 and 200 depending on how the app was distributed, the walk has to read
+ * whatever arrives rather than what it asked for, and nothing may be concluded from a page
+ * being short.
  */
 const HISTORY_PAGE = 200;
 
@@ -559,13 +568,15 @@ export class SlackAdapter implements SurfaceAdapter {
    * wrote sitting one page further back. That is silent: the answer is a short history,
    * not an error.
    *
-   * Each page is `HISTORY_PAGE` records regardless of what the caller asked for — Slack
-   * bills per call, so a bigger page is free and is what keeps the walk to one of them.
+   * Each page asks for `HISTORY_PAGE` records regardless of what the caller wants back, and
+   * may be answered with far fewer — see that constant for which installations get 15.
    * `MAX_HISTORY_PAGES` stops a channel that is nothing but notices from being walked back
-   * to its first day, and **running into it throws** rather than answering short. Slack is
-   * still offering a cursor at that point, so a short answer here would be the same
-   * collapse this whole server refuses everywhere else: "the channel holds this much" and
-   * "I stopped looking" are different findings, and only one of them is about the channel.
+   * to its first day.
+   *
+   * `limit` is a ceiling and not a quota: fewer messages than asked for is an ordinary
+   * answer about the recent end of a channel. What is **not** an answer is *none* of them
+   * while Slack is still offering a cursor, because a caller handed `[]` reports an empty
+   * channel — so that one case throws.
    *
    * Thread replies are not in it — `conversations.history` returns parents only, the same
    * Slack fact `backfill` works around — and that is the right answer for a channel read.
@@ -591,23 +602,33 @@ export class SlackAdapter implements SurfaceAdapter {
         if (this.toChannelLine(message, channel.id)) readable += 1;
       }
       cursor = answered.nextCursor || undefined;
-      // No cursor is the channel's own end, and it is the only short answer that is an
-      // answer. `limit` unset asks for one page, per this method's contract.
+      // No cursor is the channel's own end. `limit` unset asks for one page, per this
+      // method's contract.
       if (!cursor || limit === undefined || readable >= limit) break;
       if (page + 1 >= MAX_HISTORY_PAGES) {
         exhausted = true;
         break;
       }
     }
-    if (exhausted) {
+
+    // Only nothing at all is refused, and the bar is deliberately there rather than at
+    // `readable < limit`. `limit` is a ceiling — "the most recent up to this many" — and a
+    // walk that returns twelve of twenty is telling the truth about the recent end of the
+    // channel. A walk that returns *none* while Slack is still offering a cursor is not: a
+    // caller handed `[]` reports an empty channel, which is the one thing this read must
+    // never say on its own account.
+    //
+    // The bar matters most where the pages are smallest. On an installation capped at 15
+    // records a page, `MAX_HISTORY_PAGES` is 75 records rather than 1000, so refusing every
+    // shortfall would refuse ordinary reads of ordinary channels — see {@link HISTORY_PAGE}.
+    if (exhausted && readable === 0) {
       // No advice, because there is none to give: a smaller `limit` reads the same pages,
       // and the shape of the channel is not the caller's to change. What the caller can do
       // is not report this as the channel being quiet.
       throw new Error(
         `read ${messages.length} records of ${channel.id} across ${MAX_HISTORY_PAGES} ` +
-          `pages and found ${readable} of the ${limit} messages asked for, with more ` +
-          "history still to page — this is a read that gave up, not a channel with that " +
-          "little in it",
+          "pages without finding one message, and there is more history still to page — " +
+          "this is a read that gave up, not an empty channel",
       );
     }
 

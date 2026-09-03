@@ -1691,7 +1691,35 @@ describe("SlackAdapter reads the surface it is on", () => {
       instance.readChannel!({ surface: "slack", id: "GENG", isPublic: false }, 5),
       // The count is what it actually read, not the ceiling it was allowed to: this fake
       // answers one record per page, so a message naming 1000 would be off by 200x.
-    ).rejects.toThrow(/read 5 records of GENG across 5 pages and found 0 of the 5 messages/);
+    ).rejects.toThrow(/read 5 records of GENG across 5 pages without finding one message/);
+    expect(api.historyCalls).toHaveLength(5);
+  });
+
+  it("answers short rather than refusing when it found some but not all", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    // A page of 15 is what Slack serves a non-Marketplace distributed app, so on those
+    // installations the bound is 75 records rather than 1000 — and refusing every shortfall
+    // would refuse ordinary reads of ordinary channels. `limit` is a ceiling, not a quota.
+    api.history = async (args) => {
+      api.historyCalls.push(args);
+      const n = api.historyCalls.length;
+      return {
+        messages: [
+          { type: "message", user: "U0A", text: `m${n}`, ts: `178676100${n}.000000` },
+          { type: "message", subtype: "channel_join", user: "U0B", text: "", ts: `178676100${n}.000001` },
+        ],
+        nextCursor: "more",
+      };
+    };
+
+    const messages = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      50,
+    );
+    // Five pages, one real message each: far short of the fifty asked for, and still a true
+    // statement about the recent end of the channel.
+    expect(messages.map((message) => message.text)).toEqual(["m1", "m2", "m3", "m4", "m5"]);
     expect(api.historyCalls).toHaveLength(5);
   });
 
