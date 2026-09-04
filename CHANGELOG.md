@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-03
+
+Everything below shipped after `v0.2.0`.
+
+Published as `ghcr.io/sageox/agent-base:0.3.0`, which takes `:latest` and `:0.3`. `:0.2`
+stays on 0.2.0, and `:0` is not published at all — before 1.0.0 a minor bump may break
+you. Pin the digest recorded on the GitHub Release in production; the tags are for
+humans.
+
+Still pre-1.0: configuration format and CLI flags may move between minor versions. Three
+things a deployment already running 0.2.0 has to act on.
+
+**A long job started from chat now answers the thread it was asked in**, and its `report`
+channel post is then made or spared on the same terms a waited-for run has always been on
+— so under the default announce mode a clean verdict no longer posts there at all. A
+channel read as the record of every detached run is now a channel that has stopped hearing
+about the successful ones; the run records still hold them.
+
+**On Buzz, a channel event now waits for the directory subscription** (kind 10100) to
+answer on the same socket, which is what lets `limits.maxAgentChainDepth` recognise a
+sibling. Bounded at thirty seconds on a relay that sends no EOSE, and skipped entirely on
+one that refuses the kind — where the cap goes on not firing, as it did before.
+
+**A `token:` that names a non-default secretRef and resolves to nothing now leaves the
+`ox` child with no credential**, rather than letting it inherit whatever `SAGEOX_TOKEN` the
+gateway process happens to hold — which on a host running several agents is another
+agent's. Such an agent loses team memory and says so, where before it answered as somebody
+else. The default ref is unaffected: it resolves from that same variable.
+
+Two things want the new image before they are worth configuring: `surface-read` is not a
+server an older binary can be asked to add, and `mention` on `post_message` is dropped by
+one as an undeclared argument, leaving a post that wakes nobody.
+
+**The Helm chart moves to 0.11.0**, for the one entry here that is templates rather than
+code: `persistence.jobCheckouts` mounts an agent's repository checkouts into its CronJob
+Pods. It renders on 0.2.0's image, and it is the only entry that does not need the new one.
+`values.yaml` is unchanged, so there is nothing new to set unless you want it; the
+dependency pin in the chart's README moves with the version.
+
 ### Added
 
 - **An agent can read the surface it is already on.** `SurfaceAdapter` could post, react
