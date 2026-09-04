@@ -137,6 +137,15 @@ describe("a proven line rendered verbatim", () => {
     );
   });
 
+  it("keeps the label on an empty sentence, so no setting can post a blank line", () => {
+    // `GateResultSchema` bounds `detail` with `string().optional()` and no `min(1)`, so a
+    // body may write an empty one — and `??` keeps it rather than composing the fallback.
+    // Truthiness is the whole of what stands between that and a channel line with nothing
+    // in it, and it is one keystroke from a change that reads like a tidy-up.
+    expect(describeVerdict(said("shift", 0, ""), "verbatim")).toBe("PROVEN: ");
+    expect(describeVerdict(said("shift", 0, ""))).toBe("PROVEN: ");
+  });
+
   it("changes nothing when it is not asked for", () => {
     expect(describeVerdict(said("shift", 0, shift))).toBe(`PROVEN: ${shift}`);
     expect(describeVerdict(said("shift", 0, shift), "labelled")).toBe(`PROVEN: ${shift}`);
