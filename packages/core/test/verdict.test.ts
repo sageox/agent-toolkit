@@ -113,6 +113,36 @@ describe("a gate's own detail", () => {
   });
 });
 
+// `report.proven: verbatim` — presentation, and only over PASS. These assertions are the
+// contract: a rewording that lets `verbatim` reach FAIL or UNKNOWN must fail here.
+describe("a proven line rendered verbatim", () => {
+  const said = (gate: string, exitCode: number | null, detail: string) =>
+    verdictFromGate({ gate, executed: true, exitCode, detail });
+  const shift = "The bench is full, so I tended [#3961](https://example.test/p/3961) instead.";
+
+  it("renders a passing body's own sentence as written", () => {
+    expect(describeVerdict(said("shift", 0, shift), "verbatim")).toBe(shift);
+  });
+
+  it("still labels a passing gate that said nothing — that sentence is the host's", () => {
+    expect(describeVerdict(pass("ci"), "verbatim")).toBe("PROVEN: ci passed (gate ci exited 0).");
+  });
+
+  it("cannot take the label off a FAIL or an UNKNOWN", () => {
+    expect(describeVerdict(said("ci", 1, "everything looks clean"), "verbatim")).toBe(
+      "FAILED: everything looks clean",
+    );
+    expect(describeVerdict(said("ci", null, "everything looks clean"), "verbatim")).toBe(
+      "NOT PROVEN: everything looks clean. No verdict — treat as unsafe until a gate runs.",
+    );
+  });
+
+  it("changes nothing when it is not asked for", () => {
+    expect(describeVerdict(said("shift", 0, shift))).toBe(`PROVEN: ${shift}`);
+    expect(describeVerdict(said("shift", 0, shift), "labelled")).toBe(`PROVEN: ${shift}`);
+  });
+});
+
 // The `@ts-expect-error` cases are checked by `pnpm typecheck`, which fails if any of
 // them stops erroring — that is the regression worth catching.
 describe("a verdict cannot be forged", () => {

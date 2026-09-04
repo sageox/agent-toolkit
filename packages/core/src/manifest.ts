@@ -861,6 +861,20 @@ const JobSchema = z
          */
         announce: z.enum(["unproven", "always", "reported"]).default("unproven"),
         /**
+         * How a *passing* gate's line reads. `ProvenVoice` in `verdict.ts` has the rule.
+         *
+         * `labelled`, the default, is the shape every job has had: `PROVEN:` in front of
+         * every passing line. It is right while the sentence after it is the host's, and
+         * wrong for the job whose gates are a shift report — a body that wrote *the bench is
+         * full, so I tended what's already open* composed something for a person to read,
+         * and the machine word in front of it is what makes it read as machinery.
+         *
+         * `verbatim` buys no pass and hides no failure: it reaches PASS alone, the verdict
+         * is still minted from what the body ran, and the headline stays host-phrased —
+         * a combined verdict carries none of the body's words.
+         */
+        proven: z.enum(["labelled", "verbatim"]).default("labelled"),
+        /**
          * Whether this job's body may talk through this channel while it runs, rather than
          * only being reported into it when it is over.
          *
