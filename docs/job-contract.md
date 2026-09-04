@@ -208,6 +208,27 @@ and it lowers no floor: a body that wrote no gates is UNKNOWN and is announced.
 No mode announces a job the switch or a suspension refused: that silence is about a posture
 somebody chose, and the run these modes weigh never happened.
 
+`PROVEN:` in front of that sentence is right while the sentence after it is the host's, and
+wrong for the job whose gates *are* the report — a body that wrote *the bench is full, so I
+tended #3961 instead* composed something for a person to read, and the machine word in front
+of it is what makes a human update read like machinery. Declare `proven: verbatim` and it
+posts as written:
+
+```yaml
+report:
+  surface: buzz
+  channel: "…"
+  proven: verbatim     # default: labelled
+```
+
+It is presentation and it reaches PASS alone. A passing gate that wrote no `detail` still
+reads `PROVEN: …`, because the sentence there is the host's machine phrasing rather than
+anybody's prose. **FAIL and UNKNOWN keep their label under both values** — that label is the
+whole of what stops a body's *everything looks clean* on a gate that exited 1 from reading
+as a success, and no setting takes it away. The verdict is still minted here from what the
+body ran, and the headline is still host-phrased: a combined verdict carries none of the
+body's words, so there is nothing there for `verbatim` to render.
+
 ## A job that probes
 
 Everything above describes a job that **observes**: it reads something, writes the gates it

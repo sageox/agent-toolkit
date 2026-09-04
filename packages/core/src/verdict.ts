@@ -104,6 +104,21 @@ export function combineVerdicts(verdicts: readonly Verdict[]): Verdict {
 }
 
 /**
+ * How a passing line is rendered — the only presentation choice a job gets, and it reaches
+ * PASS alone.
+ *
+ * `labelled` is the default and the shape every job has had: `PROVEN:` in front of the
+ * sentence. `verbatim` drops that word for the sentences a *body* wrote — a passing gate
+ * carrying a `detail` renders as that detail and nothing else — so a job whose gates are a
+ * shift report reads as one. A passing gate with no `detail` is unmoved by it: the sentence
+ * there is the host's machine phrasing, and unlabelled machine phrasing is not prose.
+ *
+ * FAIL and UNKNOWN are unmoved by either value. Their label is the whole of what stops a
+ * body's reassuring sentence from reading as a pass, and no setting may take it away.
+ */
+export type ProvenVoice = "labelled" | "verbatim";
+
+/**
  * UNKNOWN and FAIL must not contain a word a skimming reader could mistake for
  * success. `verdict.test.ts` asserts it.
  *
@@ -111,12 +126,17 @@ export function combineVerdicts(verdicts: readonly Verdict[]): Verdict {
  * status word in front of it is still this module's, so a body that writes "all clear"
  * on a gate that exited 1 gets "FAILED: all clear" rather than a line that reads as a
  * pass. `combineVerdicts` never copies a detail forward, so the run's own verdict — the
- * one `jobStatus` puts in the headline — stays entirely host-phrased.
+ * one `jobStatus` puts in the headline — stays entirely host-phrased, under either
+ * {@link ProvenVoice}: there is no detail on a combined verdict for `verbatim` to render.
  */
-export function describeVerdict(v: Verdict): string {
+export function describeVerdict(v: Verdict, proven: ProvenVoice = "labelled"): string {
   switch (v.status) {
-    case "PASS":
-      return `PROVEN: ${v.detail ?? `${v.gate} passed (${v.reason}).`}`;
+    case "PASS": {
+      // Tested against `v.detail` rather than against `said`: the label comes off the
+      // body's own sentence, never off the fallback composed on the line above.
+      const said = v.detail ?? `${v.gate} passed (${v.reason}).`;
+      return proven === "verbatim" && v.detail ? said : `PROVEN: ${said}`;
+    }
     case "FAIL":
       return `FAILED: ${v.detail ?? `${v.gate} did not pass (${v.reason}).`}`;
     case "UNKNOWN": {

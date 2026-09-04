@@ -1724,7 +1724,7 @@ async function jobCmd(argv: string[]): Promise<void> {
   // Headline, then the gates beneath it — the shape a job's status post takes, and the
   // reason it takes it: the verdict is what gets read, and the gates are why it says that.
   // The same rendering the chat tool returns, so one run reads one way wherever it lands.
-  process.stdout.write(describeJobRun(run));
+  process.stdout.write(describeJobRun(run, job.report?.proven));
   const denied = run.outcome === "denied-switch" || run.outcome === "denied-suspend";
   if (denied && trigger === "on-request") {
     process.stdout.write("  a run started from this CLI is `system`, and does not bypass\n");

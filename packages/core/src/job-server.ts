@@ -326,7 +326,8 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
         // forgotten which message it was answering. The verdict goes back as the same text
         // a waited-for call returns, so the two shapes read alike where they arrive.
         const home = answering?.() ?? null;
-        const answer = home && reply ? (run: JobRun) => reply(home, describeRun(run)) : undefined;
+        const answer =
+          home && reply ? (run: JobRun) => reply(home, describeRun(run, job)) : undefined;
         const start = await host.startRequest(
           job,
           requester(agentName, answering, owner),
@@ -334,19 +335,22 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
           answer,
         );
         return start.refused
-          ? describeRun(start.refused)
+          ? describeRun(start.refused, job)
           : describeStart(job, start, answer !== undefined);
       }
-      return describeRun(await host.request(job, requester(agentName, answering, owner), params));
+      return describeRun(
+        await host.request(job, requester(agentName, answering, owner), params),
+        job,
+      );
     },
   });
 }
 
 /** A finished run, plus the one thing about a refusal the brain can do something with. */
-function describeRun(run: JobRun): string {
+function describeRun(run: JobRun, job: JobConfig): string {
   const parked = run.outcome === "denied-switch" || run.outcome === "denied-suspend";
   return (
-    describeJobRun(run) +
+    describeJobRun(run, job.report?.proven) +
     // Named here rather than left to the reason line, because the brain is about to
     // explain the refusal to whoever asked, and which side of the bypass this run fell on
     // is the part of it they can act on.

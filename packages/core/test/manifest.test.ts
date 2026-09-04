@@ -919,7 +919,13 @@ describe("jobs", () => {
     ).toThrow(/report.surface/);
     expect(
       loadManifest(withJob({ report: "{surface: console, channel: hive}" })).jobs[0].report,
-    ).toEqual({ surface: "console", channel: "hive", announce: "unproven", probe: false });
+    ).toEqual({
+      surface: "console",
+      channel: "hive",
+      announce: "unproven",
+      proven: "labelled",
+      probe: false,
+    });
   });
 
   it("gates the status post on the verdict unless the job says otherwise", () => {
@@ -938,6 +944,20 @@ describe("jobs", () => {
     // altogether would throw `Unrecognized key: "announce"` and satisfy a looser match.
     expect(() =>
       loadManifest(withJob({ report: "{surface: console, channel: hive, announce: sometimes}" })),
+    ).toThrow(/expected one of/);
+  });
+
+  it("labels a proven line unless the job asks for the body's own sentence", () => {
+    // The default is the rendering every job had before the field existed. Presentation
+    // only, and over PASS alone — `verdict.test.ts` holds the half that matters.
+    const declared = (report: string) => loadManifest(withJob({ report })).jobs[0].report?.proven;
+    expect(declared("{surface: console, channel: hive}")).toBe("labelled");
+    expect(declared("{surface: console, channel: hive, proven: verbatim}")).toBe("verbatim");
+
+    // A word nobody implements is refused rather than read as `verbatim`: a job asking for
+    // prose and silently getting the label back is the failure this field exists to end.
+    expect(() =>
+      loadManifest(withJob({ report: "{surface: console, channel: hive, proven: human}" })),
     ).toThrow(/expected one of/);
   });
 

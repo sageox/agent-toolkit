@@ -25,6 +25,7 @@ import {
   describeVerdict,
   isProven,
   verdictFromGate,
+  type ProvenVoice,
   type Verdict,
 } from "./verdict.ts";
 
@@ -701,7 +702,7 @@ export class JobHost {
     const report = job.report;
     const post = this.opts.post;
     if (!report || !post || !announces(run, detached, report.announce)) return;
-    const { headline, detail } = jobStatus(run);
+    const { headline, detail } = jobStatus(run, report.proven);
 
     // Every line is attempted on its own. One rejection is as likely to be about one
     // message — too long, rate-limited, refused by the guard — as about the channel, and a
@@ -1199,7 +1200,10 @@ export class JobHost {
  * {@link describeJobRun}. The verdict line is `describeVerdict`'s, so an unrun gate cannot
  * be phrased as a passing one here either.
  */
-export function jobStatus(run: JobRun): { headline: string; detail: readonly string[] } {
+export function jobStatus(
+  run: JobRun,
+  proven?: ProvenVoice,
+): { headline: string; detail: readonly string[] } {
   // With one gate the combined verdict already *is* that gate, said once — and a count is
   // only information when there is something for it to be a count of.
   const threaded = run.gates.length > 1;
@@ -1210,7 +1214,7 @@ export function jobStatus(run: JobRun): { headline: string; detail: readonly str
     headline:
       `job ${run.jobSlug} ${run.outcome} in ${run.endedAt - run.startedAt}ms — ` +
       `${run.reason}. ${describeVerdict(run.verdict)}${tally}`,
-    detail: threaded ? run.gates.map(describeVerdict) : [],
+    detail: threaded ? run.gates.map((gate) => describeVerdict(gate, proven)) : [],
   };
 }
 
@@ -1222,8 +1226,8 @@ export function jobStatus(run: JobRun): { headline: string; detail: readonly str
  * another in a channel is two reports of one run, and the one somebody acts on is whichever
  * they saw.
  */
-export function describeJobRun(run: JobRun): string {
-  const { headline, detail } = jobStatus(run);
+export function describeJobRun(run: JobRun, proven?: ProvenVoice): string {
+  const { headline, detail } = jobStatus(run, proven);
   const lines = [headline, ...detail.map((line) => `  ${line}`)];
   // Only ever true for a run a human asked for, so it reaches the person who asked. It is
   // deliberately not in the headline: the channel is told about runs, not about postures.

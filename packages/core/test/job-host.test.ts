@@ -15,7 +15,7 @@ import {
 import type { EventRef } from "../src/events.ts";
 import type { SwitchLookup, SwitchSource } from "../src/kill-switch.ts";
 import { loadManifest, type JobAnnounce, type JobConfig } from "../src/manifest.ts";
-import { combineVerdicts, describeVerdict } from "../src/verdict.ts";
+import { combineVerdicts, describeVerdict, type ProvenVoice } from "../src/verdict.ts";
 
 const base =
   "name: x\nbrain: {provider: mock}\nsurfaces: [{kind: console}]\nrespondTo: anyone\n" +
@@ -609,6 +609,7 @@ describe("the status post", () => {
   const feed = (
     id: (n: number) => EventRef | undefined = named,
     announce: JobAnnounce = "unproven",
+    proven: ProvenVoice = "labelled",
   ) => {
     const posts: Array<{ text: string; threadRoot?: EventRef; mentions?: readonly string[] }> = [];
     const post: JobPoster = async (report, text, threadRoot, mentions) => {
@@ -619,7 +620,13 @@ describe("the status post", () => {
       posts.push({ text, threadRoot, mentions });
       // Whole-object, so a field added to the destination has to be accounted for here
       // rather than reaching every poster unnoticed.
-      expect(report).toEqual({ surface: "console", channel: "hive", announce, probe: false });
+      expect(report).toEqual({
+        surface: "console",
+        channel: "hive",
+        announce,
+        proven,
+        probe: false,
+      });
       return id(posts.length);
     };
     return { posts, post };
@@ -653,7 +660,9 @@ describe("the status post", () => {
       { surface: "c", nativeId: "e1" },
       { surface: "c", nativeId: "e1" },
     ]);
-    expect(posts.slice(1).map((p) => p.text)).toEqual(run.gates.map(describeVerdict));
+    expect(posts.slice(1).map((p) => p.text)).toEqual(
+      run.gates.map((gate) => describeVerdict(gate)),
+    );
   });
 
   it("threads the body's own sentence, and keeps the headline the host's", async () => {
@@ -756,6 +765,52 @@ describe("the status post", () => {
     ]);
     // The body chose to speak; it did not choose what it is called.
     expect(posts[0].text).not.toContain(said);
+  });
+
+  it("drops the PROVEN label from a passing body's sentence when the job asks it to", async () => {
+    // The job this exists for: a scheduled shift report, whose gates are prose written for
+    // the people in the channel. `PROVEN:` in front of that sentence is the one thing
+    // making a human update read like machinery.
+    const said = "The bench is full, so I tended [#3961](https://example.test/p/3961) instead.";
+    const { posts, post } = feed(named, "reported", "verbatim");
+    const run = await host(undefined, post).tick(
+      body(
+        `${MARK}${WRITE}JSON.stringify({gates:[{gate:"shift",executed:true,exitCode:0,` +
+          `detail:${JSON.stringify(said)}}]}))`,
+        { report: "{surface: console, channel: hive, announce: reported, proven: verbatim}" },
+      ),
+    );
+
+    expect(run.verdict.status).toBe("PASS");
+    expect(posts.slice(1).map((p) => p.text)).toEqual([
+      // The host's own gate said nothing, so there is no body sentence to render and the
+      // label stays: unlabelled machine phrasing is not prose.
+      "PROVEN: job:sweep passed (gate job:sweep exited 0).",
+      said,
+    ]);
+    // Presentation only. The verdict is unmoved, and the headline is still minted from the
+    // combined verdict — which carries no body's words for `verbatim` to render.
+    expect(posts[0].text).toContain("PROVEN: combined passed");
+    expect(posts[0].text).not.toContain(said);
+  });
+
+  it("keeps the label on a failing gate however the job asks it to render a pass", async () => {
+    // The floor: `verbatim` is over PASS alone. A body that writes a reassuring sentence on
+    // a gate that exited 1 must not be able to buy a line that reads as a success.
+    const { posts, post } = feed(named, "unproven", "verbatim");
+    await host(undefined, post).tick(
+      body(
+        `${MARK}${WRITE}JSON.stringify({gates:[{gate:"shift",executed:true,exitCode:1,` +
+          `detail:"all clear, nothing to do"},{gate:"idle",executed:false,exitCode:null}]}))`,
+        { report: "{surface: console, channel: hive, proven: verbatim}" },
+      ),
+    );
+
+    expect(posts.slice(1).map((p) => p.text)).toEqual([
+      "PROVEN: job:sweep passed (gate job:sweep exited 0).",
+      "FAILED: all clear, nothing to do",
+      "NOT PROVEN: gate idle did not execute. No verdict — treat as unsafe until a gate runs.",
+    ]);
   });
 
   it("says nothing under reported for a proven run whose gates carry no sentence", async () => {

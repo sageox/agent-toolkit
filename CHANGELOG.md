@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A passing gate's own sentence can render as written.** The host puts `PROVEN:` in front
+  of every line a passing gate produces, which is right while the sentence after it is the
+  host's own machine phrasing and wrong for a job whose gates are a shift report — a body
+  that wrote *the bench is full, so I tended #3961 instead* composed something for a person
+  to read, and the machine word in front of it is the one thing making it read as
+  machinery. Declare `report.proven: verbatim` and that sentence posts as written.
+  It reaches PASS alone, and only the lines a body wrote: a passing gate that said nothing
+  still reads `PROVEN: …`, because the sentence there is the host's; FAIL and UNKNOWN keep
+  their label under every value, since that label is the whole of what stops a body's
+  reassuring prose from reading as a success. Nothing about how a verdict is derived or
+  recorded moves, and the headline stays host-phrased — a combined verdict carries none of
+  the body's words for `verbatim` to render. The default, `labelled`, is what every job
+  posts today, so a job that declares nothing reads exactly as it did.
+
 ## [0.3.0] - 2026-09-03
 
 Everything below shipped after `v0.2.0`.
