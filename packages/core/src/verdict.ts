@@ -133,7 +133,10 @@ export function describeVerdict(v: Verdict, proven: ProvenVoice = "labelled"): s
   switch (v.status) {
     case "PASS": {
       // Tested against `v.detail` rather than against `said`: the label comes off the
-      // body's own sentence, never off the fallback composed on the line above.
+      // body's own sentence, never off the fallback composed on the line above. Truthiness
+      // rather than `!== undefined` — `detail: ""` is admissible and reaches `said` intact,
+      // so the stricter test that would look like it matched the `??` renders a line with
+      // nothing in it.
       const said = v.detail ?? `${v.gate} passed (${v.reason}).`;
       return proven === "verbatim" && v.detail ? said : `PROVEN: ${said}`;
     }
