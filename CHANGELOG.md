@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-04
+
+Published as `ghcr.io/sageox/agent-base:0.3.1`, which takes `:latest` and moves `:0.3`
+forward onto it. There is nothing new to set, and no `agent.yaml` that works today stops
+working.
+
+One behaviour changes without being asked for: `limits.turnTimeoutMs` now also bounds the
+brain's tool calls. At its default that is the more permissive of the two clocks, so a call
+the brain used to abandon inside a still-live turn now runs to the end of it. An agent that
+lowered `turnTimeoutMs` to bound a wedged channel has tightened its tool calls by the same
+move — those calls were already outliving the turn that would have used their result, so
+nothing that reaches a channel today stops reaching it, but the number now means both
+things.
+
 - **A job short enough to wait for is no longer abandoned partway through the wait.** There
   was a third clock nothing in the bundle named: the brain's MCP client gives up on a tool
   call on its own timeout, and whenever that was shorter than the turn it was the one that
