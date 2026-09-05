@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A job short enough to wait for is no longer abandoned partway through the wait.** There
+  was a third clock nothing in the bundle named: the brain's MCP client gives up on a tool
+  call on its own timeout, and whenever that was shorter than the turn it was the one that
+  bound. `job_run` waits for exactly those jobs whose deadline fits inside
+  `limits.turnTimeoutMs` — correct by its own arithmetic, against a number that never
+  applied. The brain was handed a failing tool and told the channel the job had produced
+  nothing; the job then finished and posted its own, correct result, and the only record the
+  gateway kept of the dropped call read `outcome=ok`. The brain subprocess is now started
+  with its tool-call timeout set from `limits.turnTimeoutMs`, so the number `job_run` weighs
+  a job's deadline against is the number that applies. Raise `limits.turnTimeoutMs` and both
+  bounds move together; there is nothing new to set.
+
 - **A passing gate's own sentence can render as written.** The host puts `PROVEN:` in front
   of every line a passing gate produces, which is right while the sentence after it is the
   host's own machine phrasing and wrong for a job whose gates are a shift report — a body
