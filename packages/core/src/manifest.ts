@@ -196,7 +196,10 @@ const LimitsSchema = z.object({
   maxAgentChainDepth: z.number().int().positive().default(2),
   maxConcurrentChannels: z.number().int().positive().default(4),
   channelQueueLimit: z.number().int().positive().default(32),
-  /** A turn that outlives this releases its channel; without it one hang wedges the gateway. */
+  /**
+   * A turn that outlives this releases its channel; without it one hang wedges the gateway.
+   * It is also the brain's MCP tool-call timeout, so no call is cut off inside a live turn.
+   */
   turnTimeoutMs: z.number().int().positive().default(120_000),
 });
 

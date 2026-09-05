@@ -492,6 +492,8 @@ async function buildBrain(
       // is never in it.
       apiKey: resolveSecret("ANTHROPIC_API_KEY", { dir: secretsDir }),
       model: manifest.brain.model,
+      // The number `job_run` weighs a job's deadline against, so the two cannot disagree.
+      turnTimeoutMs: manifest.limits.turnTimeoutMs,
     }),
     closeHosted: async () => {
       for (const h of hosted) await h.close().catch(() => {});
