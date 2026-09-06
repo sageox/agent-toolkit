@@ -240,6 +240,12 @@ function readManifest(path: string): AgentManifest {
   // normalized in its own namespace rather than all of them as Nostr keys.
   if (manifest.owner) manifest.owner = manifest.owner.map(normalizeActorId);
   if (manifest.allowlist) manifest.allowlist = manifest.allowlist.map(normalizeActorId);
+  // The third list, and the one whose omission is silent: a wrong `owner` locks its owner
+  // out on the next message, while an npub here matches nobody until the emergency it
+  // exists for.
+  if (manifest.killSwitchParkBy) {
+    manifest.killSwitchParkBy = manifest.killSwitchParkBy.map(normalizeActorId);
+  }
   return manifest;
 }
 
@@ -451,8 +457,13 @@ async function buildBrain(
           signer: await resolveBuzzSigner(buzz.identity, { dir: secretsDir }),
           writeScope: cfg.writeScope,
           // The write side of §6.3 rule 4. The switch lives in this brain, so this brain is
-          // where "anyone may park a job, only a human may arm one" stops being steering.
+          // where "who may park a job, and who may arm one" stops being steering.
           killSwitches: jobSwitches(manifest).map((s) => s.key),
+          // A `tools/call` carries nothing about the turn, so who is asking comes off the
+          // same live-turn registry `answering` reads above. The author rather than a
+          // verdict: this brain's test is not the job door's — see `admits`.
+          parkBy: manifest.killSwitchParkBy ?? [],
+          asking: egress && (() => egress.asking()),
         },
         serveAt,
       );
@@ -2228,6 +2239,15 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
         "arm a job with `sageox-agent job arm <slug>` on this host, park it with `job park` — " +
           "the agent's own brain may park a switch through brain_write and can never arm one",
       );
+      // "no listed agent" rather than "no agent": the gate refuses on positive evidence of
+      // one, so an asker no surface flags is admitted. Read as a deny-all this line would
+      // promise a boundary the code does not implement.
+      const parkers = manifest.killSwitchParkBy ?? [];
+      ok.push(
+        "a park through a turn is honoured from a human, and from " +
+          (parkers.length ? parkers.join(", ") : "no listed agent") +
+          " — an asker this surface cannot identify as an agent is honoured too",
+      );
       if (!manifest.brains.some((brain) => brain.preset === "private")) {
         // Reported, not enforced: a fail-open job declared this posture on purpose. But
         // nothing can park it either, and a kill switch nobody can flip is one in name.
@@ -2593,10 +2613,10 @@ running it:
                                run one declared job once and exit — what a CronJob execs.
                                The trigger is stamped from this flag; a run started here is
                                \`system\`, so it does not bypass a parked job
-  job arm | park <slug>       flip one job's kill switch. Anyone may park a job, and only
-                               a human may arm one — so this host, holding the agent's
-                               signing key, is the only place arming happens. The agent's
-                               own brain can park a switch and is refused if it tries to arm
+  job arm | park <slug>       flip one job's kill switch. Only a human may arm one — so
+                               this host, holding the agent's signing key, is the only place
+                               arming happens. The agent's own brain can park a switch, from
+                               a turn \`killSwitchParkBy\` admits, and never arm one
   try [--brain mock|claude-acp] [--model <id>]
                                talk to a throwaway agent, no config at all
 

@@ -454,6 +454,80 @@ describe("private-brain MCP", () => {
         .toThrow(/outside this agent's write scope/);
     });
 
+    /**
+      * Every case here writes a value that parks, so the value gate admits all of them and
+      * any difference in outcome is the author of the turn behind the call.
+      */
+    describe("who the park is taken from", () => {
+      const actor = (id: string, isAgent: boolean) =>
+        ({ surface: "buzz", id, isSelf: false, isAgent }) as const;
+
+      const parked = (store: EngramStore, asking: () => ReturnType<typeof actor> | null) =>
+        privateBrainHandler(store, {
+          killSwitches: ["mem/shift/enabled"],
+          parkBy: ["npub1beekeeper"],
+          asking,
+        });
+
+      const park = (handler: ReturnType<typeof privateBrainHandler>) =>
+        call(handler, "brain_write", { slug: "mem/shift/enabled", value: "off" });
+
+      it("refuses an agent the manifest does not name, and admits the one it does", async () => {
+        const { store } = await setup();
+        await expect(park(parked(store, () => actor("npub1stranger", true)))).rejects.toThrow(
+          /does not name in killSwitchParkBy/,
+        );
+        // The designated stopper. Without this the fleet's emergency brake is what breaks.
+        await expect(park(parked(store, () => actor("npub1beekeeper", true)))).resolves
+          .toBeDefined();
+      });
+
+      it("admits a human, and anyone the surface cannot call an agent", async () => {
+        // Positive evidence of an agent, so it only narrows — a refusal to park is a kill
+        // switch that failed.
+        const { store } = await setup();
+        await expect(park(parked(store, () => actor("npub1ryan", false)))).resolves.toBeDefined();
+        // No turn the gateway can name — none live, or two channels mid-turn at once.
+        await expect(park(parked(store, () => null))).resolves.toBeDefined();
+      });
+
+      it("leaves a deployment that binds no gateway exactly as it was", async () => {
+        // `asking` is unset for a caller with no chat surface: ungated, not impossible.
+        const { store } = await setup();
+        const handler = privateBrainHandler(store, { killSwitches: ["mem/shift/enabled"] });
+        await expect(park(handler)).resolves.toBeDefined();
+      });
+
+      it("still refuses a named agent the arm and the delete", async () => {
+        // One-directional, and the order in `admits` is what makes it so: the arm refusal
+        // runs first and never looks at who is asking.
+        const { store } = await setup();
+        const handler = parked(store, () => actor("npub1beekeeper", true));
+        await expect(call(handler, "brain_write", { slug: "mem/shift/enabled", value: "on" }))
+          .rejects.toThrow(/only a human may arm a job/);
+        await expect(call(handler, "brain_delete", { slug: "mem/shift/enabled" })).rejects
+          .toThrow(/only a human may arm a job/);
+      });
+
+      it("names no asker in what it says, since that text reaches a chat surface", async () => {
+        // Surface-asserted text on its way to a channel; `killSwitchParkBy` is where an
+        // operator reads who may.
+        const { store } = await setup();
+        await expect(
+          park(parked(store, () => actor("npub1stranger", true))),
+        ).rejects.toThrow(/^(?=.*does not name in killSwitchParkBy)(?!.*npub1stranger)/s);
+      });
+
+      it("states the bound in the descriptions, so it is not rediscovered by retrying", async () => {
+        const { store } = await setup();
+        const listed = await parked(store, () => null)({ id: 1, method: "tools/list" });
+        const tools = listed?.tools as Array<{ name: string; description: string }>;
+        const bounded = tools.filter((tool) => /from an agent this deployment does not name/
+          .test(tool.description));
+        expect(bounded.map((tool) => tool.name)).toEqual(["brain_write", "brain_delete"]);
+      });
+    });
+
     it("states the rule in the descriptions of the two tools it constrains", async () => {
       // A bound the model cannot see is a bound it spends turns rediscovering — here, by
       // retrying an arming write it will never be allowed to make.

@@ -19,7 +19,7 @@ import { combineVerdicts, describeVerdict, type ProvenVoice } from "../src/verdi
 
 const base =
   "name: x\nbrain: {provider: mock}\nsurfaces: [{kind: console}]\nrespondTo: anyone\n" +
-  "brains: [{preset: local}]\n";
+  "brains: [{preset: local}]\nkillSwitchParkBy: []\n";
 
 const declared = {
   slug: "sweep",

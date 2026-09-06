@@ -2,6 +2,13 @@
 
 <sub>[Setup guide](../../SETUP.md) · 6 of 6 · run these commands from the repository root</sub>
 
+**It will not start, and the config error names `killSwitchParkBy`.**
+Any agent that declares a job `killSwitch` must also say which agents may park it through a
+turn: `killSwitchParkBy: []` for none, or the ids that may. There is no default, because
+absent and empty are different answers and only one of them is a decision — a release that
+enforced the rule while a manifest had not yet named its stopper would silence that stopper
+with nothing to say so. Refused at load rather than discovered during an incident.
+
 **The agent is running but never answers.**
 Check the log for `event_skipped` — the `reason` names the gate: `own_message`,
 `not_mentioned`, `author_gate:owner-only` (the sender is not the owner), `kill_switch`, or
@@ -18,6 +25,16 @@ Something asked for a capability it does not hold. Once is a bundle with a line 
 `reason` says which gate answered: the policy, the server's `scope`, or the leak scan.
 Repeatedly, on an agent reading a channel anybody can post in, read it as what it is: an
 attempt, refused, that would not otherwise have left a trace.
+
+**A park of a job kill switch was refused, and you expected it to be honoured.**
+The refusal names `killSwitchParkBy`. Either the asking agent is not on that list, or it is
+there as an id the surface never sends: a Buzz author arrives as a 64-character hex pubkey,
+and an `npub` in `agent.yaml` is converted to that form at load. `sageox-agent doctor` prints
+each parker in the form actually compared, so what it shows is what must equal the agent's
+own pubkey — an id for some other surface passes through untouched and matches nothing here.
+Neither a human's park nor one the gateway cannot attribute to an identified agent is
+refused this way — the list bounds who is turned away, not who gets through — and nothing on
+it may ever arm or delete a switch.
 
 **`turn_failed` in the log.**
 Brain-side. The error follows on the same line. A turn that exceeds `limits.turnTimeoutMs`

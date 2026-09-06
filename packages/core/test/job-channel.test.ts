@@ -27,7 +27,7 @@ import type { McpHandler } from "../src/mcp-http.ts";
 
 const base =
   "name: beekeeper\nbrain: {provider: mock}\nsurfaces: [{kind: console}]\nrespondTo: anyone\n" +
-  "brains: [{preset: local}]\n";
+  "brains: [{preset: local}]\nkillSwitchParkBy: []\n";
 
 /** One declared job, through the real schema so `report` carries what a bundle would get. */
 const job = (report: string): JobConfig =>

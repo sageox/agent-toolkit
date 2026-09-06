@@ -966,6 +966,14 @@ const ManifestSchema = z
     brains: z.array(BrainSchema).default([]),
     mcpServers: z.array(McpServerSchema).default([]),
     jobs: z.array(JobSchema).default([]),
+    /**
+     * Which agents may park this agent's job kill switches through a turn. A named agent
+     * still may not arm or delete one, and a human's park is never gated by this.
+     *
+     * Ids, never names: a directory record's name is self-asserted, so a stranger
+     * publishing that name would inherit the exemption. One id per surface, as `owner` is.
+     */
+    killSwitchParkBy: z.array(z.string().min(1)).optional(),
   })
   .strict()
   // A gate that cannot identify anyone admits nobody, so refuse the config at load
@@ -1052,6 +1060,15 @@ const ManifestSchema = z
   .refine((m) => new Set(m.jobs.map((job) => job.slug)).size === m.jobs.length, {
     message: "job slugs must be unique — a slug names the job, the switch, and the run record",
     path: ["jobs"],
+  })
+  // Required rather than defaulted, for the reason `failDirection` is: a release enforcing
+  // the refusal before a manifest names its stopper would silence that stopper with nothing
+  // to say so, and a pod that will not start is the louder half of that trade.
+  .refine((m) => !m.jobs.some((job) => job.killSwitch) || m.killSwitchParkBy !== undefined, {
+    message:
+      "a job declares a killSwitch, so killSwitchParkBy must say which agents may park it " +
+      "through a turn — [] for none, or the ids that may",
+    path: ["killSwitchParkBy"],
   })
   // The fleet's `cron-agent-kill-switch` invariant, moved somewhere a non-Kubernetes
   // consumer also gets it: nothing that runs with no human watching may be unstoppable

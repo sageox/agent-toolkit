@@ -20,7 +20,7 @@ import { ToolPolicy } from "../src/tool-policy.ts";
  */
 const base =
   "name: whittle\nbrain: {provider: mock}\nsurfaces: [{kind: console}]\nrespondTo: anyone\n" +
-  "brains: [{preset: local}]\n";
+  "brains: [{preset: local}]\nkillSwitchParkBy: []\n";
 
 const SHIFT =
   "{slug: shift, archetype: shift, description: 'A bounded pass over the repository.', " +

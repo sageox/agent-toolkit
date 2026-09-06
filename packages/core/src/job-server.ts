@@ -104,12 +104,11 @@ export interface JobToolOptions {
  * author is not on the call and is read off the gateway instead. That is the same live-turn
  * registry the reaction tool reads to put a glyph on "the message you are answering".
  *
- * **`human` is `owner`, and it is not `!isAgent`.** Only the surface can tell an agent from a
- * person, and Buzz cannot yet: `toActorRef` sets `isAgent` for this agent's own pubkey and
- * nobody else's, because recognising siblings needs a roster the relay does not serve. So on
- * that surface `isAgent: false` means *not known to be an agent*, and reading it as evidence
- * of a person would hand every sibling in a fleet the bypass §6.3 rule 2 reserves for a
- * human. `owner` is the manifest's own list of the people this deployment answers to — the
+ * **`human` is `owner`, and it is not `!isAgent`.** The flag is positive evidence only:
+ * `toActorRef` sets it for this agent's own pubkey and for any the relay's directory lists,
+ * so `isAgent: false` means *not known to be an agent* — a sibling that published no record
+ * reads exactly like a person. Taking it for one would hand that sibling the bypass §6.3
+ * rule 2 reserves for a human. `owner` is the manifest's own list of the people this deployment answers to — the
  * one positive signal, written by an operator, that no surface has to compute — and
  * `isAgent` is kept alongside it because when a surface *can* say so it is real evidence,
  * and it can only narrow this.
