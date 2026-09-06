@@ -2,6 +2,13 @@
 
 <sub>[Setup guide](../../SETUP.md) · 6 of 6 · run these commands from the repository root</sub>
 
+**It will not start, and the config error names `killSwitchParkBy`.**
+Any agent that declares a job `killSwitch` must also say which agents may park it through a
+turn: `killSwitchParkBy: []` for none, or the ids that may. There is no default, because
+absent and empty are different answers and only one of them is a decision — a release that
+enforced the rule while a manifest had not yet named its stopper would silence that stopper
+with nothing to say so. Refused at load rather than discovered during an incident.
+
 **The agent is running but never answers.**
 Check the log for `event_skipped` — the `reason` names the gate: `own_message`,
 `not_mentioned`, `author_gate:owner-only` (the sender is not the owner), `kill_switch`, or
@@ -18,6 +25,13 @@ Something asked for a capability it does not hold. Once is a bundle with a line 
 `reason` says which gate answered: the policy, the server's `scope`, or the leak scan.
 Repeatedly, on an agent reading a channel anybody can post in, read it as what it is: an
 attempt, refused, that would not otherwise have left a trace.
+
+**A park of a job kill switch was refused, and you expected it to be honoured.**
+The refusal names `killSwitchParkBy`. Either the asking agent is not on that list, or it is
+on it in a spelling the surface does not use — Buzz events carry a 64-character hex pubkey,
+and `sageox-agent doctor` prints the list in the spelling actually compared, so an `npub`
+that survived to that line is not the problem and one that changed there is. A human's park
+is never refused this way, and nothing on the list may ever arm or delete a switch.
 
 **`turn_failed` in the log.**
 Brain-side. The error follows on the same line. A turn that exceeds `limits.turnTimeoutMs`
