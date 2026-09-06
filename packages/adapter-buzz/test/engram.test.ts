@@ -518,7 +518,7 @@ describe("private-brain MCP", () => {
         const { store } = await setup();
         await expect(
           park(parked(store, () => actor("npub1stranger", true))),
-        ).rejects.toThrow(/^(?!.*npub1stranger)/s);
+        ).rejects.toThrow(/^(?=.*does not name in killSwitchParkBy)(?!.*npub1stranger)/s);
       });
 
       it("states the bound in the descriptions, so it is not rediscovered by retrying", async () => {

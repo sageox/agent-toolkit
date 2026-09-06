@@ -96,6 +96,21 @@ describe("doctor and the job tool", () => {
   // A job nobody may ask for is a complete configuration: it has a clock, and the chat door
   // is the one thing it did not arm. Saying anything here would be `doctor` arguing with a
   // manifest that says exactly what its author meant.
+  it("reports the parkers in the spelling an event carries, not the one an operator typed", async () => {
+    // `chat-surfaces.md` spells `owner` as an npub, so a parker list will be written that
+    // way too — and a Buzz event carries hex. Unnormalized, the exemption matches nobody
+    // and nothing says so until the emergency it exists for. `owner` and `allowlist` have
+    // been normalized at load for this reason; this is the third list.
+    const npub = "npub1sn0wdenkukak0d9dfczzeacvhkrgz92ak56egt7vdgzn8pv2wfqqhrjdv9";
+    const hex = "84dee6e676e5bb67b4ad4e042cf70cbd8681155db535942fcc6a0533858a7240";
+    declare(
+      `${AGENT_YAML("demo")}\nbrains:\n  - preset: local\nkillSwitchParkBy: ["${npub}"]\n`,
+      '{schedules: ["0 3 * * *"]}\n    killSwitch: {failDirection: open}',
+    );
+
+    expect(await doctor(home)).toContain(`honoured from a human, and from ${hex}`);
+  });
+
   it("says nothing about a job that never armed the chat door", async () => {
     declare(
       `${AGENT_YAML("demo")}\nbrains:\n  - preset: local\nkillSwitchParkBy: []\n`,

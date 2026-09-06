@@ -240,6 +240,13 @@ function readManifest(path: string): AgentManifest {
   // normalized in its own namespace rather than all of them as Nostr keys.
   if (manifest.owner) manifest.owner = manifest.owner.map(normalizeActorId);
   if (manifest.allowlist) manifest.allowlist = manifest.allowlist.map(normalizeActorId);
+  // The third list of author ids, and the one that must not be left out: a `killSwitchParkBy`
+  // written as an npub — which is how `chat-surfaces.md` spells `owner` — would match nobody,
+  // and unlike the other two nothing would say so. A wrong `owner` locks its owner out on the
+  // next message; a wrong parker list works perfectly until the emergency it exists for.
+  if (manifest.killSwitchParkBy) {
+    manifest.killSwitchParkBy = manifest.killSwitchParkBy.map(normalizeActorId);
+  }
   return manifest;
 }
 
@@ -2238,10 +2245,15 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
       // Who a park is taken from, beside where an arm comes from, for the same reason: an
       // operator reads this before the incident rather than during one. `killSwitchParkBy`
       // is stated whenever a switch is declared, so there is no unset case to render.
+      //
+      // "no listed agent" rather than "no agent": the gate refuses on positive evidence of
+      // one, so an asker no surface flags is admitted. An operator reading this line as a
+      // deny-all would be reading a narrowing as a boundary.
       const parkers = manifest.killSwitchParkBy ?? [];
       ok.push(
         "a park through a turn is honoured from a human, and from " +
-          (parkers.length ? parkers.join(", ") : "no agent"),
+          (parkers.length ? parkers.join(", ") : "no listed agent") +
+          " — an asker this surface cannot identify as an agent is honoured too",
       );
       if (!manifest.brains.some((brain) => brain.preset === "private")) {
         // Reported, not enforced: a fail-open job declared this posture on purpose. But

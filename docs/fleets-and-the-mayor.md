@@ -161,6 +161,12 @@ leave it unsaid. `[]` keeps parking to humans. An id listed there may park — t
 pulling an emergency brake — and still may not arm or delete. Ids, never names: a name is
 self-asserted in the surface's own directory record.
 
+It narrows the blast radius rather than closing it. The check asks for positive evidence
+that the asker is an agent, so a pubkey the relay's directory does not list is admitted, as
+is a call arriving while two channels are mid-turn at once. That is the deliberate
+direction: refusing either would refuse a human's park, and a kill switch that refuses to
+park has failed. The steering each agent carries, and `suspend`, still do the rest.
+
 ## The spend cap the toolkit cannot enforce
 
 Give every agent its own provider workspace with a hard monthly cap. This is an operator

@@ -16,6 +16,12 @@ gateway is the only thing that ever saw who sent the message, so it now hands th
 to the write: a park is refused when the turn being answered is from an agent the manifest
 does not name. Arming and the tombstone are unchanged and still refused for everyone.
 
+It narrows, and it is not a boundary. The test is positive evidence of an agent, so a
+surface that cannot identify one admits the park — on Buzz that is a pubkey with no
+directory record — as does a call the gateway cannot place in a single live turn. Refusing
+those would refuse a human's park too, and a refusal to park is a kill switch that failed.
+Steering and `suspend` still carry the rest.
+
 **`killSwitchParkBy` is required once any job declares a `killSwitch`, and a manifest
 without it will not load.** Add `killSwitchParkBy: []` to keep parking to humans, or list
 the ids of the agents whose park this agent honours — a fleet supervisor that pulls an
