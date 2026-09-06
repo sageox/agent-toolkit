@@ -28,10 +28,12 @@ attempt, refused, that would not otherwise have left a trace.
 
 **A park of a job kill switch was refused, and you expected it to be honoured.**
 The refusal names `killSwitchParkBy`. Either the asking agent is not on that list, or it is
-on it in a spelling the surface does not use — Buzz events carry a 64-character hex pubkey,
-and `sageox-agent doctor` prints the list in the spelling actually compared, so an `npub`
-that survived to that line is not the problem and one that changed there is. A human's park
-is never refused this way, and nothing on the list may ever arm or delete a switch.
+there as an id the surface never sends: a Buzz author arrives as a 64-character hex pubkey,
+and an `npub` in `agent.yaml` is converted to that form at load. `sageox-agent doctor` prints
+each parker in the form actually compared, so what it shows is what must equal the agent's
+own pubkey — an id for some other surface passes through untouched and matches nothing here.
+A human's park is never refused this way, and nothing on the list may ever arm or delete a
+switch.
 
 **`turn_failed` in the log.**
 Brain-side. The error follows on the same line. A turn that exceeds `limits.turnTimeoutMs`
