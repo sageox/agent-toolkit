@@ -15,7 +15,7 @@ const KEY = "mem/sweep/enabled";
 function job(failDirection: "open" | "closed"): JobConfig {
   return loadManifest(
     "name: x\nbrain: {provider: mock}\nsurfaces: [{kind: console}]\nrespondTo: anyone\n" +
-      "brains: [{preset: local}]\n" +
+      "brains: [{preset: local}]\nkillSwitchParkBy: []\n" +
       "jobs: [{slug: sweep, archetype: sweep, description: 'Weekly pass.', " +
       `trigger: {schedules: ["0 3 * * 0"]}, killSwitch: {failDirection: ${failDirection}}, ` +
       "budget: {wallClockMs: 3600000}, run: {command: node}}]\n",

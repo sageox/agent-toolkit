@@ -3,6 +3,7 @@ import {
   mcpToolServer,
   serveMcp,
   ToolRefused,
+  type ActorRef,
   type HostedMcp,
   type McpHandler,
   type ServeOptions,
@@ -73,6 +74,8 @@ export const PRIVATE_BRAIN_TOOLS = [
 interface WriteGates {
   scope: readonly string[];
   killSwitches: readonly string[];
+  parkBy: readonly string[];
+  asking?: () => ActorRef | null;
 }
 
 export interface PrivateBrainOptions {
@@ -86,6 +89,21 @@ export interface PrivateBrainOptions {
    * armable — see {@link admits}.
    */
   killSwitches?: readonly string[];
+  /**
+   * `manifest.killSwitchParkBy` — the agents whose park of a declared switch is honoured.
+   * Everyone this deployment cannot see to be an agent is already honoured, so this only
+   * ever adds back the ones {@link admits} would otherwise refuse.
+   */
+  parkBy?: readonly string[];
+  /**
+   * The author of the message this agent is answering, or `null` when the gateway can name
+   * none — `SurfaceEgress.asking`, bound by the caller that holds the gateway.
+   *
+   * An {@link ActorRef} the gateway received, never a classification: a caller that could
+   * pass "this is a human" could pass it wrongly, and this is the whole of what decides
+   * whether a park is admitted.
+   */
+  asking?: () => ActorRef | null;
 }
 
 /**
@@ -104,7 +122,9 @@ function privateBrainTools(gates: WriteGates) {
     gates.killSwitches.length
       ? `A job kill switch (${gates.killSwitches.join(", ")}) can be parked from here — ` +
         "write any value that does not arm — but never armed or deleted: arming a job " +
-        "is a human's, on the deployment host."
+        "is a human's, on the deployment host. A park is refused too when the message you " +
+        "are answering is from an agent this deployment does not name as one that may " +
+        "park — say so rather than retrying."
       : "",
   ].filter(Boolean);
   if (!clauses.length) return PRIVATE_BRAIN_TOOLS;
@@ -143,6 +163,8 @@ export function privateBrainHandler(
     // on the first write — where it would read as the agent's own key being wrong.
     scope: (opts.writeScope ?? []).map(normalizeEngramPrefix),
     killSwitches: (opts.killSwitches ?? []).map(normalizeEngramSlug),
+    parkBy: opts.parkBy ?? [],
+    asking: opts.asking,
   };
   return mcpToolServer({
     // The name the server is wired under in `mcpServers` — `serverNameFor` in the CLI, and
@@ -204,19 +226,28 @@ async function callTool(
  * anything: `skills/rust` and `mem/skills/rust` are the same key, so a scope — or a kill
  * switch — compared against the raw argument would be one shorthand away from bypass.
  *
- * **Only a human may arm a job** (jobs RFC §6.3 rule 4). Nothing arriving at this surface
- * is one: a hosted MCP server is process-level, so a `tools/call` carries this server's
- * bearer token and the arguments and nothing about the turn that produced it. What is
- * readable is what actually called — this agent's own brain, mid-turn — so the rule is
- * enforceable here in exactly one direction, and that direction is refuse. Arming is
- * `sageox-agent job arm`, on the host, where the signing key this brain never sees lives.
+ * **Only a human may arm a job** (jobs RFC §6.3 rule 4), and nothing arriving here is one:
+ * a hosted MCP server is process-level, so a `tools/call` carries this server's bearer
+ * token and the arguments and nothing about the turn behind it. Arming is `sageox-agent job
+ * arm`, on the host, where the signing key this brain never sees lives.
  *
- * Two things it deliberately does not do. **It never refuses a parking write**, whatever the
- * value spells: a refusal to park is a kill switch that failed, and automation parking a
- * job is a kill switch working exactly as intended. And **it refuses the tombstone in both
- * fail-directions** — deleting the key leaves it unset, which a fail-open job resolves to
- * `on`, so a delete is an arming write wearing a different verb. Refusing it for a
- * fail-closed job too costs nothing, because writing a value that does not arm still parks.
+ * **A park is refused over its author, never over its value.** Any value that does not arm
+ * parks, because a refusal to park is a kill switch that failed. But `gates.asking` reads
+ * the author of the turn this call sits inside off the gateway — the same live-turn registry
+ * the reaction tool marks — and an author the surface knows to be an agent parks only if the
+ * manifest names it. That runs on **positive evidence of an agent** and so can only narrow:
+ * an author no surface flags, and a call the gateway cannot place in any one turn, are both
+ * admitted, which is what keeps a human's park ungated.
+ *
+ * Deliberately not the test the job door applies. That one asks for positive evidence of a
+ * *human* (`owner`), because admitting a parked job to run is a grant; this is a denial, so
+ * it asks for positive evidence of an agent. Collapsing them either refuses a colleague who
+ * is not the owner, or hands the exemption to every unrostered stranger.
+ *
+ * **It refuses the tombstone in both fail-directions** — deleting the key leaves it unset,
+ * which a fail-open job resolves to `on`, so a delete is an arming write wearing a different
+ * verb. Refusing it for a fail-closed job too costs nothing, because writing a value that
+ * does not arm still parks.
  *
  * **The switch is settled before the write scope, and the order is the point.** A scope is a
  * grant an operator narrowed on purpose, so it is right for every ordinary key — but a
@@ -235,20 +266,34 @@ function admits(
 ): string {
   const slug = normalizeEngramSlug(rawSlug);
   if (gates.killSwitches.includes(slug)) {
-    if (value !== null && interpretSwitchValue(value).state === "off") return slug;
-    // The key is in the manifest and the value is not, so the value never appears here:
-    // this reason is rendered on whatever surface the tool error reaches. It names the
-    // switch even for a key the scope would also have refused, because "you may not arm a
-    // job" is the fact worth acting on and "wrong subtree" would send a reader nowhere.
-    // `ToolRefused`, not a plain error: a gate stopped this before it ran, and of every
-    // refusal this deployment can produce, "something tried to arm a job through a turn"
-    // is the one an operator most needs to find. `tool_call outcome=failed` would file it
-    // under "the memory tool broke".
-    throw new ToolRefused(
-      `private-memory ${verb} refused: ${slug} is a job kill switch, and only a human may ` +
-        "arm a job — on the deployment host, never through a turn. Parking is never gated: " +
-        "write a value that does not arm.",
-    );
+    if (value === null || interpretSwitchValue(value).state === "on") {
+      // The key is in the manifest and the value is not, so the value never appears here:
+      // this reason is rendered on whatever surface the tool error reaches. It names the
+      // switch even for a key the scope would also have refused, because "you may not arm a
+      // job" is the fact worth acting on and "wrong subtree" would send a reader nowhere.
+      // `ToolRefused`, not a plain error: a gate stopped this before it ran, and of every
+      // refusal this deployment can produce, "something tried to arm a job through a turn"
+      // is the one an operator most needs to find. `tool_call outcome=failed` would file it
+      // under "the memory tool broke".
+      throw new ToolRefused(
+        `private-memory ${verb} refused: ${slug} is a job kill switch, and only a human may ` +
+          "arm a job — on the deployment host, never through a turn. A value that does not " +
+          "arm parks it instead.",
+      );
+    }
+    const author = gates.asking?.() ?? null;
+    if (author?.isAgent === true && !gates.parkBy.includes(author.id)) {
+      // The asker's id is not in it. It is asserted by the surface rather than by this
+      // agent, it reaches whatever channel renders the tool error, and `killSwitchParkBy`
+      // is where an operator reads who may — the same split `GuardVerdict.reason` keeps.
+      // The audit line carries the slug, and the gateway's own log carries the turn.
+      throw new ToolRefused(
+        `private-memory ${verb} refused: ${slug} is a job kill switch, and the message being ` +
+          "answered is from an agent this manifest does not name in killSwitchParkBy. A " +
+          "human may park it here, or anyone with the host may run `sageox-agent job park`.",
+      );
+    }
+    return slug;
   }
   if (gates.scope.length && !withinEngramScope(slug, gates.scope)) {
     // Likewise a gate: the operator configured this bound, and a write that hit it is a

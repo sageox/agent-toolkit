@@ -98,7 +98,7 @@ describe("doctor and the job tool", () => {
   // manifest that says exactly what its author meant.
   it("says nothing about a job that never armed the chat door", async () => {
     declare(
-      `${AGENT_YAML("demo")}\nbrains:\n  - preset: local\n`,
+      `${AGENT_YAML("demo")}\nbrains:\n  - preset: local\nkillSwitchParkBy: []\n`,
       '{schedules: ["0 3 * * *"]}\n    killSwitch: {failDirection: open}',
     );
 

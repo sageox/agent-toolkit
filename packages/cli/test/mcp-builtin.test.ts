@@ -64,7 +64,7 @@ describe("built-in MCP setup", () => {
     const declare = (trigger: string, extra = "") =>
       writeFileSync(
         join(agentDir, "agent.yaml"),
-        `${AGENT_YAML("demo")}\nbrains:\n  - preset: local\n` +
+        `${AGENT_YAML("demo")}\nbrains:\n  - preset: local\nkillSwitchParkBy: []\n` +
           "jobs:\n  - slug: shift\n    archetype: shift\n" +
           "    description: A bounded pass over the repository.\n" +
           `    trigger: ${trigger}\n${extra}` +

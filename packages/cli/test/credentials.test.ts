@@ -254,6 +254,7 @@ brains:
     age:
       recipient: age1demorecipient
       identitySecret: DEMO_AGE_IDENTITY
+killSwitchParkBy: []
 mcpServers:
   - name: tracker
     command: npx

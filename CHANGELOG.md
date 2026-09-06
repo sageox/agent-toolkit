@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**A job kill switch is no longer parkable by any agent that gets a turn.** `brain_write`
+bounded the switch by value alone — every value that arms refused, every value that parks
+admitted, whoever asked — so a sibling agent could stop a lane by asking the agent that
+owns it. Usually that self-corrects, because a human notices a stopped lane and restarts
+it; for a lane whose own job is noticing, nothing downstream reports it missing. The
+gateway is the only thing that ever saw who sent the message, so it now hands the author
+to the write: a park is refused when the turn being answered is from an agent the manifest
+does not name. Arming and the tombstone are unchanged and still refused for everyone.
+
+**`killSwitchParkBy` is required once any job declares a `killSwitch`, and a manifest
+without it will not load.** Add `killSwitchParkBy: []` to keep parking to humans, or list
+the ids of the agents whose park this agent honours — a fleet supervisor that pulls an
+emergency brake is the case it exists for. Absent and empty are different answers and only
+one is a decision, so it is stated rather than defaulted, for the reason `failDirection`
+is: a release that enforced the rule while a manifest had not yet named its stopper would
+silence that stopper with nothing to say so. A pod that refuses to start is the louder
+half of that trade. Ids only, never names — a name is self-asserted in the surface's own
+directory record.
+
+Only the `private` brain reads a switch, so an agent whose memory is `local` or `shared`
+is unaffected. A job body holding its own credential writes engrams outside this path, as
+it always has.
+
 ## [0.3.1] - 2026-09-04
 
 Published as `ghcr.io/sageox/agent-base:0.3.1`, which takes `:latest` and moves `:0.3`

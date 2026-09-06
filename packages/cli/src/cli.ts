@@ -451,8 +451,15 @@ async function buildBrain(
           signer: await resolveBuzzSigner(buzz.identity, { dir: secretsDir }),
           writeScope: cfg.writeScope,
           // The write side of §6.3 rule 4. The switch lives in this brain, so this brain is
-          // where "anyone may park a job, only a human may arm one" stops being steering.
+          // where "who may park a job, and who may arm one" stops being steering.
           killSwitches: jobSwitches(manifest).map((s) => s.key),
+          // Which agents the rule exempts, and who is asking. The gateway is the only thing
+          // that saw the inbound message — a `tools/call` carries none of it — so the same
+          // live-turn registry `answering` reads for the job door answers it here. Passed as
+          // the author rather than a verdict: this brain applies its own test, which is not
+          // the job door's (see `admits`).
+          parkBy: manifest.killSwitchParkBy ?? [],
+          asking: egress && (() => egress.asking()),
         },
         serveAt,
       );
@@ -2227,6 +2234,14 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
       ok.push(
         "arm a job with `sageox-agent job arm <slug>` on this host, park it with `job park` — " +
           "the agent's own brain may park a switch through brain_write and can never arm one",
+      );
+      // Who a park is taken from, beside where an arm comes from, for the same reason: an
+      // operator reads this before the incident rather than during one. `killSwitchParkBy`
+      // is stated whenever a switch is declared, so there is no unset case to render.
+      const parkers = manifest.killSwitchParkBy ?? [];
+      ok.push(
+        "a park through a turn is honoured from a human, and from " +
+          (parkers.length ? parkers.join(", ") : "no agent"),
       );
       if (!manifest.brains.some((brain) => brain.preset === "private")) {
         // Reported, not enforced: a fail-open job declared this posture on purpose. But

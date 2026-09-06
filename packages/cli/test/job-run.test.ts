@@ -11,7 +11,7 @@ const declare = (job: string) =>
   writeFileSync(
     join(bundle, "agent.yaml"),
     "name: demo\nbrain: {provider: mock}\nrespondTo: anyone\n" +
-      "surfaces: [{kind: console}]\nbrains: [{preset: local}]\njobs:\n" +
+      "surfaces: [{kind: console}]\nbrains: [{preset: local}]\nkillSwitchParkBy: []\njobs:\n" +
       job,
   );
 

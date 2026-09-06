@@ -526,7 +526,7 @@ describe("secretRefs and environment names", () => {
 describe("jobs", () => {
   const base =
     "name: x\nbrain: {provider: mock}\nsurfaces: [{kind: console}]\nrespondTo: anyone\n" +
-    "brains: [{preset: local}]\n";
+    "brains: [{preset: local}]\nkillSwitchParkBy: []\n";
 
   const declared = {
     slug: "sweep",
@@ -696,6 +696,25 @@ describe("jobs", () => {
     // A human is on the other end of an on-request run and can stop it themselves.
     expect(() =>
       loadManifest(withJob({ trigger: "{onRequest: true}", killSwitch: undefined })),
+    ).not.toThrow();
+  });
+
+  it("makes an agent that declares a switch say which agents may park it", () => {
+    // Absent and empty are different answers and only one is a decision, so the field is
+    // required rather than defaulted — the same reason `failDirection` is. A release that
+    // enforces the rule before a manifest states its exemption would otherwise silence a
+    // designated stopper with nothing to say so.
+    const noParkers = base.replace("killSwitchParkBy: []\n", "");
+    expect(() => loadManifest(withJob({}, noParkers))).toThrow(/killSwitchParkBy/);
+    expect(loadManifest(withJob({}, `${noParkers}killSwitchParkBy: []\n`)).killSwitchParkBy)
+      .toEqual([]);
+    expect(
+      loadManifest(withJob({}, `${noParkers}killSwitchParkBy: [npub1beekeeper]\n`))
+        .killSwitchParkBy,
+    ).toEqual(["npub1beekeeper"]);
+    // Nothing to park, nothing to state: an on-request job may declare no switch at all.
+    expect(() =>
+      loadManifest(withJob({ trigger: "{onRequest: true}", killSwitch: undefined }, noParkers)),
     ).not.toThrow();
   });
 

@@ -966,6 +966,24 @@ const ManifestSchema = z
     brains: z.array(BrainSchema).default([]),
     mcpServers: z.array(McpServerSchema).default([]),
     jobs: z.array(JobSchema).default([]),
+    /**
+     * Which agents may park this agent's job kill switches through a turn.
+     *
+     * The value gate is not enough by itself: `brain_write` refuses every value that arms
+     * and accepts every value that parks, whoever is asking, so any agent that gets a turn
+     * can stop a lane. That is usually harmless — a human notices a stopped lane and
+     * restarts it — and it is not harmless for a lane whose own job is noticing, because
+     * the one thing guaranteed not to report a missing check is the check.
+     *
+     * Ids, never names: a name is self-asserted in the surface's own directory record, so
+     * a stranger publishing that name would inherit the exemption. One id per surface,
+     * compared only against the surface it arrived on, exactly as `owner` is.
+     *
+     * It never widens anything. A named agent may park and still may not arm or delete —
+     * arming stays a human's, on the deployment host — and a human's park is untouched
+     * either way, so a list that names nobody costs no human anything.
+     */
+    killSwitchParkBy: z.array(z.string().min(1)).optional(),
   })
   .strict()
   // A gate that cannot identify anyone admits nobody, so refuse the config at load
@@ -1052,6 +1070,18 @@ const ManifestSchema = z
   .refine((m) => new Set(m.jobs.map((job) => job.slug)).size === m.jobs.length, {
     message: "job slugs must be unique — a slug names the job, the switch, and the run record",
     path: ["jobs"],
+  })
+  // Absent and empty mean different things here, and only one of them is a decision, so an
+  // agent that declares unattended work states which. Required rather than defaulted for
+  // the reason `failDirection` is: a release that ships the refusal while a manifest has
+  // not yet named its stopper would silence that stopper with nothing to say so, and a pod
+  // that refuses to start is the louder half of that trade. The refine below made the same
+  // move on the same rule.
+  .refine((m) => !m.jobs.some((job) => job.killSwitch) || m.killSwitchParkBy !== undefined, {
+    message:
+      "a job declares a killSwitch, so killSwitchParkBy must say which agents may park it " +
+      "through a turn — [] for none, or the ids that may",
+    path: ["killSwitchParkBy"],
   })
   // The fleet's `cron-agent-kill-switch` invariant, moved somewhere a non-Kubernetes
   // consumer also gets it: nothing that runs with no human watching may be unstoppable
