@@ -157,7 +157,8 @@ closed; a job that only reports may fail open, because a relay blip must not sil
 reporting for days.
 
 `killSwitchParkBy` is required once any job declares a `killSwitch`, so a manifest cannot
-leave it unsaid. `[]` keeps parking to humans. An id listed there may park — the mayor
+leave it unsaid. `[]` names nobody, so every agent the surface can identify is refused and
+nobody else is. An id listed there may park — the mayor
 pulling an emergency brake — and still may not arm or delete. Ids, never names: a name is
 self-asserted in the surface's own directory record.
 

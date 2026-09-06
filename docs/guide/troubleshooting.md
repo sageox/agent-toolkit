@@ -32,8 +32,9 @@ there as an id the surface never sends: a Buzz author arrives as a 64-character 
 and an `npub` in `agent.yaml` is converted to that form at load. `sageox-agent doctor` prints
 each parker in the form actually compared, so what it shows is what must equal the agent's
 own pubkey — an id for some other surface passes through untouched and matches nothing here.
-A human's park is never refused this way, and nothing on the list may ever arm or delete a
-switch.
+Neither a human's park nor one the gateway cannot attribute to an identified agent is
+refused this way — the list bounds who is turned away, not who gets through — and nothing on
+it may ever arm or delete a switch.
 
 **`turn_failed` in the log.**
 Brain-side. The error follows on the same line. A turn that exceeds `limits.turnTimeoutMs`
