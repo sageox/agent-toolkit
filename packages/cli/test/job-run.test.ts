@@ -268,10 +268,11 @@ describe("sageox-agent job run", () => {
 /**
  * The other two doors, and the only place a job is armed.
  *
- * §6.3 rule 4: anyone may park a job, only a human may arm one. The agent's own brain
- * cannot be that human — a hosted MCP server carries no per-request author, and the author
- * of a *turn* is not the author of a tool call inside it — so the gate is possession of the
- * agent's signing key, which lives on this host and never reaches the brain.
+ * §6.3 rule 4: a human, or an agent `killSwitchParkBy` names, may park a job; only a human
+ * may arm one. The agent's own brain cannot be that human — a hosted MCP server carries no
+ * per-request author, and the turn the gateway hands it decides a park, never an arm — so
+ * the gate is possession of the agent's signing key, which lives on this host and never
+ * reaches the brain.
  */
 describe("sageox-agent job arm | park", () => {
   it("says where the switch would go when there is nowhere to put it", async () => {

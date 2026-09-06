@@ -141,6 +141,26 @@ only see one agent:
   — nothing sits above the detector to notice it went quiet. Naming an agent there widens
   nothing else, because arming is refused for every agent whatever the list says.
 
+The two things the toolkit makes you state, and where each one sits:
+
+```yaml
+jobs:
+  - slug: rollcall
+    killSwitch:
+      key: mem/rollcall/enabled   # optional; defaults to mem/<slug>/enabled
+      failDirection: open         # what an unreadable switch means for THIS job
+killSwitchParkBy: []              # per agent: whose park this agent honours
+```
+
+`failDirection` has no default and is never inherited. A job that acts on the world fails
+closed; a job that only reports may fail open, because a relay blip must not silently halt
+reporting for days.
+
+`killSwitchParkBy` is required once any job declares a `killSwitch`, so a manifest cannot
+leave it unsaid. `[]` keeps parking to humans. An id listed there may park — the mayor
+pulling an emergency brake — and still may not arm or delete. Ids, never names: a name is
+self-asserted in the surface's own directory record.
+
 ## The spend cap the toolkit cannot enforce
 
 Give every agent its own provider workspace with a hard monthly cap. This is an operator

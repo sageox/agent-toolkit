@@ -2608,10 +2608,10 @@ running it:
                                run one declared job once and exit — what a CronJob execs.
                                The trigger is stamped from this flag; a run started here is
                                \`system\`, so it does not bypass a parked job
-  job arm | park <slug>       flip one job's kill switch. Anyone may park a job, and only
-                               a human may arm one — so this host, holding the agent's
-                               signing key, is the only place arming happens. The agent's
-                               own brain can park a switch and is refused if it tries to arm
+  job arm | park <slug>       flip one job's kill switch. Only a human may arm one — so
+                               this host, holding the agent's signing key, is the only place
+                               arming happens. The agent's own brain can park a switch, from
+                               a turn \`killSwitchParkBy\` admits, and never arm one
   try [--brain mock|claude-acp] [--model <id>]
                                talk to a throwaway agent, no config at all
 
