@@ -455,11 +455,9 @@ describe("private-brain MCP", () => {
     });
 
     /**
-     * The other half of the rule: who asked, which only the gateway ever knew.
-     *
-     * Every case here writes a value that parks. The value gate admits all of them, so a
-     * difference in outcome can only be the author of the turn behind the call.
-     */
+      * Every case here writes a value that parks, so the value gate admits all of them and
+      * any difference in outcome is the author of the turn behind the call.
+      */
     describe("who the park is taken from", () => {
       const actor = (id: string, isAgent: boolean) =>
         ({ surface: "buzz", id, isSelf: false, isAgent }) as const;
@@ -485,8 +483,8 @@ describe("private-brain MCP", () => {
       });
 
       it("admits a human, and anyone the surface cannot call an agent", async () => {
-        // The test is positive evidence of an agent, so it only ever narrows: a refusal to
-        // park is a kill switch that failed, and nobody who might be a person is refused.
+        // Positive evidence of an agent, so it only narrows — a refusal to park is a kill
+        // switch that failed.
         const { store } = await setup();
         await expect(park(parked(store, () => actor("npub1ryan", false)))).resolves.toBeDefined();
         // No turn the gateway can name — none live, or two channels mid-turn at once.
@@ -494,16 +492,15 @@ describe("private-brain MCP", () => {
       });
 
       it("leaves a deployment that binds no gateway exactly as it was", async () => {
-        // `asking` is unset for a caller with no chat surface. Parking stays ungated there
-        // rather than becoming impossible.
+        // `asking` is unset for a caller with no chat surface: ungated, not impossible.
         const { store } = await setup();
         const handler = privateBrainHandler(store, { killSwitches: ["mem/shift/enabled"] });
         await expect(park(handler)).resolves.toBeDefined();
       });
 
       it("still refuses a named agent the arm and the delete", async () => {
-        // The exemption is one-directional, and the order in `admits` is what makes it so:
-        // the arm refusal runs first and takes no account of who is asking.
+        // One-directional, and the order in `admits` is what makes it so: the arm refusal
+        // runs first and never looks at who is asking.
         const { store } = await setup();
         const handler = parked(store, () => actor("npub1beekeeper", true));
         await expect(call(handler, "brain_write", { slug: "mem/shift/enabled", value: "on" }))
@@ -513,8 +510,8 @@ describe("private-brain MCP", () => {
       });
 
       it("names no asker in what it says, since that text reaches a chat surface", async () => {
-        // Same split `GuardVerdict.reason` keeps: the id is asserted by the surface, and
-        // `killSwitchParkBy` is where an operator reads who may.
+        // Surface-asserted text on its way to a channel; `killSwitchParkBy` is where an
+        // operator reads who may.
         const { store } = await setup();
         await expect(
           park(parked(store, () => actor("npub1stranger", true))),

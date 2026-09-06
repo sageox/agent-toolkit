@@ -91,17 +91,13 @@ export interface PrivateBrainOptions {
   killSwitches?: readonly string[];
   /**
    * `manifest.killSwitchParkBy` — the agents whose park of a declared switch is honoured.
-   * Everyone this deployment cannot see to be an agent is already honoured, so this only
-   * ever adds back the ones {@link admits} would otherwise refuse.
+   * Only ever adds back callers {@link admits} would otherwise refuse.
    */
   parkBy?: readonly string[];
   /**
-   * The author of the message this agent is answering, or `null` when the gateway can name
-   * none — `SurfaceEgress.asking`, bound by the caller that holds the gateway.
-   *
-   * An {@link ActorRef} the gateway received, never a classification: a caller that could
-   * pass "this is a human" could pass it wrongly, and this is the whole of what decides
-   * whether a park is admitted.
+   * Who this agent is answering, or `null` when the gateway can name nobody —
+   * `SurfaceEgress.asking`. The ref the gateway received, never a classification: a caller
+   * that could pass "this is a human" could pass it wrongly.
    */
   asking?: () => ActorRef | null;
 }
@@ -231,18 +227,14 @@ async function callTool(
  * token and the arguments and nothing about the turn behind it. Arming is `sageox-agent job
  * arm`, on the host, where the signing key this brain never sees lives.
  *
- * **A park is refused over its author, never over its value.** Any value that does not arm
- * parks, because a refusal to park is a kill switch that failed. But `gates.asking` reads
- * the author of the turn this call sits inside off the gateway — the same live-turn registry
- * the reaction tool marks — and an author the surface knows to be an agent parks only if the
- * manifest names it. That runs on **positive evidence of an agent** and so can only narrow:
- * an author no surface flags, and a call the gateway cannot place in any one turn, are both
- * admitted, which is what keeps a human's park ungated.
+ * **A park is refused over its author, never over its value**, since a refusal to park is a
+ * kill switch that failed. `gates.asking` reads the turn's author off the gateway — the
+ * registry the reaction tool marks — and refuses on **positive evidence of an agent**, so an
+ * author no surface flags and a call belonging to no one live turn are both admitted.
  *
- * Deliberately not the test the job door applies. That one asks for positive evidence of a
- * *human* (`owner`), because admitting a parked job to run is a grant; this is a denial, so
- * it asks for positive evidence of an agent. Collapsing them either refuses a colleague who
- * is not the owner, or hands the exemption to every unrostered stranger.
+ * Not the job door's test, which asks for positive evidence of a *human* (`owner`) because
+ * running a parked job is a grant. This is a denial. Collapsing them would refuse a
+ * colleague who is not the owner, or exempt every unrostered stranger.
  *
  * **It refuses the tombstone in both fail-directions** — deleting the key leaves it unset,
  * which a fail-open job resolves to `on`, so a delete is an arming write wearing a different
@@ -283,10 +275,9 @@ function admits(
     }
     const author = gates.asking?.() ?? null;
     if (author?.isAgent === true && !gates.parkBy.includes(author.id)) {
-      // The asker's id is not in it. It is asserted by the surface rather than by this
-      // agent, it reaches whatever channel renders the tool error, and `killSwitchParkBy`
-      // is where an operator reads who may — the same split `GuardVerdict.reason` keeps.
-      // The audit line carries the slug, and the gateway's own log carries the turn.
+      // No asker id in it: that is surface-asserted text on its way to a chat channel, and
+      // `killSwitchParkBy` is where an operator reads who may. Same split as
+      // `GuardVerdict.reason`; the log keeps the turn.
       throw new ToolRefused(
         `private-memory ${verb} refused: ${slug} is a job kill switch, and the message being ` +
           "answered is from an agent this manifest does not name in killSwitchParkBy. A " +

@@ -700,10 +700,8 @@ describe("jobs", () => {
   });
 
   it("makes an agent that declares a switch say which agents may park it", () => {
-    // Absent and empty are different answers and only one is a decision, so the field is
-    // required rather than defaulted — the same reason `failDirection` is. A release that
-    // enforces the rule before a manifest states its exemption would otherwise silence a
-    // designated stopper with nothing to say so.
+    // Required rather than defaulted, as `failDirection` is: a release enforcing the rule
+    // before a manifest states its exemption would silence a designated stopper silently.
     const noParkers = base.replace("killSwitchParkBy: []\n", "");
     expect(() => loadManifest(withJob({}, noParkers))).toThrow(/killSwitchParkBy/);
     expect(loadManifest(withJob({}, `${noParkers}killSwitchParkBy: []\n`)).killSwitchParkBy)

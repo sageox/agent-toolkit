@@ -240,10 +240,9 @@ function readManifest(path: string): AgentManifest {
   // normalized in its own namespace rather than all of them as Nostr keys.
   if (manifest.owner) manifest.owner = manifest.owner.map(normalizeActorId);
   if (manifest.allowlist) manifest.allowlist = manifest.allowlist.map(normalizeActorId);
-  // The third list of author ids, and the one that must not be left out: a `killSwitchParkBy`
-  // written as an npub — which is how `chat-surfaces.md` spells `owner` — would match nobody,
-  // and unlike the other two nothing would say so. A wrong `owner` locks its owner out on the
-  // next message; a wrong parker list works perfectly until the emergency it exists for.
+  // The third list, and the one whose omission is silent: a wrong `owner` locks its owner
+  // out on the next message, while an npub here matches nobody until the emergency it
+  // exists for.
   if (manifest.killSwitchParkBy) {
     manifest.killSwitchParkBy = manifest.killSwitchParkBy.map(normalizeActorId);
   }
@@ -460,11 +459,9 @@ async function buildBrain(
           // The write side of §6.3 rule 4. The switch lives in this brain, so this brain is
           // where "who may park a job, and who may arm one" stops being steering.
           killSwitches: jobSwitches(manifest).map((s) => s.key),
-          // Which agents the rule exempts, and who is asking. The gateway is the only thing
-          // that saw the inbound message — a `tools/call` carries none of it — so the same
-          // live-turn registry `answering` reads for the job door answers it here. Passed as
-          // the author rather than a verdict: this brain applies its own test, which is not
-          // the job door's (see `admits`).
+          // A `tools/call` carries nothing about the turn, so who is asking comes off the
+          // same live-turn registry `answering` reads above. The author rather than a
+          // verdict: this brain's test is not the job door's — see `admits`.
           parkBy: manifest.killSwitchParkBy ?? [],
           asking: egress && (() => egress.asking()),
         },
@@ -2242,13 +2239,9 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
         "arm a job with `sageox-agent job arm <slug>` on this host, park it with `job park` — " +
           "the agent's own brain may park a switch through brain_write and can never arm one",
       );
-      // Who a park is taken from, beside where an arm comes from, for the same reason: an
-      // operator reads this before the incident rather than during one. `killSwitchParkBy`
-      // is stated whenever a switch is declared, so there is no unset case to render.
-      //
       // "no listed agent" rather than "no agent": the gate refuses on positive evidence of
-      // one, so an asker no surface flags is admitted. An operator reading this line as a
-      // deny-all would be reading a narrowing as a boundary.
+      // one, so an asker no surface flags is admitted. Read as a deny-all this line would
+      // promise a boundary the code does not implement.
       const parkers = manifest.killSwitchParkBy ?? [];
       ok.push(
         "a park through a turn is honoured from a human, and from " +

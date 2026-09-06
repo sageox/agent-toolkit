@@ -967,21 +967,11 @@ const ManifestSchema = z
     mcpServers: z.array(McpServerSchema).default([]),
     jobs: z.array(JobSchema).default([]),
     /**
-     * Which agents may park this agent's job kill switches through a turn.
+     * Which agents may park this agent's job kill switches through a turn. A named agent
+     * still may not arm or delete one, and a human's park is never gated by this.
      *
-     * The value gate is not enough by itself: `brain_write` refuses every value that arms
-     * and accepts every value that parks, whoever is asking, so any agent that gets a turn
-     * can stop a lane. That is usually harmless — a human notices a stopped lane and
-     * restarts it — and it is not harmless for a lane whose own job is noticing, because
-     * the one thing guaranteed not to report a missing check is the check.
-     *
-     * Ids, never names: a name is self-asserted in the surface's own directory record, so
-     * a stranger publishing that name would inherit the exemption. One id per surface,
-     * compared only against the surface it arrived on, exactly as `owner` is.
-     *
-     * It never widens anything. A named agent may park and still may not arm or delete —
-     * arming stays a human's, on the deployment host — and a human's park is untouched
-     * either way, so a list that names nobody costs no human anything.
+     * Ids, never names: a directory record's name is self-asserted, so a stranger
+     * publishing that name would inherit the exemption. One id per surface, as `owner` is.
      */
     killSwitchParkBy: z.array(z.string().min(1)).optional(),
   })
@@ -1071,12 +1061,9 @@ const ManifestSchema = z
     message: "job slugs must be unique — a slug names the job, the switch, and the run record",
     path: ["jobs"],
   })
-  // Absent and empty mean different things here, and only one of them is a decision, so an
-  // agent that declares unattended work states which. Required rather than defaulted for
-  // the reason `failDirection` is: a release that ships the refusal while a manifest has
-  // not yet named its stopper would silence that stopper with nothing to say so, and a pod
-  // that refuses to start is the louder half of that trade. The refine below made the same
-  // move on the same rule.
+  // Required rather than defaulted, for the reason `failDirection` is: a release enforcing
+  // the refusal before a manifest names its stopper would silence that stopper with nothing
+  // to say so, and a pod that will not start is the louder half of that trade.
   .refine((m) => !m.jobs.some((job) => job.killSwitch) || m.killSwitchParkBy !== undefined, {
     message:
       "a job declares a killSwitch, so killSwitchParkBy must say which agents may park it " +
