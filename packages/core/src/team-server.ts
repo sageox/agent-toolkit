@@ -397,6 +397,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     return parsed.data.team_context.results;
   };
 
+  /** Keep newer ledger verdicts when concurrent lookups finish out of order. */
   const recordLedger = (status: TeamLedgerStatus, lookup: number): TeamLedgerStatus => {
     if (remotes.some((remote) => remote.repo === status.repo)) status = { ...status, sync_owner: "gateway" };
     if ((ledgerReadings.get(status.repo)?.lookup ?? 0) <= lookup) {
@@ -405,6 +406,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     return status;
   };
 
+  /** Verify project identity and a fresh matching receipt, optionally refreshing an owned ledger first. */
   const inspectLedger = async (repo: TeamRepository, refresh = false) => {
     const lookup = ++ledgerLookup;
     let repoId: string | undefined;
@@ -470,12 +472,14 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     return { status: recordLedger(status, lookup), repoId, lookup };
   };
 
+  /** Inspect configured aliases and report each repository's source failure separately. */
   const ledgerStatus = async (): Promise<TeamLedgerStatus[]> => {
     const statuses: TeamLedgerStatus[] = [];
     for (const repo of scope.repositories ?? []) statuses.push((await inspectLedger(repo)).status);
     return statuses;
   };
 
+  /** List recent sessions only after live access and fresh ledger checks succeed. */
   const sessions = async (name: string, limit: number): Promise<string> => {
     SessionsArgs.parse({ repo: name, limit });
     const matches = (scope.repositories ?? []).filter((repo) => repo.name === name);
@@ -502,6 +506,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     }
   };
 
+  /** Read an explicit activity window without consuming another caller's history. */
   const recent = async (name: string, hours: number, limit: number): Promise<string> => {
     RecentArgs.parse({ repo: name, hours, limit });
     const matches = (scope.repositories ?? []).filter((repo) => repo.name === name);

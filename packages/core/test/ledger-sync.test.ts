@@ -3,6 +3,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { once } from "node:events";
+import { createServer, type Server, type Socket } from "node:net";
 import { createLedgerSync, type LedgerRemote } from "../src/ledger-sync.ts";
 
 describe("gateway-owned ledger sync", () => {
@@ -11,6 +13,8 @@ describe("gateway-owned ledger sync", () => {
   let root: string;
   let checkout: string;
   let realGit: string;
+  let signalServer: Server | undefined;
+  let signalSocket: Socket | undefined;
   const remote = "https://git.example.test/team/ledger.git";
   const owners: ReturnType<typeof createLedgerSync>[] = [];
   const git = (...args: string[]) => execFileSync(realGit, args, { encoding: "utf8",
@@ -63,9 +67,11 @@ if (args[0] === 'clone' || args[0] === 'fetch') {
   if (fs.existsSync(dir + '/deny')) { process.stderr.write('Authentication failed: planted-secret'); process.exit(128); }
   if (fs.existsSync(dir + '/hang')) {
     const {spawn} = require('node:child_process');
-    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+    const port = Number(fs.readFileSync(dir + '/hang', 'utf8'));
+    // This descendant owns the socket independently of its parent's stdio. Killing
+    // only the wrapper leaves the connection open and the shutdown test unfinished.
+    const child = spawn(process.execPath, ['-e', 'require("node:net").connect(' + port + ', "127.0.0.1")']);
     fs.writeFileSync(dir + '/child-pid', String(child.pid));
-    setInterval(() => {}, 1000);
     return;
   }
 }
@@ -83,6 +89,16 @@ process.exit(result.status ?? 1);
   });
 
   afterEach(async () => {
+    // Also release the fixture if a broken implementation fails to kill the descendant.
+    if (signalServer) {
+      if (!signalSocket?.destroyed && existsSync(join(dir, "child-pid"))) {
+        try { process.kill(Number(readFileSync(join(dir, "child-pid"), "utf8")), "SIGKILL"); } catch { /* Already exited. */ }
+      }
+      signalSocket?.destroy();
+      await new Promise<void>((resolve) => signalServer!.close(() => resolve()));
+      signalServer = undefined;
+      signalSocket = undefined;
+    }
     await Promise.all(owners.splice(0).map((sync) => sync.stop()));
     vi.useRealTimers();
     vi.unstubAllEnvs();
@@ -188,14 +204,18 @@ process.exit(result.status ?? 1);
   });
 
   it("kills Git's process group on shutdown and never publishes a partial cold clone", async () => {
-    writeFileSync(join(dir, "hang"), "");
+    signalServer = createServer();
+    signalServer.listen(0, "127.0.0.1");
+    await once(signalServer, "listening");
+    const address = signalServer.address();
+    if (!address || typeof address === "string") throw new Error("fixture has no TCP port");
+    writeFileSync(join(dir, "hang"), String(address.port));
+    const connected = once(signalServer, "connection");
     const sync = owner();
     const starting = sync.start(() => sync.pull("service", checkout));
-    await vi.waitFor(() => expect(existsSync(join(dir, "child-pid"))).toBe(true), { timeout: 5000 });
-    const pid = Number(readFileSync(join(dir, "child-pid"), "utf8"));
-    await sync.stop();
-    await starting;
-    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 5000 });
+    [signalSocket] = await connected as [Socket];
+    const exited = once(signalSocket, "close");
+    await Promise.all([sync.stop(), starting, exited]);
     expect(existsSync(checkout)).toBe(false);
     expect(existsSync(join(root, "ledger-sync.lock"))).toBe(false);
   });

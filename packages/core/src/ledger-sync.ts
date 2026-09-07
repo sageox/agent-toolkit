@@ -34,8 +34,7 @@ export function createLedgerSync(root: string, remotes: readonly LedgerRemote[])
   let starting: Promise<void> | undefined;
   let tail: Promise<unknown> = Promise.resolve();
 
-  // Used by status, both ledger readers, and refresh. A checkout cannot change midway
-  // through an ox read; unrelated search/chat never enters this queue.
+  /** Serialize status, ledger reads, and refresh so a checkout cannot change during a read. */
   const exclusive = <T>(work: () => Promise<T>): Promise<T> => {
     const result = tail.then(() => {
       if (stopped) throw new Error("Ledger sync stopped.");
@@ -45,6 +44,7 @@ export function createLedgerSync(root: string, remotes: readonly LedgerRemote[])
     return result;
   };
 
+  /** Run Git with bounded output and a cancellable process group; expose only fixed errors. */
   const git = (args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> => new Promise((resolve, reject) => {
     if (abort.signal.aborted) return reject(new Error("Ledger sync stopped."));
     const child = spawn("git", args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });

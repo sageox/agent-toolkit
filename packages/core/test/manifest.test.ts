@@ -427,6 +427,7 @@ describe("brains", () => {
     [{ repo: "service", url: "file:///tmp/ledger" }],
     [{ repo: "service", url: "https://user:password@git.example.test/ledger" }],
     [{ repo: "service", url: "https://git.example.test/ledger?token=secret" }],
+    [{ repo: "service", url: "https://git.example.test/ledger#fragment" }],
     [{ repo: "service", url: "https://git.example.test/ledger", token: "TOKEN" }],
     [{ repo: "service", url: "https://git.example.test/ledger", username: "user" }],
     [{ repo: "service", url: "https://git.example.test/ledger", username: "user", token: "../secret" }],
