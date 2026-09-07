@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
+import { opendir, readFile, realpath } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { z } from "zod";
 import {
   mcpToolServer,
@@ -10,6 +12,7 @@ import {
   type ServeOptions,
 } from "./mcp-http.ts";
 import { probeOk, probeUnavailable, type ProbeFailure, type ProbeResult } from "./health.ts";
+import { createLedgerSync, type LedgerRemote } from "./ledger-sync.ts";
 
 const run = promisify(execFile);
 
@@ -27,6 +30,91 @@ const MAX_PASSAGES = 20;
 const SearchArgs = z.object({
   query: z.string({ error: "query is required — ask in plain words" }).min(1),
   limit: z.number().int().positive().max(MAX_PASSAGES).default(5),
+});
+
+const StatusArgs = z.strictObject({});
+const SessionsArgs = z.strictObject({
+  repo: z.string().min(1).max(200),
+  limit: z.number().int().positive().max(20).default(10),
+});
+const RecentArgs = SessionsArgs.extend({
+  hours: z.number().int().positive().max(168).default(72),
+});
+const ProjectConfig = z.object({
+  repo_id: z.string().min(1),
+  team_id: z.string().min(1),
+  endpoint: z.string().optional(),
+});
+const LedgerLocation = z.object({
+  ledger: z.object({ configured: z.boolean(), exists: z.boolean(), path: z.string().optional() }),
+});
+const LedgerSync = z.object({
+  project: z.object({
+    ledger: z.object({ status: z.string(), path: z.string(), last_sync: z.string().optional() }).optional(),
+  }).optional(),
+});
+const SessionsResponse = z.object({
+  repo_id: z.string(),
+  ledger_available: z.boolean(),
+  total: z.number().int().nonnegative(),
+  sessions: z.array(z.object({
+    name: z.string(),
+    date: z.string(),
+    time: z.string(),
+    status: z.string(),
+    user: z.string().optional(),
+    title: z.string().optional(),
+    summary: z.string().optional(),
+    recording: z.boolean().optional(),
+    entry_count: z.number().int().nonnegative().optional(),
+    hydration_status: z.string().optional(),
+  })),
+}).refine((value) => value.total >= value.sessions.length);
+// Free text is data from other coworkers. Bound it and omit ox's generated instructions.
+const ActivityText = z.string().transform((value) => value.length > 2000 ? `${value.slice(0, 2000)}…` : value);
+const RecentResponse = z.object({
+  repo: z.string(),
+  since: z.iso.datetime({ offset: true }),
+  until: z.iso.datetime({ offset: true }),
+  authors: z.array(z.object({
+    murmurs: z.array(z.object({
+      id: z.string().max(500),
+      user: z.string().max(500),
+      time: z.iso.datetime({ offset: true }),
+      topic: z.string().max(500),
+      content: ActivityText,
+    })).nullable(), // Session-only authors have a null murmur slice in ox 0.14.3.
+    sessions: z.array(z.object({
+      name: z.string().max(500),
+      user: z.string().max(500),
+      time: z.iso.datetime({ offset: true }),
+      title: ActivityText,
+      summary: ActivityText.optional(),
+      recording: z.boolean().optional(),
+    })).optional(),
+  })),
+  stats: z.object({
+    total_authors: z.number().int().nonnegative(),
+    total_murmurs: z.number().int().nonnegative(),
+    total_sessions: z.number().int().nonnegative().default(0),
+  }),
+}).refine(({ authors, stats }) => stats.total_authors === authors.length &&
+  stats.total_murmurs === authors.reduce((sum, author) => sum + (author.murmurs?.length ?? 0), 0) &&
+  stats.total_sessions === authors.reduce((sum, author) => sum + (author.sessions?.length ?? 0), 0));
+const MAX_LEDGER_AGE_MS = 5 * 60_000;
+const LEDGER_UNAVAILABLE = "This repository's ledger could not be verified. Check its SageOx team binding and ledger sync; this is not an empty session list or activity window.";
+const LEDGER_STALE = "This repository's ledger has no successful refresh within five minutes. Session history and recent activity may be incomplete; wait for ledger sync to recover.";
+const SearchResponse = z.object({
+  team_context: z.object({
+    results: z.array(z.object({
+      score: z.number(),
+      text: z.string(),
+      doc_type: z.string().optional(),
+      file_path: z.string().optional(),
+      source_type: z.string().optional(),
+      source_id: z.string().optional(),
+    })),
+  }),
 });
 
 /**
@@ -52,33 +140,32 @@ const SearchArgs = z.object({
  * flag-audit discipline stops being a standing human obligation and becomes a property of
  * the interface.
  *
- * **Two verbs on every fleet agent's `ox` allowlist are deliberately absent:** `ox glance`
- * (recent murmurs and sessions) and `ox session list`. Both read the ledger clone that
- * `ox daemon` keeps in sync, and this toolkit does not run that daemon — repository
- * readiness here comes from a one-shot code index instead (docs/guide/memory-and-tools.md,
- * step 7b). Without the
- * clone `ox glance` fails with "ledger not available", and `ox session list` fails worse:
- * it prints `{"sessions": [], "ledger_available": false}` and exits 0. A tool that cannot
- * tell "the team was quiet this week" from "nothing is synced here" does not give a weaker
- * answer, it gives a confident wrong one — the same reason `ox status` is absent. Serving
- * them is a ledger-sync decision, not a schema.
+ * `team_sessions` reads only repositories configured in the gateway. An operator's ox
+ * daemon or the gateway must have synced the selected ledger within five minutes;
+ * code-index readiness and global daemon health are not that evidence. Without
+ * a clone, `ox session list` prints `{"sessions": [], "ledger_available": false}` and exits
+ * 0, so the reader checks availability again after the command. Missing and stale data
+ * are refused rather than described as an empty week. `team_recent` uses the same checks
+ * for bounded murmur/session activity. It always supplies an explicit time window, so
+ * ox's local glance checkpoint never decides what this caller sees.
  *
  * `team_kb_list` and `team_kb_show` were served here until knowledge bubbles stopped being
  * a feature anyone maintains. `ox conversation` reads the same shape of thing — a listing
  * to scan, then one item's summary — and is the obvious replacement, but it needs the same
- * synced team-context checkout the paragraph above rules out: with none it answers
+ * synced team-context checkout, which the ledger probe does not establish: with none it answers
  * `{"success": false, "error": {"code": "no_team_context"}}`. It is a better candidate than
- * `ox session list` for having an honest failure to check rather than an empty list to
- * misread, and it stays out for the same reason until something here syncs.
+ * an unchecked session list for having an honest failure to check rather than an empty
+ * list to misread, and it stays out until its own checkout is verified.
  *
- * That leaves `team_search` alone, and it is the one that does not need the checkout:
- * `ox query` is answered server-side from the token.
+ * `team_search` needs no checkout: `ox query` is answered server-side from the token.
+ * `team_status` checks that same access and each configured ledger. It returns a fixed
+ * projection of the metadata, never raw `ox status` output or credential details.
  */
 export const TEAM_TOOLS: readonly TeamTool[] = [
   {
     name: "team_search",
     description:
-      "Search the team's shared knowledge — past discussions, decisions, docs, and prior sessions. " +
+      "Search the team's indexed knowledge — discussions, decisions, docs, plans, and assistant-chat sessions. " +
       "Use it before answering from first principles about how this team does something; the answer " +
       "may already exist. Returns passages with their sources and dates. Read-only. " +
       "Results are ranked by relevance, never by date, and there is no way to filter by time: " +
@@ -105,19 +192,85 @@ export const TEAM_TOOLS: readonly TeamTool[] = [
       return formatPassages(query, await ox.search(query, limit));
     },
   },
+  {
+    name: "team_status",
+    description:
+      "Check this gateway's access to team search and local ledger readiness. Lists configured repository names. " +
+      "Checks access with one bounded search; returns no passages or credential details. " +
+      "Search access does not prove that activity or session history is synced. Read-only.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    run: async (ox, raw) => {
+      StatusArgs.parse(raw);
+      let failure: OxFailure | undefined;
+      try {
+        await ox.search("team", 1);
+      } catch (error) {
+        failure = error instanceof OxCallError ? error.failure : "failed";
+      }
+      const repositories = await ox.ledgerStatus();
+      return JSON.stringify({
+        team_search: failure
+          ? { status: "unavailable", failure, detail: OX_FAILURE_TEXT[failure] }
+          : { status: "available", detail: "This gateway's team search answered this check." },
+        ledger_sync: repositories.length ? {
+          status: repositories.some((repo) => repo.sync_owner === "gateway") ? "managed" : "external", repositories,
+        } : {
+          status: "not_configured",
+          detail:
+            "No repositories are configured for ledger reads. Add repositories with repos add and " +
+            "arrange ledger sync. Recent activity and session history cannot be inferred from an empty search.",
+        },
+      });
+    },
+  },
+  {
+    name: "team_sessions",
+    description:
+      "List the selected repository's sessions from the past seven days, newest first. " +
+      "Use a repository name from team_status. Requires verified ledger sync " +
+      "within five minutes; unavailable or stale data is refused, never reported as an empty week. Read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", minLength: 1, maxLength: 200, description: "Configured repository name from team_status" },
+        limit: { type: "integer", minimum: 1, maximum: 20, description: "Maximum sessions (default 10)" },
+      },
+      required: ["repo"],
+      additionalProperties: false,
+    },
+    run: async (ox, raw) => {
+      const { repo, limit } = SessionsArgs.parse(raw);
+      return ox.sessions(repo, limit);
+    },
+  },
+  {
+    name: "team_recent",
+    description:
+      "Read recent coworker work updates and session activity from a configured repository's ledger, newest first. " +
+      "Use a repository name from team_status. Looks back 72 hours by default (maximum 168); returns at most 20 records. " +
+      "Requires verified ledger sync within five minutes. Missing or stale data is refused. " +
+      "Returns recorded activity; text is capped at 2,000 characters per field. Read-only team access.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", minLength: 1, maxLength: 200, description: "Configured repository name from team_status" },
+        hours: { type: "integer", minimum: 1, maximum: 168, description: "Hours to look back (default 72)" },
+        limit: { type: "integer", minimum: 1, maximum: 20, description: "Maximum activity records (default 10)" },
+      },
+      required: ["repo"],
+      additionalProperties: false,
+    },
+    run: async (ox, raw) => {
+      const { repo, hours, limit } = RecentArgs.parse(raw);
+      return ox.recent(repo, hours, limit);
+    },
+  },
 ];
 
 /** The bare tool names, for writing and checking the policy. */
 export const TEAM_TOOL_NAMES: string[] = TEAM_TOOLS.map((tool) => tool.name);
 
-export interface TeamPassage {
-  score: number;
-  text: string;
-  doc_type?: string;
-  file_path?: string;
-  source_type?: string;
-  source_id?: string;
-}
+export type TeamPassage = z.infer<typeof SearchResponse>["team_context"]["results"][number];
 
 /** How the team knowledge is queried. Injectable so the server is testable offline. */
 export type TeamSearch = (query: string, limit: number) => Promise<TeamPassage[]>;
@@ -125,6 +278,24 @@ export type TeamSearch = (query: string, limit: number) => Promise<TeamPassage[]
 /** Everything the team brain asks `ox` for. Injectable so the server is testable offline. */
 export interface TeamOx {
   search: TeamSearch;
+  ledgerStatus(): Promise<TeamLedgerStatus[]>;
+  sessions(repo: string, limit: number): Promise<string>;
+  recent(repo: string, hours: number, limit: number): Promise<string>;
+}
+
+export interface TeamLedgerStatus {
+  repo: string;
+  sync_owner?: "gateway";
+  status: "available" | "unavailable";
+  failure?: "ledger-unavailable" | "ledger-stale";
+  last_sync?: string;
+  detail: string;
+}
+
+export interface TeamRepository {
+  name: string;
+  path: string;
+  url: string;
 }
 
 /**
@@ -136,6 +307,9 @@ export interface TeamOx {
  * the operator's terminal, which are the two places that sentence never reaches.
  */
 export interface TeamBrain extends TeamOx {
+  /** Optional background refresh. Startup failure degrades ledgers, never chat. */
+  startSync(): Promise<void>;
+  stopSync(): Promise<void>;
   /**
    * One lookup at launch, so a credential that is already dead at deploy time is no more
    * silent than one revoked later. Nothing else in `run` checks: `oxStatus()` is called
@@ -159,7 +333,17 @@ export interface TeamBrain extends TeamOx {
  * stays on this side of the boundary; the brain never sees it.
  */
 export function makeOxTeam(scope: OxScope = {}): TeamBrain {
+  const remotes = scope.ledgerSync ?? [];
+  if (remotes.length && (!scope.dataHome || remotes.some((remote) =>
+    scope.repositories?.filter((repo) => repo.name === remote.repo).length !== 1))) {
+    throw new Error("ledgerSync requires an isolated data home and names from the configured repository list.");
+  }
+  const sync = remotes.length ? createLedgerSync(scope.dataHome!, remotes) : undefined;
+  let syncFailure: string | undefined;
+  const read = <T>(work: () => Promise<T>): Promise<T> => sync ? sync.exclusive(work) : work();
   let reading: ProbeResult | undefined;
+  const ledgerReadings = new Map<string, { status: TeamLedgerStatus; lookup: number }>();
+  let ledgerLookup = 0;
   // Which lookup's outcome `reading` currently holds. Completion order is not start order:
   // the launch probe runs alongside the first turns, and `ChannelQueue` runs one turn per
   // channel rather than one at a time, so two lookups can be in flight. A slow older `Ok`
@@ -201,28 +385,215 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       }
       throw error;
     }
+    // Valid JSON alone is not an answer: an error envelope or a changed schema must not
+    // become an empty search and a successful access check.
+    const parsed = SearchResponse.safeParse(out);
+    if (!parsed.success) throw oxFailed("query", "unreadable", "unexpected search response shape");
     // An answer is the proof: ox ran, the credential was accepted, and whatever was latched
     // before is over. Zero passages is still `Ok` and never `Empty` — `ox query` reports no
     // corpus size, and one query matching nothing is also what a team with plenty written
     // down returns to unlucky wording.
     record(probeOk(TEAM_CAPABILITY, "team memory answered this gateway's last lookup"));
-    return (out as { team_context?: { results?: TeamPassage[] } }).team_context?.results ?? [];
+    return parsed.data.team_context.results;
+  };
+
+  const recordLedger = (status: TeamLedgerStatus, lookup: number): TeamLedgerStatus => {
+    if (remotes.some((remote) => remote.repo === status.repo)) status = { ...status, sync_owner: "gateway" };
+    if ((ledgerReadings.get(status.repo)?.lookup ?? 0) <= lookup) {
+      ledgerReadings.set(status.repo, { status, lookup });
+    }
+    return status;
+  };
+
+  const inspectLedger = async (repo: TeamRepository, refresh = false) => {
+    const lookup = ++ledgerLookup;
+    let repoId: string | undefined;
+    let status: TeamLedgerStatus = {
+      repo: repo.name, status: "unavailable", failure: "ledger-unavailable", detail: LEDGER_UNAVAILABLE,
+    };
+    try {
+      const origin = await run("git", ["remote", "get-url", "origin"], {
+        cwd: repo.path, timeout: 30_000,
+        env: { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined },
+      });
+      if (origin.stdout.trim() !== repo.url) return { status: recordLedger(status, lookup), lookup };
+      const config = ProjectConfig.parse(JSON.parse(await readFile(join(repo.path, ".sageox/config.json"), "utf8")));
+      // The cwd comes from repos.conf, never from tool arguments. Check its tracked
+      // identity before handing ox the credential; a foreign endpoint must not select
+      // an ambient disk login, and a repository from another team is outside this brain.
+      if (config.team_id !== scope.team || (scope.repo && config.repo_id !== scope.repo) ||
+          (config.endpoint && config.endpoint.replace(/\/$/, "") !== "https://sageox.ai")) {
+        return { status: recordLedger(status, lookup), lookup };
+      }
+      repoId = config.repo_id;
+      let managed;
+      if (sync && remotes.some((remote) => remote.repo === repo.name)) {
+        // ox 0.14.3's canonical ledger directory. Never turn a repository's config
+        // into an arbitrary destination, and never adopt an operator-owned clone.
+        if (!/^repo_[A-Za-z0-9_-]+$/.test(repoId)) throw new Error(LEDGER_UNAVAILABLE);
+        const path = join(scope.dataHome!, "sageox", "sageox.ai", "ledgers", repoId);
+        if (refresh) await sync.pull(repo.name, path).catch(() => {});
+        managed = sync.receipt(repo.name);
+        if (!managed?.last_sync) {
+          status.detail = managed?.detail ?? syncFailure ?? "The gateway has not successfully refreshed this ledger yet.";
+          return { status: recordLedger(status, lookup), repoId, lookup };
+        }
+      }
+      const location = LedgerLocation.parse(await runOx(["status", "--json"], scope, repo.path)).ledger;
+      if (!location.configured || !location.exists || !location.path) return { status: recordLedger(status, lookup), lookup };
+      const receipt = managed ? { ...managed, status: "ok" }
+        : LedgerSync.parse(await runOx(["daemon", "status", "--json"], scope, repo.path)).project?.ledger;
+      // Top-level daemon health/last_sync may describe another checkout. Match the
+      // ledger that this cwd's read commands actually resolve, then use only its receipt.
+      if (!receipt || receipt.status !== "ok" || await realpath(receipt.path) !== await realpath(location.path)) {
+        return { status: recordLedger(status, lookup), lookup };
+      }
+      // ox 0.14.3 ignores ledger ListSessions errors. Verify directory readability so
+      // permission failures cannot become an empty week. No sessions directory is normal
+      // for a freshly synced empty ledger; ox creates it when listing.
+      try {
+        await (await opendir(join(location.path, "sessions"))).close();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const at = receipt.last_sync ? Date.parse(receipt.last_sync) : NaN;
+      const age = Date.now() - at;
+      status = { ...status, failure: "ledger-stale", detail: LEDGER_STALE };
+      if (Number.isFinite(at) && age >= 0) status.last_sync = new Date(at).toISOString();
+      if (Number.isFinite(at) && age >= 0 && age < MAX_LEDGER_AGE_MS) {
+        status = { repo: repo.name, status: "available", last_sync: status.last_sync,
+          detail: "This repository's ledger has a successful refresh within five minutes." };
+      }
+    } catch {
+      // Paths, config parse errors and ox diagnostics are never copied into a turn.
+    }
+    return { status: recordLedger(status, lookup), repoId, lookup };
+  };
+
+  const ledgerStatus = async (): Promise<TeamLedgerStatus[]> => {
+    const statuses: TeamLedgerStatus[] = [];
+    for (const repo of scope.repositories ?? []) statuses.push((await inspectLedger(repo)).status);
+    return statuses;
+  };
+
+  const sessions = async (name: string, limit: number): Promise<string> => {
+    SessionsArgs.parse({ repo: name, limit });
+    const matches = (scope.repositories ?? []).filter((repo) => repo.name === name);
+    if (matches.length !== 1) throw new Error("No unique configured repository matches that name. Use team_status to list repository names.");
+    const repo = matches[0];
+    // A fresh local clone alone does not prove that a revoked credential still grants
+    // this gateway access. Reuse the live team check and its rotation/health handling.
+    await search("team", 1);
+    const { status, repoId, lookup } = await inspectLedger(repo);
+    if (status.status !== "available") throw new Error(status.detail);
+    try {
+      const out = await runOx(["session", "list", "--json", "--limit", String(limit)], scope, repo.path);
+      if (out && typeof out === "object" && "ledger_available" in out && out.ledger_available === false) {
+        throw new Error(LEDGER_UNAVAILABLE);
+      }
+      const parsed = SessionsResponse.safeParse(out);
+      if (!parsed.success) throw oxFailed("session", "unreadable", "unexpected session-list response shape");
+      if (parsed.data.repo_id !== repoId) throw new Error(LEDGER_UNAVAILABLE);
+      return JSON.stringify({ repo: name, repo_id: repoId, last_sync: status.last_sync,
+        window: "past seven days", total: parsed.data.total, sessions: parsed.data.sessions.slice(0, limit) });
+    } catch (error) {
+      recordLedger({ repo: name, status: "unavailable", failure: "ledger-unavailable", detail: LEDGER_UNAVAILABLE }, lookup);
+      throw error;
+    }
+  };
+
+  const recent = async (name: string, hours: number, limit: number): Promise<string> => {
+    RecentArgs.parse({ repo: name, hours, limit });
+    const matches = (scope.repositories ?? []).filter((repo) => repo.name === name);
+    if (matches.length !== 1) throw new Error("No unique configured repository matches that name. Use team_status to list repository names.");
+    const repo = matches[0];
+    await search("team", 1);
+    const { status, repoId, lookup } = await inspectLedger(repo);
+    if (status.status !== "available") throw new Error(status.detail);
+    try {
+      // Never use glance's default checkpoint: one caller reading must not hide earlier
+      // activity from another. Absolute bounds also let us verify the returned window.
+      const until = Date.now();
+      const since = until - hours * 60 * 60_000;
+      const out = await runOx(["glance", "--since", new Date(since).toISOString(),
+        "--until", new Date(until).toISOString(), "--json"], scope, repo.path);
+      const parsed = RecentResponse.safeParse(out);
+      if (!parsed.success) throw oxFailed("glance", "unreadable", "unexpected activity response shape");
+      const data = parsed.data;
+      if (data.repo !== basename(await realpath(repo.path)) || Date.parse(data.since) !== since || Date.parse(data.until) !== until) {
+        throw new Error(LEDGER_UNAVAILABLE);
+      }
+      const activities = data.authors.flatMap((author) => [
+        ...(author.murmurs ?? []).map((murmur) => ({ kind: "murmur", ...murmur })),
+        ...(author.sessions ?? []).map((session) => ({ kind: "session", ...session })),
+      ]);
+      if (activities.some(({ time }) => Date.parse(time) < since || Date.parse(time) > until)) {
+        throw new Error(LEDGER_UNAVAILABLE);
+      }
+      activities.sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
+      return JSON.stringify({ repo: name, repo_id: repoId, last_sync: status.last_sync,
+        since: data.since, until: data.until, total: activities.length,
+        truncated: activities.length > limit, activities: activities.slice(0, limit) });
+    } catch (error) {
+      recordLedger({ repo: name, status: "unavailable", failure: "ledger-unavailable", detail: LEDGER_UNAVAILABLE }, lookup);
+      throw error;
+    }
   };
 
   return {
     search,
+    ledgerStatus: () => read(ledgerStatus),
+    sessions: (...args) => read(() => sessions(...args)),
+    recent: (...args) => read(() => recent(...args)),
+    startSync: async () => {
+      if (!sync) return;
+      try {
+        await sync.start(async () => {
+          for (const repo of scope.repositories ?? []) {
+            if (!remotes.some((remote) => remote.repo === repo.name)) continue;
+            const previous = ledgerReadings.get(repo.name)?.status;
+            const { status } = await inspectLedger(repo, true);
+            if (previous?.status !== status.status || previous?.detail !== status.detail) {
+              console.warn(`ledger_sync repo=${JSON.stringify(repo.name)} status=${status.status} detail=${JSON.stringify(status.detail)}`);
+            }
+          }
+        });
+      } catch {
+        syncFailure = "Ledger sync could not acquire its ownership lock. Check gateway logs and filesystem ownership.";
+        for (const remote of remotes) recordLedger({ repo: remote.repo, status: "unavailable",
+          failure: "ledger-unavailable", detail: syncFailure }, ++ledgerLookup);
+        console.warn("ledger_sync unavailable: verify any previous owner has stopped before removing workspace/ox-data/ledger-sync.lock");
+      }
+    },
+    stopSync: async () => { await sync?.stop(); },
     // The query is a fixed word and the passages are thrown away: what is being read here
     // is whether ox answers at all.
     probe: async () => {
       await search("team", 1).catch(() => {});
     },
-    readings: () => (reading ? [reading] : []),
+    readings: () => [...(reading ? [reading] : []), ...[...ledgerReadings.values()].map(({ status }) => {
+      const capability = `ledger:${status.repo}`;
+      // Freshness expires even between tool calls. A latched Ok must not keep telling
+      // subsequent turns that a checkout is current after its receipt has aged out.
+      const age = Date.now() - Date.parse(status.last_sync ?? "");
+      const stale = status.status === "available" && !(age >= 0 && age < MAX_LEDGER_AGE_MS);
+      return status.status === "available" && !stale
+        ? probeOk(capability, status.detail)
+        : probeUnavailable(capability, stale ? "ledger-stale" : status.failure ?? "ledger-unavailable",
+            "check SageOx ledger sync and its configured credential for this repository", stale ? LEDGER_STALE : status.detail);
+    })],
   };
 }
 
 export interface OxScope {
   team?: string;
   repo?: string;
+  /** Runtime repository allowlist from repos.conf; paths never come from a tool call. */
+  repositories?: readonly TeamRepository[];
+  /** The same isolated ox data home used by this agent's repository workspace. */
+  dataHome?: string;
+  /** Omit to use externally supervised sync. Secrets are resolved only by the gateway. */
+  ledgerSync?: readonly LedgerRemote[];
   /** Directory holding `sageox/auth.json`, for a credential mounted as a file. */
   configHome?: string;
   /**
@@ -275,6 +646,17 @@ export function oxCwd(scope: OxScope): string {
 export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...base };
   if (scope.configHome) env.XDG_CONFIG_HOME = scope.configHome;
+  if (scope.dataHome) {
+    env.XDG_DATA_HOME = scope.dataHome;
+    env.XDG_CACHE_HOME = join(scope.dataHome, "cache");
+  }
+  // Read commands must not auto-start ox's daemon: it also publishes pending data.
+  env.SAGEOX_DAEMON = "false";
+  env.OX_NO_DAEMON = "1";
+  if (scope.ledgerSync?.length && scope.dataHome) {
+    env.XDG_STATE_HOME = join(scope.dataHome, "state");
+    env.XDG_RUNTIME_DIR = join(scope.dataHome, "run");
+  }
   if (scope.token) {
     const token = scope.token();
     // A configured ref is the authority on this agent's credential, including when it
@@ -396,11 +778,21 @@ async function runOx(args: string[], scope: OxScope, cwd: string): Promise<unkno
   // The verb only, never the rest of the argv: a query is the caller's own words and has
   // no business coming back inside an error message.
   const verb = args[0];
+  const env = oxEnv(scope);
+  // ox's project override outranks cwd. Never inherit the launching coding agent's
+  // project; local ledger commands bind it to the gateway-selected repository.
+  delete env.OX_PROJECT_ROOT;
+  if (verb !== "query") env.OX_PROJECT_ROOT = cwd;
+  // The toolkit's hosted brain runs Claude over ACP. ox 0.14.3's session list
+  // ignores the inherited --json flag outside agent context; make that context
+  // explicit instead of depending on the environment of the deployment's launcher.
+  if (verb === "session") env.AGENT_ENV = "claude-code";
   let stdout: string;
   try {
     ({ stdout } = await run("ox", args, {
       maxBuffer: 8 * 1024 * 1024,
-      env: oxEnv(scope),
+      timeout: 30_000,
+      env,
       cwd,
     }));
   } catch (error) {

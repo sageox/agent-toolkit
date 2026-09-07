@@ -154,20 +154,53 @@ of failing. That is how an agent set up by an older release picks up a brain too
 since — `doctor` names the missing tool, and re-running the same `memory add` allows it. The
 existing entry itself is never rewritten.
 
-The **team** brain reaches your team's own knowledge through `ox`, as one tool:
-`team_search` over recorded discussions, decisions, docs and prior sessions. It reads;
+The **team** brain reaches your team's indexed knowledge through `ox`:
+`team_search` over discussions, decisions, docs, plans and assistant-chat sessions. It reads;
 nothing here writes to team memory, because an agent that can write to it is an agent whose
 worst turn becomes a fact a colleague cites six months later.
 
-One tool, and the reason is the same one that keeps several others out. `ox glance`,
-`ox session list` and `ox conversation` all read a local checkout that `ox daemon` keeps in
-sync, and this toolkit does not run that daemon (see
-[step 7b](#step-7b--repository-context)). Without it `ox session list` answers
-`{"sessions": [], "ledger_available": false}` and exits 0 — an empty week and an unsynced
-container look identical — so the answer would be confidently wrong rather than merely thin.
-`ox conversation` at least fails honestly, with `{"success": false, "error": {"code":
-"no_team_context"}}`, but it fails all the same. `team_search` is served because `ox query`
-is answered server-side from the token, so it works wherever the agent runs.
+`team_status` checks access with one search using the gateway's current credential and
+checks each configured repository's ledger. It returns separate `team_search` and
+`ledger_sync` results. Empty search results still mean access is `available`, without
+proving anything about ledger contents. Status contains no passages, auth paths, identity
+details, or raw subprocess errors. Re-run `./bin/sageox-agent memory add team` to add new
+team tools to an existing bundle's policy.
+
+`team_sessions` lists up to 20 sessions (default 10) from the past seven days, newest first.
+Its `repo` argument selects a name from `team_status`, such as `acme--service`, taken from
+the existing [repository configuration](#step-7b--repository-context). It accepts no path
+or extra CLI flags. Each call verifies current team-search access, the checkout's origin
+and SageOx team/repo binding, and a matching gateway or external daemon refresh receipt. The
+receipt must be less than five minutes old; the reply includes its `last_sync` timestamp.
+Missing, stale, mismatched, and unreadable sources produce a refusal, never an empty week.
+These are separate `ledger:<repo>` capabilities; code-index readiness does not gate them.
+
+`team_recent` uses the same repository, access, and freshness checks to read recent coworker
+work updates (murmurs) and session activity. Its `hours` argument ranges from 1 to 168
+(default 72), and `limit` ranges from 1 to 20 (default 10). The reply includes `since`,
+`until`, `last_sync`, the total record count in that window, and `truncated` when the list
+was limited. Records are sorted newest first across authors and activity types; titles,
+summaries, and update text are capped at 2,000 characters with an ellipsis. The reader
+projects recorded activity; it omits ox's generated collision advice and prompt guidance.
+It always supplies an explicit time window, so reading activity does not consume history
+for subsequent tool calls. ox may still update its local glance checkpoint under the
+gateway's config home; that checkpoint does not control this tool's window.
+
+Configure [optional gateway sync](reference.md#optional-ledger-sync) to clone and refresh
+ledgers using an existing Git secret reference. The gateway starts no ox daemon and exposes
+no sync/write command to the brain. Without that configuration, an operator must supervise
+ox sync against the project checkouts under `workspace/repos`, with the same
+`workspace/ox-data` data home and a successful receipt for each selected ledger.
+Live credential and deployment resource validation remain in
+[#24's acceptance](../deployment-contract.md); mounting a ledger alone does not prove freshness.
+
+With no configured repositories, `ledger_sync.status` is `not_configured`. Otherwise it
+is `managed` when at least one repository uses gateway sync, otherwise `external`.
+Managed entries include `sync_owner: gateway`; other entries use external receipts.
+Each repository has an `available` or `unavailable` result. A failed ledger
+read leaves ordinary team search usable. `ox conversation` requires its own team-context
+checkout and readiness check. `team_search`
+works without either checkout because `ox query` is answered server-side.
 
 Leave `--team` off and it lists the teams this machine can see, by name, so you pick one
 rather than typing an id. That listing only works where `ox` has local state — a container

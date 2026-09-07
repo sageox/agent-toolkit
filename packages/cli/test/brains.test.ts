@@ -149,6 +149,12 @@ describe("the team brain is hosted, not spawned", () => {
     expect(hosted[0]).toMatchObject({ token: DEFAULT_OX_TOKEN_SECRET });
   });
 
+  it("carries optional ledger configuration as secret references, not resolved credentials", () => {
+    const ledgerSync = [{ repo: "service", url: "https://git.example.test/ledger.git", username: "oauth2", token: "GITHUB_TOKEN" }];
+    const { hosted } = wireBrains([{ preset: "team", team: "team_x", ledgerSync }], opts);
+    expect(hosted[0]).toMatchObject({ ledgerSync });
+  });
+
   it("still spawns plaintext vault brains itself, which hold no credential", () => {
     const { servers, hosted } = wireBrains(
       [{ preset: "local", path: "brain" }, { preset: "team", team: "team_x" }],
@@ -172,6 +178,9 @@ describe("tool names the policy must admit", () => {
   it("namespaces every team-brain tool, taking the list from the server that serves them", () => {
     expect(toolNamesFor([{ preset: "team", team: "team_x" }])).toEqual([
       "mcp__team-brain__team_search",
+      "mcp__team-brain__team_status",
+      "mcp__team-brain__team_sessions",
+      "mcp__team-brain__team_recent",
     ]);
   });
 

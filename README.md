@@ -100,12 +100,20 @@ verified against a live relay.
 
 An agent that has read what your team already decided stops asking your team to repeat it.
 The **team brain** gives the agent read-only search over your team's own recorded knowledge
-— discussions, decisions, docs, and prior AI-coworker sessions — through
-[SageOx](https://sageox.ai) and its [`ox`](https://github.com/sageox/ox) CLI, as one tool:
+— indexed discussions, decisions, docs, plans, and assistant-chat sessions — through
+[SageOx](https://sageox.ai) and its [`ox`](https://github.com/sageox/ox) CLI:
 
 | Tool | What it reaches |
 |---|---|
-| `team_search` | Recorded discussions, decisions, docs, and prior sessions |
+| `team_search` | Indexed team knowledge, with passages and sources |
+| `team_status` | Checks team-search access and readiness of configured repository ledgers |
+| `team_sessions` | Bounded session listings for a configured repository with verified recent ledger sync |
+| `team_recent` | Recent coworker work updates and session activity from a verified fresh ledger |
+
+Session listing and recent activity require a fresh local ledger. Configure optional
+[gateway sync](docs/guide/reference.md#optional-ledger-sync) using an existing Git secret,
+or supply an externally supervised ox checkout and its refresh receipt.
+A successful search does not establish ledger availability or freshness.
 
 **It reads; it does not write.** An agent that can write to team memory is an agent whose
 worst turn becomes a fact a colleague cites six months later. What the agent searches is

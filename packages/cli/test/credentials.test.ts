@@ -533,6 +533,31 @@ brains: [{preset: team, team: team_x, token: GITHUB_TOKEN}]
     );
   });
 
+  it("reuses the same mounted Git secret for ledger sync and a private repository", () => {
+    const manifest = loadManifest(`
+name: shared-git
+brain: { provider: claude-acp }
+respondTo: anyone
+surfaces: [{ kind: console }]
+brains:
+  - preset: team
+    team: team_x
+    ledgerSync:
+      - { repo: service, url: 'https://git.example.test/ledger.git', username: oauth2, token: GITHUB_TOKEN }
+`);
+    const declared = declaredSecrets(manifest, parseReposConf(PRIVATE_REPO));
+    expect(declared.filter(({ name }) => name === "GITHUB_TOKEN")).toHaveLength(1);
+    const shared = declared.find(({ name }) => name === "GITHUB_TOKEN")!;
+    expect(shared.where).toContain("brains[0].ledgerSync[0].token");
+    expect(shared.where).toContain("repos.conf");
+    expect(shared.degraded).toBeUndefined();
+    writeFileSync(join(secretsDir, "GITHUB_TOKEN"), "one-mounted-value");
+    expect(requireDeclaredSecrets(declared, { dir: secretsDir }).map(({ name }) => name)).toEqual(["SAGEOX_TOKEN"]);
+    const ledgerOnly = declaredSecrets(manifest, []);
+    rmSync(join(secretsDir, "GITHUB_TOKEN"));
+    expect(requireDeclaredSecrets(ledgerOnly, { dir: secretsDir }).map(({ name }) => name)).toEqual(["GITHUB_TOKEN", "SAGEOX_TOKEN"]);
+  });
+
   it("reports a withheld age identity instead of refusing to start", () => {
     const manifest = loadManifest(FLEET);
     for (const name of ["DEMO_NSEC", "DEMO_SLACK_BOT", "DEMO_SLACK_APP", "DEMO_TRACKER_KEY", "DEMO_JOB_TOKEN"]) {

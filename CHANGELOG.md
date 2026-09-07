@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The team brain can report ledger readiness and list sessions from an operator-synced
+  repository.** `team_status` checks search access and each repository's ledger separately;
+  `team_sessions` lists bounded results only after current credential access, repository
+  identity, ledger availability, and a refresh within five minutes have been verified.
+  Missing or stale data is refused instead of appearing as an empty week. The gateway
+  selects the cwd from `repos.conf`, isolates ox state, and exposes no raw status output
+  or credential details. Re-run `sageox-agent memory add team` to add the tools to an
+  existing policy. Malformed search responses also fail instead of becoming
+  successful empty searches.
+
+- **The team brain can read recent coworker activity.** `team_recent` returns work updates
+  and session activity from a configured repository's verified fresh ledger, newest first.
+  It uses an explicit window (default 72 hours, maximum seven days), caps results at 20,
+  and discloses truncation. Missing/stale sources, failed reads, and malformed output are
+  refused instead of becoming an empty window. Long activity text is shortened; raw ox
+  guidance and generated collision advice are omitted. Re-run `sageox-agent memory add
+  team` to grant the tool to an existing policy. Live deployment credential validation
+  remains under #24.
+
+- **Optional gateway-owned ledger sync reuses existing Git secrets.** A team brain's
+  `ledgerSync` entries name configured repositories, HTTPS ledger remotes, and optional
+  username/token secret references. The gateway clones and refreshes reader data without
+  starting an ox daemon or pushing. It serializes refreshes with reads, refuses duplicate
+  owners, stops Git on shutdown, and waits for a changed mounted credential after an
+  authentication failure. No additional Kubernetes Secret is required.
+
 - **The job body contract says what a body finds on disk.** A body must not read
   `workspace/` — the repository checkouts and the `ox` index there are built by
   `sageox-agent run`, in its own process, so what a body finds there depends on where it is

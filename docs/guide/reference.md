@@ -57,7 +57,7 @@ MCP tools reach the brain **namespaced**: `mcp__<server>__<tool>`, with anything
 | `local` | `brain` | `mcp__brain__brain_list`, `mcp__brain__brain_read`, `mcp__brain__brain_write`, `mcp__brain__brain_consolidate` |
 | `shared` | `brain-shared-<n>` | the same four, under that server |
 | `private` | `private-brain` | `mcp__private-brain__brain_list`, `mcp__private-brain__brain_read`, `mcp__private-brain__brain_write`, `mcp__private-brain__brain_delete` |
-| `team` | `team-brain` | `mcp__team-brain__team_search` |
+| `team` | `team-brain` | `mcp__team-brain__team_search`, `mcp__team-brain__team_status`, `mcp__team-brain__team_sessions`, `mcp__team-brain__team_recent` |
 
 Any server you add is namespaced the same way, under the name you gave it — a server named
 `github` publishing `pr_list` is `mcp__github__pr_list`. `mcp add` reads the live tool list
@@ -194,6 +194,51 @@ brains:
 
 Set `BRAIN_MCP_HOST` when the brain runs in a separate container and needs a routable
 address; it defaults to `127.0.0.1`.
+
+### Optional ledger sync
+
+Add `ledgerSync` to the team brain to let the gateway maintain its ledger checkouts.
+Each `repo` must match a configured repository name from `team_status` / `repos list`;
+`url` is that repository's **ledger Git remote**, not its source-code remote.
+
+```yaml
+brains:
+  - preset: team
+    team: team_xxxxxxxx
+    token: SAGEOX_TOKEN
+    ledgerSync:
+      - repo: acme--service
+        url: https://git.example.com/team/service-ledger.git
+        username: oauth2
+        token: SHARED_GIT_TOKEN
+```
+
+`SHARED_GIT_TOKEN` can be the same secretRef another gateway consumer already uses.
+The chart's existing `agents.<name>.secrets.kubernetesSecret` or CSI mount supplies it;
+no additional Secret or chart option is needed. Multiple agents can also reference the
+same Kubernetes Secret. Reusing a key requires that its credential grants access to the
+ledger Git host. A SageOx API team token does not currently supply Git authentication;
+the same Kubernetes Secret may hold both `SAGEOX_TOKEN` and the Git credential as keys.
+Supply the Git host's required username. Omit both `username` and `token` for an anonymous
+HTTPS remote. URLs cannot contain credentials, query strings, or fragments.
+
+Omit `ledgerSync` to keep externally supervised sync. With it configured, the gateway
+refreshes once at startup and every minute after the previous cycle completes, without
+blocking agent startup or waiting for code indexing. Each Git command has a two-minute
+timeout. A failed refresh makes that ledger unavailable immediately. Authentication
+failure pauses network requests until the mounted value changes or the gateway restarts;
+other failures retry on the next cycle. File-backed credentials are reread per refresh.
+Environment-backed changes require a restart, and CSI rotation must be enabled for a
+running pod's mount to change.
+
+Managed checkouts live under `workspace/ox-data/sageox/sageox.ai/ledgers/<repo_id>`.
+A cold clone is published only after checkout completes. The gateway refreshes only
+checkouts it created, serializes reads with refresh, and establishes a new successful
+receipt after each restart. It stops Git's process group and releases its ownership lock
+on graceful shutdown. After a crash, a remaining `workspace/ox-data/ledger-sync.lock`
+requires the operator to verify the previous owner has stopped before removing it.
+Use one gateway per data directory; do not point an external sync daemon at its managed
+checkouts. Existing ox local configuration must resolve to the managed path.
 
 ## What resumes after a restart
 

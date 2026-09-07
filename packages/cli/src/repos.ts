@@ -162,6 +162,8 @@ function oxEnvironment(dataHome: string): NodeJS.ProcessEnv {
     ...passthroughEnv(process.env),
     CI: "true",
     XDG_DATA_HOME: dataHome,
+    SAGEOX_DAEMON: "false",
+    OX_NO_DAEMON: "1",
   };
 }
 

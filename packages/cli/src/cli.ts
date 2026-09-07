@@ -438,7 +438,13 @@ async function buildBrain(
       teamBrain = makeOxTeam({
         team: cfg.team,
         repo: cfg.repo,
+        repositories: codeWorkspace?.states.map(({ dirName, path, url }) => ({ name: dirName, path, url })),
+        dataHome: codeWorkspace ? join(agentDir, "workspace", "ox-data") : undefined,
         configHome: cfg.configHome,
+        ledgerSync: cfg.ledgerSync?.map(({ token, ...remote }) => ({
+          ...remote,
+          token: token ? () => resolveSecret(token, { dir: secretsDir }) : undefined,
+        })),
         // Resolved here, in the gateway, and per lookup rather than once: file-first, so a
         // mounted secret beats an env var, and a mount rewritten under this process is what
         // the next `ox` child carries.
@@ -470,6 +476,7 @@ async function buildBrain(
       model: manifest.brain.model,
     }),
     closeHosted: async () => {
+      await teamBrain?.stopSync();
       for (const h of hosted) await h.close().catch(() => {});
     },
     postMessage,
@@ -1382,6 +1389,7 @@ async function runCmd(argv: string[]): Promise<void> {
   // path for the same reason the code index is: an unusable team brain leaves this agent
   // less informed, not wrong, so it comes up, works, and discloses.
   if (team) {
+    void team.startSync();
     void team.probe().then(() => {
       for (const r of team.readings().filter(isActionable)) {
         process.stdout.write(`  note: ${r.capability} — ${r.reason}; ${r.remedy}\n`);
@@ -1436,7 +1444,8 @@ async function runCmd(argv: string[]): Promise<void> {
     shuttingDown = true;
     clearInterval(ticker);
     process.stdout.write("\nshutting down…\n");
-    await gw.drain().catch(() => {});
+    // A turn may be waiting for a ledger refresh. Cancel Git before waiting for turns.
+    await Promise.all([team?.stopSync().catch(() => {}), gw.drain().catch(() => {})]);
     // After the turns and before the surfaces close, which is the only window where both
     // are true: a job started inside a turn was just waited for by `drain`, while a
     // detached one never was and is owed a last word through a channel that is still up.
