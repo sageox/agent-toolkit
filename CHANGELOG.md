@@ -20,14 +20,12 @@ responses report unavailable data rather than no activity, even when `ox` exits
 successfully. The audit records argument shapes so invalid numeric arguments cannot
 write private text into the log.
 
-Its two tracker sections answer **`unknown`, not `none`**, and today that is what they
-always answer. `ox code insights` omits a section it found nothing for, so "no open pull
-requests" and "no pull request was ever indexed" arrive identically — and the second is the
-real case here, because pull requests and issues are indexed by `ox index github`, which
-needs a forge token, while warmup runs only `ox index code`. The warm canary already reads
-how many the index holds, so the tool can tell the two apart instead of reporting an empty
-tracker as a quiet all-clear. Nothing about the credential boundary moves: the tool shells
-to `ox` in the gateway, over the checkout the agent already had.
+Its tracker sections report **`unknown`** when the repository has no indexed records of
+that type. When records exist, they list open items or report `none` among the indexed
+records. Fresh toolkit indexes have no tracker records: warmup runs only `ox index code`,
+while pull requests and issues come from `ox index github`, which needs a forge token.
+Counts from the warmup canary distinguish missing tracker data from a successful empty
+response. The tool runs `ox` in the gateway over the existing checkout.
 
 **A job kill switch is no longer parkable by any agent that gets a turn.** `brain_write`
 bounded the switch by value alone — every value that arms refused, every value that parks

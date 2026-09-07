@@ -365,6 +365,36 @@ describe("repository warmup", () => {
     expect(result).toContain("Open pull requests:\n  #7 Update a — Alice");
     expect(result).toContain("Open issues:\n  #8 Follow up — Bob");
   });
+
+  it("caps every rendered section when ox returns more rows than requested", async () => {
+    const root = mkdtempSync(join(tmpdir(), "sageox-agent-repos-"));
+    roots.push(root);
+    const names = ["first", "second", "omitted"];
+    const workspace = createRepoWorkspace(parseReposConf("https://github.com/acme/service\n"), {
+      root,
+      run: async (_command, args) => ({
+        stdout: JSON.stringify(args[1] === "status"
+          ? { index_exists: true, prs: 3, issues: 3 }
+          : {
+            hotspots: names.map((name) => ({ path: `${name}.ts`, changes: 1 })),
+            recent_commits: names.map((name) => ({
+              hash: name, author: "Alice", message: name, age: "just now", files: [],
+            })),
+            open_prs: names.map((name, i) => ({ number: i + 1, title: name, author: "Alice" })),
+            open_issues: names.map((name, i) => ({ number: i + 1, title: name, author: "Bob" })),
+          }),
+        stderr: "",
+      }),
+    });
+    await workspace.warm();
+
+    const result = await workspace.insights(14, 2);
+    const sections = result.split(/\n(?=\S)/).slice(1);
+    expect(sections.map((section) => section.split("\n").length - 1)).toEqual([2, 2, 2, 2]);
+    expect(result).toContain("first");
+    expect(result).toContain("second");
+    expect(result).not.toContain("omitted");
+  });
 });
 
 describe("code MCP", () => {

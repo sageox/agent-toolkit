@@ -310,9 +310,14 @@ function openSection(
 }
 
 /** Renders one repository's insights: what changed lately, and what is open against it. */
-function formatInsights(insights: Insights, indexed: RepoState["indexed"], days: number): string {
-  const hotspots = insights.hotspots ?? [];
-  const commits = insights.recent_commits ?? [];
+function formatInsights(
+  insights: Insights,
+  indexed: RepoState["indexed"],
+  days: number,
+  limit: number,
+): string {
+  const hotspots = (insights.hotspots ?? []).slice(0, limit);
+  const commits = (insights.recent_commits ?? []).slice(0, limit);
   return [
     hotspots.length
       ? `Most-changed files, last ${days} days:\n` +
@@ -331,8 +336,8 @@ function formatInsights(insights: Insights, indexed: RepoState["indexed"], days:
           )
           .join("\n")
       : `Recent commits: none in the last ${days} days.`,
-    openSection("pull requests", insights.open_prs, indexed.prs),
-    openSection("issues", insights.open_issues, indexed.issues),
+    openSection("pull requests", insights.open_prs?.slice(0, limit), indexed.prs),
+    openSection("issues", insights.open_issues?.slice(0, limit), indexed.issues),
   ].join("\n");
 }
 
@@ -540,7 +545,7 @@ export function createRepoWorkspace(
           // response unavailable; an omitted section alone cannot prove it is empty.
           if (result.stderr.trim()) throw new Error("ox code insights emitted diagnostics");
           const parsed = InsightsSchema.parse(JSON.parse(result.stdout));
-          return `## ${state.name}\n${formatInsights(parsed, state.indexed, days)}`;
+          return `## ${state.name}\n${formatInsights(parsed, state.indexed, days, limit)}`;
         } catch (error) {
           // The rule `search` states, on the other read: `ox` puts its own prose on the
           // error stream, this one reads a remote-controlled checkout, and stdout that

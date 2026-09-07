@@ -278,11 +278,11 @@ rather than inventing an answer. Repositories are warmed sequentially so they ne
 durable index store.
 
 `code_insights` reads the same index for what has been moving lately — the most-changed
-files, recent commits, and open pull requests and issues. Today its two tracker sections
-always answer `unknown` rather than `none`: pull requests and issues come from
-`ox index github`, which needs a forge token, and warmup runs only `ox index code`, which
-reads the checkout. `unknown` and `none` are deliberately different answers, so an agent
-asked "are there open PRs?" says it cannot see rather than that there are none.
+files, recent commits, and open pull requests and issues. A tracker section reports
+`unknown` when the repository has no indexed records of that type. When records exist,
+it lists open items or reports `none` among the indexed records. Fresh toolkit indexes
+have no tracker records: warmup runs only `ox index code`, while pull requests and issues
+come from `ox index github`, which needs a forge token.
 
 `repos.conf` is deliberately deployment-neutral: one HTTPS URL per line, with `private `
 in front of a private GitHub repository. Private clones use a narrowly scoped read-only
