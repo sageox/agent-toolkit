@@ -298,6 +298,7 @@ describe("repository ledger readers (#24)", () => {
     'esac',
   ].join("\n");
 
+  /** Build two independently bound repository/ledger fixtures with controlled status and reader output. */
   function ledgerScope(bin: string): OxScope {
     const repositories = ["a", "b"].map((name) => {
       const path = join(bin, name);
@@ -340,6 +341,7 @@ describe("repository ledger readers (#24)", () => {
     return { repositories, dataHome: join(bin, "ox-data") };
   }
 
+  /** Give one fixture a gateway-owned checkout and a local Git stub, leaving the other externally synced. */
   function managedScope(bin: string): OxScope {
     const scope = ledgerScope(bin);
     const ledger = join(scope.dataHome!, "sageox/sageox.ai/ledgers/repo_a");

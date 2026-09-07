@@ -168,6 +168,7 @@ function gitEnvironment(repo: RepoSpec, secretsDir?: string): NodeJS.ProcessEnv 
   };
 }
 
+/** Isolate the code index's data and prevent indexing from starting a ledger-sync daemon. */
 function oxEnvironment(dataHome: string): NodeJS.ProcessEnv {
   return {
     ...passthroughEnv(process.env),

@@ -779,6 +779,7 @@ function oxFailed(verb: string, failure: OxFailure, detail: string | undefined):
   return new OxCallError(failure, `ox ${verb}: ${OX_FAILURE_TEXT[failure]}`);
 }
 
+/** Run bounded ox JSON commands in the supplied cwd using the gateway's current credential. */
 async function runOx(args: string[], scope: OxScope, cwd: string): Promise<unknown> {
   // The verb only, never the rest of the argv: a query is the caller's own words and has
   // no business coming back inside an error message.

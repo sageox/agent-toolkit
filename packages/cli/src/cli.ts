@@ -1339,6 +1339,7 @@ async function probeCmd(argv: string[]): Promise<void> {
   process.stdout.write(formatProbe(report, relayUrl));
 }
 
+/** Run an agent, warm its read capabilities in the background, and coordinate shutdown. */
 async function runCmd(argv: string[]): Promise<void> {
   const agent = await agentFrom(argv);
   loadDotEnv(agent.env);
