@@ -196,7 +196,10 @@ const LimitsSchema = z.object({
   maxAgentChainDepth: z.number().int().positive().default(2),
   maxConcurrentChannels: z.number().int().positive().default(4),
   channelQueueLimit: z.number().int().positive().default(32),
-  /** A turn that outlives this releases its channel; without it one hang wedges the gateway. */
+  /**
+   * A turn that outlives this releases its channel; without it one hang wedges the gateway.
+   * It is also the brain's MCP tool-call timeout, so no call is cut off inside a live turn.
+   */
   turnTimeoutMs: z.number().int().positive().default(120_000),
 });
 
@@ -875,6 +878,20 @@ const JobSchema = z
          */
         announce: z.enum(["unproven", "always", "reported"]).default("unproven"),
         /**
+         * How a *passing* gate's line reads. `ProvenVoice` in `verdict.ts` has the rule.
+         *
+         * `labelled`, the default, is the shape every job has had: `PROVEN:` in front of
+         * every passing line. It is right while the sentence after it is the host's, and
+         * wrong for the job whose gates are a shift report — a body that wrote *the bench is
+         * full, so I tended what's already open* composed something for a person to read,
+         * and the machine word in front of it is what makes it read as machinery.
+         *
+         * `verbatim` buys no pass and hides no failure: it reaches PASS alone, the verdict
+         * is still minted from what the body ran, and the headline stays host-phrased —
+         * a combined verdict carries none of the body's words.
+         */
+        proven: z.enum(["labelled", "verbatim"]).default("labelled"),
+        /**
          * Whether this job's body may talk through this channel while it runs, rather than
          * only being reported into it when it is over.
          *
@@ -963,6 +980,14 @@ const ManifestSchema = z
     brains: z.array(BrainSchema).default([]),
     mcpServers: z.array(McpServerSchema).default([]),
     jobs: z.array(JobSchema).default([]),
+    /**
+     * Which agents may park this agent's job kill switches through a turn. A named agent
+     * still may not arm or delete one, and a human's park is never gated by this.
+     *
+     * Ids, never names: a directory record's name is self-asserted, so a stranger
+     * publishing that name would inherit the exemption. One id per surface, as `owner` is.
+     */
+    killSwitchParkBy: z.array(z.string().min(1)).optional(),
   })
   .strict()
   // A gate that cannot identify anyone admits nobody, so refuse the config at load
@@ -1049,6 +1074,15 @@ const ManifestSchema = z
   .refine((m) => new Set(m.jobs.map((job) => job.slug)).size === m.jobs.length, {
     message: "job slugs must be unique — a slug names the job, the switch, and the run record",
     path: ["jobs"],
+  })
+  // Required rather than defaulted, for the reason `failDirection` is: a release enforcing
+  // the refusal before a manifest names its stopper would silence that stopper with nothing
+  // to say so, and a pod that will not start is the louder half of that trade.
+  .refine((m) => !m.jobs.some((job) => job.killSwitch) || m.killSwitchParkBy !== undefined, {
+    message:
+      "a job declares a killSwitch, so killSwitchParkBy must say which agents may park it " +
+      "through a turn — [] for none, or the ids that may",
+    path: ["killSwitchParkBy"],
   })
   // The fleet's `cron-agent-kill-switch` invariant, moved somewhere a non-Kubernetes
   // consumer also gets it: nothing that runs with no human watching may be unstoppable

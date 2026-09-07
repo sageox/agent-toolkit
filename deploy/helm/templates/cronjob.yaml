@@ -79,6 +79,27 @@ spec:
           tolerations:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if $agent.persistence.jobCheckouts }}
+          # The checkouts mount is the agent's own `ReadWriteOnce` claim, and one node at a
+          # time can attach it. Required and not preferred: a Pod the scheduler placed
+          # anywhere else would wait behind a `Multi-Attach` event with empty logs, while an
+          # unschedulable one says which constraint it failed. So when the agent Pod is
+          # missing — a drain, a rescheduling, an agent scaled to zero — the tick is lost as
+          # a `DeadlineExceeded` Job rather than run without the checkout it asked for.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      {{- include "agent.agentSelectorLabels" $context | nindent 22 }}
+                    # The Deployment's Pod and not another job Pod of this agent: those
+                    # carry the same selector labels, and a node holding only one of them is
+                    # a node the claim is not attached to.
+                    matchExpressions:
+                      - key: agent-toolkit/job
+                        operator: DoesNotExist
+          {{- end }}
           securityContext:
             fsGroup: 10001
             fsGroupChangePolicy: OnRootMismatch

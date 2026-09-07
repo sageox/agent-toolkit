@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
-import { toInboundEvent, toReplyTemplate, BUZZ_DEFAULTS } from "../src/normalize.ts";
+import { toInboundEvent, toReplyTemplate, toThreadReply, BUZZ_DEFAULTS } from "../src/normalize.ts";
 
 const authorSk = generateSecretKey();
 const authorPk = getPublicKey(authorSk);
@@ -46,6 +46,24 @@ describe("toInboundEvent", () => {
     );
     expect(toInboundEvent(own, { pubkey: authorPk }).author.isAgent).toBe(true);
     expect(toInboundEvent(own, { pubkey: mePk }).author.isAgent).toBe(false);
+  });
+
+  it("recognises a pubkey the relay's directory lists as another agent", () => {
+    const listed = toInboundEvent(chatEvent(), { pubkey: mePk, agents: new Map([[authorPk, "ida"]]) });
+    expect(listed.author.isAgent).toBe(true);
+    expect(listed.author.isSelf).toBe(false);
+    const unlisted = toInboundEvent(chatEvent(), { pubkey: mePk, agents: new Map() });
+    expect(unlisted.author.isAgent).toBe(false);
+  });
+
+  // A probe tallies who answered from thread replies, so the roster has to reach that
+  // path on its own — it is a separate call, and dropping `agents` from it would pass the
+  // inbound cases above.
+  it("classifies a thread reply's author against the same roster", () => {
+    const reply = toThreadReply(chatEvent(), { pubkey: mePk, agents: new Map([[authorPk, "ida"]]) });
+    expect(reply.author.isAgent).toBe(true);
+    expect(reply.author.isSelf).toBe(false);
+    expect(toThreadReply(chatEvent(), { pubkey: mePk }).author.isAgent).toBe(false);
   });
 
   it("marks a channel public unless it is one the config called private", () => {

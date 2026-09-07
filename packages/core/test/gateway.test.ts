@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Gateway } from "../src/gateway.ts";
 import { SurfaceEgress } from "../src/surface-egress.ts";
 import { MockBrain } from "../src/brain.ts";
@@ -814,5 +814,141 @@ describe("Gateway tells the egress path which message a turn is answering", () =
     expect(f.sent).toHaveLength(1);
     // And the registration does not outlive the turn it was made for.
     await expect(egress.react("👍")).rejects.toThrow(/no message to react to/i);
+  });
+});
+
+describe("answers come home", () => {
+  const IDA = "c".repeat(64);
+
+  /** A surface with one configured channel, remembering what it sent and what it posted. */
+  function surface(kind: string, channelId: string, opts: { name?: string; isPublic?: boolean } = {}) {
+    let emit!: (e: InboundEvent) => void;
+    const sent: { channel: ChannelRef; msg: GuardedMessage; context?: InboundEvent }[] = [];
+    const posted: GuardedMessage[] = [];
+    const adapter: SurfaceAdapter = {
+      kind,
+      start: async (onEvent) => {
+        emit = onEvent!;
+      },
+      send: async (channel, msg, context) => {
+        sent.push({ channel, msg, context });
+      },
+      postTargets: () => [
+        { surface: kind, id: channelId, isPublic: opts.isPublic ?? false, name: opts.name },
+      ],
+      post: async (_channel, msg) => {
+        posted.push(msg);
+        return { surface: kind, nativeId: "root1" };
+      },
+      principals: () => new Map([[IDA, "ida"]]),
+      displayName: (id) => (id === IDA ? "ida" : undefined),
+      stop: async () => {},
+    };
+    return { adapter, sent, posted, inject: (e: InboundEvent) => emit(e) };
+  }
+
+  let seq = 0;
+  const at = (
+    surfaceKind: string,
+    channelId: string,
+    author: string,
+    extra: Partial<InboundEvent> = {},
+  ): InboundEvent => ({
+    id: { surface: surfaceKind, nativeId: `${surfaceKind}-${++seq}` },
+    surface: surfaceKind,
+    channel: { surface: surfaceKind, id: channelId, isPublic: false },
+    author: { surface: surfaceKind, id: author, isSelf: false, isAgent: false },
+    text: "…",
+    mentionsMe: false,
+    ts: "2026-09-02T00:00:00Z",
+    raw: null,
+    ...extra,
+  });
+
+  /** A brain that, asked from Slack, addresses ida on Buzz and says so. */
+  function asking(egress: SurfaceEgress): Brain {
+    return {
+      async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        await egress.address("buzz", "hive", { text: "@ida: did the sweep pass?" }, "ida");
+        yield { type: "reply", msg: { text: "asked ida in hive" } };
+      },
+    };
+  }
+
+  // Relays land in the order their events were injected, so a negative claim — that line
+  // was not relayed — is made by injecting one more line that *is*, waiting for it, and
+  // reading what arrived before it.
+
+  it("brings the addressed principal's reply into the thread that asked, and nothing else", async () => {
+    const slack = surface("slack", "C0123");
+    const buzz = surface("buzz", "hive", { name: "hive" });
+    const manifest = loadManifest(
+      "name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: slack}, {kind: buzz}]",
+    );
+    const egress = new SurfaceEgress({ manifest, adapters: [slack.adapter, buzz.adapter] });
+    const gw = new Gateway({ manifest, adapters: [slack.adapter, buzz.adapter], brain: asking(egress), egress });
+    await gw.start();
+
+    const asked = at("slack", "C0123", "U08MADHUR", { text: "@harry ask ida", mentionsMe: true });
+    slack.inject(asked);
+    await gw.drain();
+    expect(slack.sent.map((s) => s.msg.text)).toEqual(["asked ida in hive"]);
+
+    const under = { threadRoot: { surface: "buzz", nativeId: "root1" } };
+    // ida's reply p-tags the agent, as every toolkit reply does — and it still starts no
+    // turn: the line was addressed to the person who asked, and comes home instead.
+    buzz.inject(at("buzz", "hive", IDA, { text: "passed, 0 failures", mentionsMe: true, ...under }));
+    buzz.inject(at("buzz", "hive", "bystander", { text: "me too", ...under }));
+    buzz.inject(at("buzz", "hive", IDA, { text: "a top-level aside" }));
+    buzz.inject(at("buzz", "hive", IDA, { text: "and the logs are clean", ...under }));
+    await vi.waitFor(() => expect(slack.sent).toHaveLength(3));
+    await gw.drain(); // any turn the mention had started would have posted by now
+
+    expect(slack.sent.map((s) => s.msg.text)).toEqual([
+      "asked ida in hive",
+      "ida (buzz · hive): passed, 0 failures",
+      "ida (buzz · hive): and the logs are clean",
+    ]);
+    // Into the very message that asked, so the surface threads it there.
+    expect(slack.sent[1].context?.id).toEqual(asked.id);
+    // Bringing an answer home is not answering it: nothing went out on Buzz, and no turn
+    // ran for the mention — the brain would have addressed ida again and said so.
+    expect(buzz.sent).toHaveLength(0);
+    expect(buzz.posted).toHaveLength(1);
+  });
+
+  it("scans a line on its way into a public home, and stays silent under the kill switch", async () => {
+    const slack = surface("slack", "C0PUB", { isPublic: true });
+    const buzz = surface("buzz", "hive");
+    const manifest = loadManifest(
+      "name: t\nbrain: {provider: mock}\nrespondTo: anyone\n" +
+        "surfaces:\n  - kind: slack\n    channels: [{ id: C0PUB, reply: public }]\n  - kind: buzz\n" +
+        "guard:\n  leakPatterns:\n    - name: internal-hostname\n      regex: '\\bhost\\.internal\\b'",
+    );
+    const egress = new SurfaceEgress({ manifest, adapters: [slack.adapter, buzz.adapter] });
+    const gw = new Gateway({ manifest, adapters: [slack.adapter, buzz.adapter], brain: asking(egress), egress });
+    await gw.start();
+
+    slack.inject(
+      at("slack", "C0PUB", "U08MADHUR", {
+        text: "@harry ask ida",
+        mentionsMe: true,
+        channel: { surface: "slack", id: "C0PUB", isPublic: true },
+      }),
+    );
+    await gw.drain();
+
+    const under = { threadRoot: { surface: "buzz", nativeId: "root1" } };
+    buzz.inject(at("buzz", "hive", IDA, { text: "rolled out to host.internal", ...under }));
+    buzz.inject(at("buzz", "hive", IDA, { text: "rolled out", ...under }));
+    await vi.waitFor(() => expect(slack.sent).toHaveLength(2));
+    expect(slack.sent.map((s) => s.msg.text)).toEqual(["asked ida in hive", "ida (buzz · hive): rolled out"]);
+
+    gw.stopServing("operator");
+    buzz.inject(at("buzz", "hive", IDA, { text: "one more", ...under }));
+    gw.resumeServing();
+    buzz.inject(at("buzz", "hive", IDA, { text: "and again", ...under }));
+    await vi.waitFor(() => expect(slack.sent).toHaveLength(3));
+    expect(slack.sent.at(-1)?.msg.text).toBe("ida (buzz · hive): and again"); // "one more" never came
   });
 });

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { z } from "zod";
 import {
   errorText,
   isTransient,
@@ -49,6 +50,16 @@ export interface RepoState extends RepoSpec {
    * index long after it went warm.
    */
   reading: ProbeResult;
+  /**
+   * Pull requests and issues of any state in this repository's index, as the warm canary
+   * counted them. `ox code insights` omits a section it found nothing for, so "none are
+   * open" and "none was ever indexed" arrive identically; these counts are what
+   * `code_insights` tells them apart by.
+   *
+   * Read at warmup rather than per call because nothing here runs `ox daemon`: the index
+   * is built once and does not change under the process.
+   */
+  indexed: { prs: number; issues: number };
 }
 
 interface RunOptions {
@@ -219,6 +230,119 @@ function failureReading(capability: string, step: WarmStep, error: unknown): Pro
   );
 }
 
+/**
+ * The sections of `ox code insights --json` this gateway renders.
+ *
+ * `contention` is not rendered: ox reports a path touched from more than one
+ * indexed checkout of the same repository, and an agent indexes exactly one per
+ * repository under `workspace/repos`, so it can never have any.
+ *
+ * Every field is optional because ox omits an empty section rather than emitting `[]` —
+ * which is why {@link RepoState.indexed} exists.
+ */
+const InsightsSchema = z.strictObject({
+  hotspots: z.array(z.object({
+    path: z.string(),
+    changes: z.number().int().nonnegative(),
+  })).optional(),
+  recent_commits: z.array(z.object({
+    hash: z.string(),
+    author: z.string(),
+    message: z.string(),
+    files: z.array(z.string()).nullish(),
+    age: z.string(),
+  })).optional(),
+  open_prs: z.array(z.object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    author: z.string(),
+  })).optional(),
+  open_issues: z.array(z.object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    author: z.string(),
+  })).optional(),
+  // Known ox metadata is not rendered. Reject other top-level keys so a status/error
+  // envelope cannot pass as a successful empty result (which ox represents as {}).
+  contention: z.unknown().optional(),
+  guidance: z.string().optional(),
+  hints: z.unknown().optional(),
+});
+
+type Insights = z.infer<typeof InsightsSchema>;
+
+const INSIGHT_ROW = 200;
+
+/**
+ * One row of checkout text, collapsed and bounded.
+ *
+ * Unlike the error paths in this file, this text is what the tool exists to deliver, so it
+ * reaches the model as written. What it must not do is arrive unbounded: `--limit` caps
+ * the rows and nothing caps a commit message body, so ten of them would be the turn rather
+ * than an answer.
+ */
+const row = (text: string): string => text.replace(/\s+/g, " ").trim().slice(0, INSIGHT_ROW);
+
+/**
+ * The pull-request and issue sections, which are the two that can be absent for two
+ * different reasons.
+ *
+ * A repository whose index holds no record of a kind at all cannot say whether any are
+ * open, and saying "none" there is the confident wrong answer this toolkit refuses
+ * everywhere else. It is the ordinary case rather than a corner: pull requests and issues
+ * are indexed by `ox index github`, which needs a forge token and which warmup does not
+ * run — `ox index code` reads the checkout and nothing else.
+ */
+function openSection(
+  what: string,
+  open: { number: number; title: string; author: string }[] | undefined,
+  indexed: number,
+): string {
+  if (indexed === 0) {
+    return (
+      `Open ${what}: unknown — this repository's index holds no ${what} of any state, so ` +
+      `nothing here says whether any are open.`
+    );
+  }
+  if (!open?.length) return `Open ${what}: none, of ${indexed} indexed.`;
+  return (
+    `Open ${what}:\n` +
+    open.map((item) => `  #${item.number} ${row(item.title)} — ${row(item.author)}`).join("\n")
+  );
+}
+
+/** Renders one repository's insights: what changed lately, and what is open against it. */
+function formatInsights(
+  insights: Insights,
+  indexed: RepoState["indexed"],
+  days: number,
+  limit: number,
+): string {
+  const hotspots = (insights.hotspots ?? []).slice(0, limit);
+  const commits = (insights.recent_commits ?? []).slice(0, limit);
+  return [
+    hotspots.length
+      ? `Most-changed files, last ${days} days:\n` +
+        hotspots.map((spot) => `  ${row(spot.path)} — ${spot.changes} changes`).join("\n")
+      : `Most-changed files: no file changed in the last ${days} days.`,
+    commits.length
+      ? "Recent commits:\n" +
+        commits
+          .map(
+            (commit) =>
+              // The file list is a count and not the paths: it is the one part of this
+              // payload whose size follows the commit rather than the row limit, and the
+              // hotspots above already answer which files move.
+              `  ${row(commit.hash)} ${row(commit.age)}, ${row(commit.author)}, ` +
+              `${commit.files?.length ?? 0} file(s) — ${row(commit.message)}`,
+          )
+          .join("\n")
+      : `Recent commits: none in the last ${days} days.`,
+    openSection("pull requests", insights.open_prs?.slice(0, limit), indexed.prs),
+    openSection("issues", insights.open_issues?.slice(0, limit), indexed.issues),
+  ].join("\n");
+}
+
 export interface RepoWorkspace {
   states: RepoState[];
   /**
@@ -237,6 +361,7 @@ export interface RepoWorkspace {
   readings(): readonly ProbeResult[];
   statusText(): string;
   search(query: string, limit: number): Promise<string>;
+  insights(days: number, limit: number): Promise<string>;
 }
 
 /** Prepares the workspace directories and the initial readings. Starts nothing — see `warm`. */
@@ -264,6 +389,7 @@ export function createRepoWorkspace(
       ...repo,
       path,
       reading: probeWarming(capabilityOf(repo), since, STEP_REASON.pending),
+      indexed: { prs: 0, issues: 0 },
     };
   });
 
@@ -318,7 +444,12 @@ export function createRepoWorkspace(
         timeout: 30_000,
         maxBuffer: 8 * 1024 * 1024,
       });
-      const status = JSON.parse(canary.stdout) as { index_exists?: boolean };
+      const status = JSON.parse(canary.stdout) as {
+        index_exists?: boolean;
+        prs?: number;
+        issues?: number;
+      };
+      state.indexed = { prs: status.prs ?? 0, issues: status.issues ?? 0 };
       // Its own state, and not a failure: the index ran and holds nothing, which a search
       // cannot feel — it answers from an empty store in fluent, plausible prose.
       state.reading =
@@ -395,13 +526,65 @@ export function createRepoWorkspace(
     return results.join("\n\n");
   };
 
-  return { states, warm, readings, statusText, search };
+  const insights = async (days: number, limit: number): Promise<string> => {
+    const ready = states.filter((state) => state.reading.health === "Ok");
+    if (!ready.length) return statusText();
+    const results = await Promise.all(
+      ready.map(async (state) => {
+        try {
+          const result = await run(
+            "ox",
+            ["code", "insights", "--json", "--days", String(days), "--limit", String(limit)],
+            {
+              cwd: state.path,
+              env: oxEnvironment(dataHome),
+              timeout: 60_000,
+              maxBuffer: 8 * 1024 * 1024,
+            },
+          );
+          // ox 0.14.3 swallows section query errors: it exits 0, omits failed sections,
+          // and warns on stderr. Without per-section health, diagnostics make the whole
+          // response unavailable; an omitted section alone cannot prove it is empty.
+          if (result.stderr.trim()) throw new Error("ox code insights emitted diagnostics");
+          const parsed = InsightsSchema.parse(JSON.parse(result.stdout));
+          return `## ${state.name}\n${formatInsights(parsed, state.indexed, days, limit)}`;
+        } catch (error) {
+          // The rule `search` states, on the other read: `ox` puts its own prose on the
+          // error stream, this one reads a remote-controlled checkout, and stdout that
+          // will not parse is the same untrusted text. The detail goes to the operator's
+          // log; the model gets a sentence written here.
+          console.warn(
+            `code_insights_failed repo=${state.dirName} ` +
+              `error=${error instanceof Error ? error.message : "unknown"}`,
+          );
+          return `## ${state.name}\ninsights failed: this repository's index could not be read`;
+        }
+      }),
+    );
+    return results.join("\n\n");
+  };
+
+  return { states, warm, readings, statusText, search, insights };
 }
 
 /** The server the code tools are namespaced under: `mcp__code__code_search`. */
 export const CODE_SERVER = "code";
 
-const CODE_TOOL_NAMES = ["code_search", "code_status"] as const;
+const CODE_TOOL_NAMES = ["code_search", "code_status", "code_insights"] as const;
+
+// ox's own defaults for `code insights` (`--days 14 --limit 10`), and the ceilings this
+// gateway holds a caller to. The row cap matches `code_search`'s, for the same reason: a
+// result is read into a turn, and four sections multiply it.
+const DEFAULT_INSIGHT_DAYS = 14;
+const MAX_INSIGHT_DAYS = 90;
+const DEFAULT_INSIGHT_ROWS = 10;
+const MAX_INSIGHT_ROWS = 20;
+
+/** A caller's number, floored into range, or the default when it is not one. */
+function bounded(raw: unknown, fallback: number, max: number): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
+  return Math.max(1, Math.min(max, Math.floor(raw)));
+}
 
 /**
  * The same tools as the policy must name them. Derived, so `repos add` cannot write one
@@ -431,6 +614,32 @@ const CODE_TOOLS = [
     description: "Report which configured repository indexes are ready, warming, or unavailable.",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "code_insights",
+    description:
+      "What has been moving lately in the configured repositories: the most-changed files, " +
+      "recent commits, and the open pull requests and issues the index holds. Read-only. " +
+      "Use it to orient before code_search, or when asked what is going on in a repository. " +
+      "Change counts rank activity and never importance. The pull-request and issue sections " +
+      "say when they are unknown, which is not the same answer as none.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        days: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_INSIGHT_DAYS,
+          description: `How far back to look (default ${DEFAULT_INSIGHT_DAYS}, maximum ${MAX_INSIGHT_DAYS})`,
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_INSIGHT_ROWS,
+          description: `Rows per section (default ${DEFAULT_INSIGHT_ROWS}, maximum ${MAX_INSIGHT_ROWS})`,
+        },
+      },
+    },
+  },
 ] as const;
 
 /**
@@ -446,17 +655,21 @@ export function codeHandler(workspace: RepoWorkspace): McpHandler {
   return mcpToolServer({
     name: CODE_SERVER,
     tools: () => CODE_TOOLS,
-    // Nothing declared: `query` is the caller's own words, the same reason the team brain
-    // declares nothing for `team_search`. The audit records that a search ran and how long
-    // its query was, never the query.
+    // Record argument shapes only. Even numeric fields can arrive as arbitrary text,
+    // and the audit sees the raw arguments before this handler bounds them.
     call: async (name, args) => {
       if (name === "code_status") return workspace.statusText();
+      if (name === "code_insights") {
+        return workspace.insights(
+          bounded(args.days, DEFAULT_INSIGHT_DAYS, MAX_INSIGHT_DAYS),
+          bounded(args.limit, DEFAULT_INSIGHT_ROWS, MAX_INSIGHT_ROWS),
+        );
+      }
       if (name !== "code_search") throw new Error(`unknown tool ${name}`);
 
       const query = typeof args.query === "string" ? args.query.trim() : "";
       if (!query) throw new Error("code_search requires a non-empty query");
-      const requested = typeof args.limit === "number" ? Math.floor(args.limit) : 5;
-      return workspace.search(query, Math.max(1, Math.min(20, requested)));
+      return workspace.search(query, bounded(args.limit, 5, 20));
     },
   });
 }

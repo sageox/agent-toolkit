@@ -43,6 +43,8 @@ export class FakeRelay {
       withholdEose?: boolean;
       rejectAuth?: boolean;
       rejectAuthReason?: string;
+      slowDirectoryMs?: number;
+      refuseDirectory?: boolean;
     },
   ) {
     this.wss = wss;
@@ -60,6 +62,13 @@ export class FakeRelay {
       rejectAuth?: boolean;
       /** The refusal's reason. `""` is protocol-legal, and relays do send it. */
       rejectAuthReason?: string;
+      /**
+       * Answer a directory (kind 10100) REQ only after this long, so a channel REQ opened
+       * beside it is answered first — the interleaving a real relay is free to produce.
+       */
+      slowDirectoryMs?: number;
+      /** Close a directory REQ unanswered — a relay whose conventions do not include one. */
+      refuseDirectory?: boolean;
     } = {},
   ): Promise<FakeRelay> {
     const wss = new WebSocketServer({ port: 0 });
@@ -71,6 +80,8 @@ export class FakeRelay {
       withholdEose: opts.withholdEose,
       rejectAuth: opts.rejectAuth,
       rejectAuthReason: opts.rejectAuthReason,
+      slowDirectoryMs: opts.slowDirectoryMs,
+      refuseDirectory: opts.refuseDirectory,
     });
     relay.backlog.push(...(opts.backlog ?? []));
     return relay;
@@ -125,12 +136,25 @@ export class FakeRelay {
         // open subscription that will never terminate itself.
         if (this.opts.withholdEose) return;
         // Replay anything in the backlog admitted by at least one NIP-01 filter.
-        for (const e of this.backlog) {
-          if (filters.some((filter) => matchesFilter(e, filter))) {
-            ws.send(JSON.stringify(["EVENT", subId, e]));
+        const answer = () => {
+          if (ws.readyState !== ws.OPEN) return;
+          for (const e of this.backlog) {
+            if (filters.some((filter) => matchesFilter(e, filter))) {
+              ws.send(JSON.stringify(["EVENT", subId, e]));
+            }
           }
+          ws.send(JSON.stringify(["EOSE", subId]));
+        };
+        const directory = filters.some((filter) =>
+          Array.isArray(filter.kinds) && (filter.kinds as number[]).includes(10100),
+        );
+        if (directory && this.opts.refuseDirectory) {
+          this.openSubs = this.openSubs.filter((sub) => sub.subId !== subId);
+          ws.send(JSON.stringify(["CLOSED", subId, "unsupported: kind 10100"]));
+          return;
         }
-        ws.send(JSON.stringify(["EOSE", subId]));
+        if (directory && this.opts.slowDirectoryMs) setTimeout(answer, this.opts.slowDirectoryMs);
+        else answer();
         return;
       }
 

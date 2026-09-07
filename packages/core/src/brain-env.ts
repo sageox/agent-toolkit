@@ -42,7 +42,7 @@ export function passthroughEnv(
  */
 export function brainEnv(
   base: NodeJS.ProcessEnv,
-  opts: { apiKey?: string; model?: string } = {},
+  opts: { apiKey?: string; model?: string; turnTimeoutMs?: number } = {},
 ): NodeJS.ProcessEnv {
   const env = passthroughEnv(base);
   const apiKey = opts.apiKey ?? base.ANTHROPIC_API_KEY;
@@ -51,5 +51,8 @@ export function brainEnv(
   // gateway host would repin every agent it runs, invisibly to anyone reading the
   // bundle. Unpinned means the brain's own default, not the host's opinion.
   if (opts.model) env.ANTHROPIC_MODEL = opts.model;
+  // Otherwise the brain's own default ends a tool call inside a turn the gateway still
+  // considers live — and `job_run` waits for a job on the strength of that turn's number.
+  if (opts.turnTimeoutMs) env.MCP_TOOL_TIMEOUT = String(opts.turnTimeoutMs);
   return env;
 }

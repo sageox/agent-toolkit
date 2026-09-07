@@ -496,10 +496,75 @@ The requested message is posted top-level in the destination, and the agent's or
 response confirms the result back in the conversation where the request originated.
 Unknown channels and unconsented public channels are refused. Slack markup written into the
 text is neither refused nor honoured: `<@U0ALICE>` and `<!channel>` alike render as the
-characters the agent typed, so a cross-post notifies nobody it names. A broadcast shape in
+characters the agent typed, so text alone notifies nobody it names. A broadcast shape in
 the text is logged as `egress_escaped … rule=slackBroadcast` rather than refused — escaping
 already takes its reach, and refusing cost the turn.
 Cross-posts never reuse an unrelated message as a fake thread parent.
+
+To reach someone, the agent names them in `mention` — one person or agent per post, which
+the adapter renders as the surface's own addressing primitive (a `p` tag on Buzz, `<@id>` on
+Slack). Without it a post informs a channel and wakes nobody in it; on Buzz the `p` tag is
+the only thing that wakes an agent at all.
+
+```text
+Slack: @harry ask ida in hive whether the nightly sweep passed
+```
+
+Whom it may address is bounded twice. The id must be one the manifest names in `owner` or
+`allowlist`, or one the surface itself vouches for — on Buzz, every agent with a directory
+record, listed to the brain by the name in that record, so "ida" resolves to her pubkey the
+way "hive" resolves to a channel id. Anyone else is refused. And being mentioned reaches no
+further than the recipient's own `respondTo` allows: the mention is a wake, never an
+authorization. One addressed post per turn — the message that asked is what authorizes the
+wake — so a call with no conversation mid-turn, or two at once, wakes nobody. The resolved
+id is logged on an `addressed …` line beside the tool call.
+
+### Answers come home
+
+A question asked on someone's behalf is only useful if the answer reaches them. So an
+addressed post opens a **link** from that post back to the message it was made for, and
+what the addressed principal replies under it is brought into the asking thread, verbatim,
+under a label the gateway wrote:
+
+```text
+Slack #ops                                     Buzz #hive
+  madhur: @harry ask ida if the sweep passed
+  harry:  asked ida in hive          ──────▶   harry: @ida did the nightly sweep pass?
+                                               ida:   @harry passed, 0 failures
+  harry:  ida (buzz · hive):         ◀──────
+          passed, 0 failures
+```
+
+The same shape runs the other way: an agent on Buzz can ask harry to put a question to a
+person in Slack, and that person's thread reply comes home to hive. Nobody has to open the
+other door.
+
+No brain is involved in the return trip. The line is the reply's text under a name the
+surface vouches for — the directory's name on Buzz, the resolved member name on Slack, the
+id otherwise — and it leaves as this agent's own message through the same chokepoint a
+reply takes: public consent and `guard.leakPatterns` apply on the *home* channel, and the
+surface's escaping keeps a mention inside the relayed text from addressing anyone. Being
+the agent's own, it can never wake the agent. And the answer itself starts no turn, even
+when it mentions the agent: it was addressed to the person who asked, so it comes home
+instead of being answered on the far door — which is also what keeps two agents from
+continuing there.
+
+It is not a mirror, and the bounds are what keep it from becoming one. A link opens only
+from a post that addressed someone; a plain cross-post opens nothing. Only the addressed
+principal's replies come home, and only under that one post — a bystander's line, or the
+principal's own top-level aside, stays where it was written. A link closes after twenty
+lines or an hour, whichever comes first, and the kill switch silences relays along with
+everything else. Each attempt is one log line, `relay from=… home=… result=sent`, or
+`result=refused rule=…` when the home channel's guard said no.
+
+A job's verdict comes home the same way. A `job_run` that outlasts the turn used to answer
+"running" and post its verdict to the job's `report` channel alone; now the verdict is also
+posted back into the thread that asked, on whichever door that was, and the channel hears
+it as it would a run somebody waited for. See [the job door](reference.md#naming-tools-in-the-policy).
+
+What does not come home yet: a follow-up. A second message in the asking thread is a new
+turn, not a continuation of the linked one, so "tell ida the nightly one" is a fresh
+addressed post rather than a reply under the first.
 
 ### Let the agent react with an emoji
 
@@ -546,6 +611,106 @@ carries a vocabulary. On Buzz the character is published as-is. Slack names emoj
 of carrying them, so it takes either spelling — `:tada:`, `tada`, or one of the few
 characters the adapter knows a name for — and refuses a character it cannot name rather
 than letting Slack reject it with `invalid_name`.
+
+### Let the agent read the surface it is on
+
+Everything above is the agent speaking. There are three questions it eventually gets asked
+that it cannot answer at all — *which channels am I in, who else is in this one, who is
+this id* — plus a fourth an operator asks constantly, *what has been said in there lately*.
+Without a way to ask its own transport, an agent has to be handed a second client for the
+surface it is already connected to, with a second copy of the credential. That is the one
+arrangement this toolkit exists to avoid, so the reads are a built-in server:
+
+```bash
+sageox-agent mcp add surface-read --agent harry
+```
+
+Four tools, allowlisted separately, so you can grant the roster read without granting
+channel history:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__surface-read__list_channels",
+      "mcp__surface-read__list_members",
+      "mcp__surface-read__describe_actor",
+      "mcp__surface-read__read_channel"
+    ]
+  }
+}
+```
+
+`list_channels` is the one worth granting first: it answers from the surface rather than
+from `agent.yaml`, so comparing the two is how you find the failure that has no error
+message anywhere — an agent that is configured for a channel nobody invited it to connects,
+authenticates, subscribes, and is simply never spoken to.
+
+**The two surfaces answer it differently, because "in a channel" means different things.**
+On Slack it is `users.conversations`: every channel the bot was invited to, including ones
+`agent.yaml` never mentions, so the list can be wider than the configuration as well as
+narrower. On Buzz it takes two things being true — the agent hears a channel because it
+subscribes to a configured one, and is addressable there because its directory record lists
+it — so `list_channels` returns the **overlap** of those two and is never wider than the
+configured list. A configured channel missing from it is one the record does not cover,
+which is the Buzz spelling of the same failure: a client gates its mention picker on that
+record and strips the mention at send, so every signal on both sides reports healthy.
+
+`list_members` is a different read and answers the relay rather than the agent: it is the
+channel's own membership record, so an identity that published a directory record naming a
+channel it was never added to does not appear in it. Where the relay holds a directory
+record for a member, the answer also carries `mentionable` — whether a mention of that
+member *in this channel* would reach them. A member with `mentionable: false` is in the room
+and cannot be addressed there, which is the one silence a roll call would otherwise read as
+a dead agent. A channel the relay keeps no membership record for is refused rather than
+answered empty: an empty channel and a relay that keeps no rosters are different findings.
+
+**Two of the four are bounded to a configured channel, and two are not.** `list_members`
+and `read_channel` name a channel and resolve it exactly as a post does, so no id the agent
+computes reaches a conversation it is not configured for. `list_channels` and
+`describe_actor` take no channel at all: the first is surface-wide by design, and so is the
+second — it answers about an id, and the whole reason to ask is usually that you do not know
+where that person is. Granting `describe_actor` therefore lets the agent resolve **any id
+its surface will answer for**, which on Slack is any member of the workspace and on Buzz is
+any pubkey holding a record. It returns a name and whether the id is a bot, never messages;
+grant it when you want the agent to say who someone is, and withhold it if a workspace-wide
+directory lookup is not something you want the brain to hold.
+
+Each read is capped, and a surface that cannot answer one **refuses it by name** rather than
+answering with an empty list. That distinction is the point of the whole server: zero
+members and no membership read look identical to anything handed `[]` for both, and the
+first is the failure you were looking for.
+
+On Slack these need no scope the setup above did not already ask for: `channels:read` /
+`groups:read` answer "which channels" and "who is in one", and `users:read` puts a name to
+an id. On Buzz they are reads of the same relay socket the agent is already authenticated
+on. Either way the credential never leaves the gateway.
+
+One Slack quota is worth knowing before you rely on `read_channel`. Slack restricts
+`conversations.history` for apps **distributed commercially outside the Marketplace** to one
+request per minute returning at most 15 messages — new installations since 2025-05-29, and
+every such installation since 2026-03-03. The app the setup above walks you through is an
+*internal* one built for your own workspace, which is not affected and still serves a
+thousand messages a request. If your agent runs on an unlisted distributed app instead,
+`read_channel` still works and is simply slow and shallow, and `limit` behaves as the
+ceiling it is documented to be: you will often get fewer messages than you asked for.
+
+That is why `read_channel` answers `more` beside its `messages`. A short list and a quiet
+channel are the same list, and only that field separates them — `more: true` means the read
+stopped before it had the whole window and there is history it did not reach, so the agent
+is told not to report the channel as quiet on it. `more: false` with three messages means
+the channel holds three.
+
+Nothing here publishes, so nothing here is egress and the guard has nothing to rule on.
+What comes back is other people's text, and it is **untrusted** in exactly the way an
+inbound message is — the tools say so, and an agent that acts on an instruction it read in
+a channel is the failure to watch for.
+
+A job that probes reads the same way, through its own per-run channel rather than this
+server: `channel_members` there takes no destination at all, because a job body has no
+field to name a channel with. It is what lets a roll call say whether an agent that did not
+answer is slow or was never in the room. See
+[the job contract](../job-contract.md).
 
 ---
 

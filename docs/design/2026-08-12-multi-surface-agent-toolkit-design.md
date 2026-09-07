@@ -699,9 +699,20 @@ gateway**, never left to steering (the LLM can't be trusted to self-limit):
    agent replies to a reply. **Hard depth cap = 2, enforced by the gateway.**
 4. **Agent-to-agent detection across surfaces** — the gateway recognizes other
    agents (by identity) regardless of which surface a message arrived on, so a
-   Slack→Buzz cross-surface chain is capped the same way.
+   Slack→Buzz cross-surface chain is capped the same way. *On Buzz the identity
+   comes from the relay's directory records (kind 10100), which every mentionable
+   agent publishes; the toolkit still owns no roster.*
 
 Every piece of new cross-agent wiring must state its termination proof.
+
+**Addressed posts and links** (2026-09-02) are the one cross-surface path added
+since, and their proof: a brain post may name one principal, only during the single
+live turn, and at most once per turn — so one admitted message wakes at most one
+principal. The addressed principal's replies under that post come home to the
+asking thread as the agent's own message (`isSelf`, so never a wake) and are
+consumed by the relay rather than admitted as turns, bounded to that root, that
+principal, twenty lines, and an hour. Residual: an unaddressed post is still not
+rate-limited on egress.
 
 ---
 

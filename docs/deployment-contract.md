@@ -106,6 +106,16 @@ provenance, admission past a parked switch, the soft kill switch read from the a
 memory, the budget's own bow-out, the run record, and the verdict artifact the job writes. A
 target supplies a clock, a process, a deadline, and durable state.
 
+A target **may** also let a scheduled run read the repository checkouts the agent's own
+workload maintains, and [the chart](#kubernetes-chart) does, per agent. Read-only is the
+whole of the offer: the agent fast-forwards those trees at every start, so a run writing to
+one is a second writer on a tree it does not own. The `ox` index beside them is not part of
+it — `ox` opens its store read-write and reports one it cannot write as corrupt, so a shared
+index answers a job's search from nothing instead of failing — and neither is the rest of
+the agent's durable state. A target that offers this owes a refusal rather than a
+substitute: a run that cannot reach the checkouts does not happen, because a body written to
+read code, running without the code, is a green run that proved nothing.
+
 ## Kubernetes chart
 
 [`deploy/helm`](../deploy/helm) is the canonical Kubernetes
@@ -143,11 +153,13 @@ the budget, and mints the verdict. The declaration reaches the chart as a mirror
 in that agent's values, because Helm cannot read an operator-supplied bundle at render
 time; the mirror carries the clock and the bound only — not the argv, not the switch —
 so it cannot become a second place a job is decided.
-[The chart's README](../deploy/helm/README.md#jobs) has the rendered shape and the one thing
-a job Pod does not share — the agent's `ReadWriteOnce` claim, which would tie its placement
-to the agent's node. It stages its bundle onto an `emptyDir` of its own instead, and a body
-that does share durable state with the agent gets a `sharedVolumes` claim whose access mode
-says so.
+[The chart's README](../deploy/helm/README.md#jobs) has the rendered shape and what a job
+Pod does not share by default — the agent's `ReadWriteOnce` claim, which ties its placement
+to the agent's node. It stages its bundle onto an `emptyDir` of its own instead.
+`persistence.jobCheckouts` buys back the repository checkouts alone, `subPath`-narrowed and
+read-only, and pays that placement price with a required pod affinity onto the agent's node.
+A body that shares other durable state with the agent gets a `sharedVolumes` claim whose
+access mode says so.
 
 A job Pod is the one pod spec that may hold a cluster token, opted into per agent with
 `serviceAccount.automountJobToken` and off by default. It runs the argv its `agent.yaml`
@@ -170,8 +182,8 @@ To rotate a credential, put the new value in the external store and restart the
 Deployment — the new pod mounts current values, and the runtime resolves credentials at
 process startup. The team brain rereads its SageOx token for every `ox` child and its
 optional ledger Git token for every refresh, so a file the CSI driver refreshes in place
-is what the next operation carries. The surface tokens, the Buzz identity and the model key are held at
-startup by a connection or a subprocess that a rotation would have to re-establish
+is what the next operation carries. The surface tokens, the Buzz identity and the model
+key are held at startup by a connection or a subprocess that a rotation would have to re-establish
 regardless. Refreshing the mount is opt-in: the bootstrap module leaves the CSI driver's
 rotation reconciler at its default of off, and without it a restart is the rotation step
 for this credential too.
@@ -192,8 +204,8 @@ All use the gateway's credential and the existing `repos.conf` allowlist.
 The repository must retain its declared Git origin and match the team brain's SageOx
 team/repo binding. The reader compares the ledger selected by `ox status` with the
 gateway's successful refresh receipt, or `ox daemon status`'s project ledger when sync is
-external, and requires that ledger's own `last_sync` to be less than five minutes old. Global daemon health and code-index readiness do not establish
-ledger freshness. Credential rejection and malformed output produce fixed refusals;
+external, and requires that ledger's own `last_sync` to be less than five minutes old.
+Global daemon health and code-index readiness do not establish ledger freshness. Credential rejection and malformed output produce fixed refusals;
 status never forwards credential paths, identity details, or raw diagnostics.
 
 **Sync ownership is optional configuration.** Team brains can declare
@@ -244,8 +256,8 @@ and empty ledgers. `team_recent` passes absolute `--since`/`--until` bounds and 
 the returned repository, window, timestamps, and counts. It projects work updates and
 session activity without forwarding generated collision advice or prompt guidance. ox may
 write its local glance checkpoint under the gateway's config home; explicit bounds make
-subsequent tool reads independent of that checkpoint. The gateway-managed path is also checked with synthetic Git repositories. Live credential
-and deployment acceptance above remain pending; these checks do not certify a rollout.
+subsequent tool reads independent of that checkpoint. The gateway-managed path is also
+checked with synthetic Git repositories. Live credential and deployment acceptance above remain pending; these checks do not certify a rollout.
 
 Shared brains require a volume that is genuinely shared between agent deployments. Add the
 same existing ReadWriteMany claim to each participant's native `sharedVolumes` values at the

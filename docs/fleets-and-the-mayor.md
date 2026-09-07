@@ -133,9 +133,40 @@ only see one agent:
   that flattens them back into one word has undone that in the last inch. A fleet-wide
   memory misconfiguration once hid for weeks behind a status that read normal, because
   they rendered the same.
-- **The mayor may tell a sibling to stop. It may never start one.** Anyone may park a
+- **The mayor may tell a sibling to stop. It may never start one.** A human may park a
   job; only a human may arm one. If the recovery path from "we deployed this and it is
   wrong" runs back through the automation that is misbehaving, there is no recovery path.
+  The stop is a mechanism rather than a rule kept by hand: each agent names in
+  `killSwitchParkBy` the agents whose park it honours, and the mayor's own list stays empty
+  — nothing sits above the detector to notice it went quiet. Naming an agent there widens
+  nothing else, because arming is refused for every agent whatever the list says.
+
+The two things the toolkit makes you state, and where each one sits:
+
+```yaml
+jobs:
+  - slug: rollcall
+    killSwitch:
+      key: mem/rollcall/enabled   # optional; defaults to mem/<slug>/enabled
+      failDirection: open         # what an unreadable switch means for THIS job
+killSwitchParkBy: []              # per agent: whose park this agent honours
+```
+
+`failDirection` has no default and is never inherited. A job that acts on the world fails
+closed; a job that only reports may fail open, because a relay blip must not silently halt
+reporting for days.
+
+`killSwitchParkBy` is required once any job declares a `killSwitch`, so a manifest cannot
+leave it unsaid. `[]` names nobody, so every agent the surface can identify is refused and
+nobody else is. An id listed there may park — the mayor
+pulling an emergency brake — and still may not arm or delete. Ids, never names: a name is
+self-asserted in the surface's own directory record.
+
+It narrows the blast radius rather than closing it. The check asks for positive evidence
+that the asker is an agent, so a pubkey the relay's directory does not list is admitted, as
+is a call arriving while two channels are mid-turn at once. That is the deliberate
+direction: refusing either would refuse a human's park, and a kill switch that refuses to
+park has failed. The steering each agent carries, and `suspend`, still do the rest.
 
 ## The spend cap the toolkit cannot enforce
 
@@ -176,7 +207,7 @@ authorization boundary.
 | Three-valued verdicts; `UNKNOWN` never rounds | [`packages/core/src/verdict.ts`](../packages/core/src/verdict.ts) |
 | A verdict artifact the chat surface reads instead of guessing | The job host's verdict artifact ([RFC §8.2](design/2026-08-19-jobs-rfc.md#82-how-a-job-reports-one)) |
 | Fail-direction per job; never-set ≠ unreadable | `killSwitch.failDirection` and the switch reading ([RFC §6.1, §6.2](design/2026-08-19-jobs-rfc.md#6-kill-switches)) |
-| Anyone may park a job; only a human may arm one | Kill-switch write admission ([RFC §6.3](design/2026-08-19-jobs-rfc.md#63-the-switch-parks-automation-not-the-job)) |
+| A human, or a named agent, may park a job; only a human may arm one | Kill-switch write admission — the value gate and `killSwitchParkBy` ([RFC §6.3](design/2026-08-19-jobs-rfc.md#63-the-switch-parks-automation-not-the-job)) |
 | A per-agent spend cap | Nowhere in the toolkit. The provider console, owned by the operator. |
 
 Every row citing the RFC is specified there and lands with the job host; `verdict.ts` is

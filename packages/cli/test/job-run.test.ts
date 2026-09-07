@@ -11,7 +11,7 @@ const declare = (job: string) =>
   writeFileSync(
     join(bundle, "agent.yaml"),
     "name: demo\nbrain: {provider: mock}\nrespondTo: anyone\n" +
-      "surfaces: [{kind: console}]\nbrains: [{preset: local}]\njobs:\n" +
+      "surfaces: [{kind: console}]\nbrains: [{preset: local}]\nkillSwitchParkBy: []\njobs:\n" +
       job,
   );
 
@@ -91,8 +91,8 @@ describe("sageox-agent job run", () => {
 
   it("warms no repository workspace, so a body cannot come to depend on one", async () => {
     // Declared and still not built. The clone, the fast-forward and `ox index code` belong
-    // to `run`, and a body that read what they leave behind would work on the chat door —
-    // which runs inside that process — and find nothing on the tick.
+    // to `run`, so a tick sees a checkout only where its deployment mounted one — read-only,
+    // and never one this process built.
     writeFileSync(join(bundle, "repos.conf"), "https://github.com/acme/service\n");
     body('echo "workspace $([ -d workspace ] && echo present || echo absent)"');
     const { stdout, code } = await job("shift");
@@ -268,10 +268,11 @@ describe("sageox-agent job run", () => {
 /**
  * The other two doors, and the only place a job is armed.
  *
- * §6.3 rule 4: anyone may park a job, only a human may arm one. The agent's own brain
- * cannot be that human — a hosted MCP server carries no per-request author, and the author
- * of a *turn* is not the author of a tool call inside it — so the gate is possession of the
- * agent's signing key, which lives on this host and never reaches the brain.
+ * §6.3 rule 4: a human, or an agent `killSwitchParkBy` names, may park a job; only a human
+ * may arm one. The agent's own brain cannot be that human — a hosted MCP server carries no
+ * per-request author, and the turn the gateway hands it decides a park, never an arm — so
+ * the gate is possession of the agent's signing key, which lives on this host and never
+ * reaches the brain.
  */
 describe("sageox-agent job arm | park", () => {
   it("says where the switch would go when there is nowhere to put it", async () => {

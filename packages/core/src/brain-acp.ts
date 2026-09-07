@@ -42,6 +42,11 @@ export interface AcpBrainOptions {
   mcpServers?: readonly unknown[];
   /** How long a channel's conversation is kept before it is closed. */
   sessionIdleMs?: number;
+  /**
+   * `limits.turnTimeoutMs`, as the spawned subprocess's `MCP_TOOL_TIMEOUT`. A `target`
+   * handed in instead is not a process and carries no such bound.
+   */
+  turnTimeoutMs?: number;
 }
 
 /** Long enough to keep a conversation alive across a coffee break. */
@@ -247,7 +252,11 @@ export class ClaudeAcpBrain implements Brain {
     const resolved = resolveBrainCommand();
     const child = spawn(resolved.command, resolved.args, {
       stdio: ["pipe", "pipe", "inherit"],
-      env: brainEnv(process.env, { apiKey: this.opts.apiKey, model: this.opts.model }),
+      env: brainEnv(process.env, {
+        apiKey: this.opts.apiKey,
+        model: this.opts.model,
+        turnTimeoutMs: this.opts.turnTimeoutMs,
+      }),
       cwd: this.opts.cwd,
     });
     this.child = child;

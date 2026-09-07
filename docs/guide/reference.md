@@ -74,9 +74,10 @@ they are waiting on the result, which is not the unattended work a kill switch p
 posture is unchanged afterwards. Every other author is recorded as `agent` and a parked job
 refuses — an allowlisted colleague, a sibling agent, and a call arriving while two channels
 are mid-turn at once, where no one person can be named. `owner` is the test rather than the
-author's agent flag because only a surface can tell an agent from a person, and Buzz cannot
-yet: it flags this agent's own key and nobody else's, so there a bypass keyed on that flag
-would reach every sibling in a fleet. A job that declares
+author's agent flag, because that flag is positive evidence only: Buzz sets it for this
+agent and for any pubkey the relay's directory lists, so `isAgent: false` means *not known
+to be an agent* rather than *a person*, and a bypass keyed on it would reach every sibling
+that published no record. A job that declares
 `parameters` also takes those, under `params`, typed and bounded by its own declaration and
 refused at the call if they do not match; they reach the body as `JOB_PARAM_<NAME>` in its
 environment. They name a **target** — which issue, which document, which environment — and
@@ -85,8 +86,12 @@ never a behaviour: a job whose work a caller can switch is two jobs with two slu
 waited for and the tool answers with its verdict; a job whose `wallClockMs +
 deadlineHeadroomMs` is longer than `limits.turnTimeoutMs` is **started** instead, and the
 tool answers with the run id and nothing that reads as a verdict — the verdict arrives later,
-as the job's ordinary status post. Give such a job a `report` destination, or it has
-nowhere to answer and `doctor` will say so. Add it with `sageox-agent mcp add jobs`, which
+posted back into the conversation that asked, in the thread it was asked in, and as the
+job's ordinary status post where `report` says. A run answered that way is announced as a
+waited-for one is, so a clean verdict is spared the channel. Give such a job a `report`
+destination all the same: the reply can be refused by the home channel's guard, or the call
+may have arrived while no one conversation could be named, and then the post is the only
+answer — `doctor` says so when there is none. Add it with `sageox-agent mcp add jobs`, which
 refuses when no job has armed that door — the tool is served for those jobs and no others,
 so allowing it first writes a permission for something that will never exist. The reverse,
 a job that declares `trigger.onRequest` while the policy denies the tool, is a `doctor`

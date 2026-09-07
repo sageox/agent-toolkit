@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
 - **The team brain can report ledger readiness and list sessions from an operator-synced
   repository.** `team_status` checks search access and each repository's ledger separately;
   `team_sessions` lists bounded results only after current credential access, repository
@@ -35,15 +33,243 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owners, stops Git on shutdown, and waits for a changed mounted credential after an
   authentication failure. No additional Kubernetes Secret is required.
 
-- **The job body contract says what a body finds on disk.** A body must not read
+**An agent with `repos.conf` can be asked what has been moving lately.** `code_insights`
+joins `code_search` and `code_status` on the code server: the most-changed files, recent
+commits, and open pull requests and issues, from the same one-shot index and the same
+read-only checkout. It takes `days` and `limit`, both capped by the gateway, and each row
+is bounded — a commit body has no length `ox` limits, and ten of them would be the turn
+rather than an answer. Run `sageox-agent repos add <url>` again on an existing agent to
+allow `mcp__code__code_insights`; `doctor` names it until you do.
+
+Insights responses are validated before rendering. Query diagnostics and error/status
+responses report unavailable data rather than no activity, even when `ox` exits
+successfully. The audit records argument shapes so invalid numeric arguments cannot
+write private text into the log.
+
+Its tracker sections report **`unknown`** when the repository has no indexed records of
+that type. When records exist, they list open items or report `none` among the indexed
+records. Fresh toolkit indexes have no tracker records: warmup runs only `ox index code`,
+while pull requests and issues come from `ox index github`, which needs a forge token.
+Counts from the warmup canary distinguish missing tracker data from a successful empty
+response. The tool runs `ox` in the gateway over the existing checkout.
+
+**A job kill switch is no longer parkable by any agent that gets a turn.** `brain_write`
+bounded the switch by value alone — every value that arms refused, every value that parks
+admitted, whoever asked — so a sibling agent could stop a lane by asking the agent that
+owns it. Usually that self-corrects, because a human notices a stopped lane and restarts
+it; for a lane whose own job is noticing, nothing downstream reports it missing. The
+gateway is the only thing that ever saw who sent the message, so it now hands the author
+to the write: a park is refused when the turn being answered is from an agent the manifest
+does not name. Arming and the tombstone are unchanged and still refused for everyone.
+
+It narrows, and it is not a boundary. The test is positive evidence of an agent, so a
+surface that cannot identify one admits the park — on Buzz that is a pubkey with no
+directory record — as does a call the gateway cannot place in a single live turn. Refusing
+those would refuse a human's park too, and a refusal to park is a kill switch that failed.
+Steering and `suspend` still carry the rest.
+
+**`killSwitchParkBy` is required once any job declares a `killSwitch`, and a manifest
+without it will not load.** Add `killSwitchParkBy: []` to keep parking to humans, or list
+the ids of the agents whose park this agent honours — a fleet supervisor that pulls an
+emergency brake is the case it exists for. Absent and empty are different answers and only
+one is a decision, so it is stated rather than defaulted, for the reason `failDirection`
+is: a release that enforced the rule while a manifest had not yet named its stopper would
+silence that stopper with nothing to say so. A pod that refuses to start is the louder
+half of that trade. Ids only, never names — a name is self-asserted in the surface's own
+directory record.
+
+Only the `private` brain reads a switch, so an agent whose memory is `local` or `shared`
+is unaffected. A job body holding its own credential writes engrams outside this path, as
+it always has.
+
+## [0.3.1] - 2026-09-04
+
+Published as `ghcr.io/sageox/agent-base:0.3.1`, which takes `:latest` and moves `:0.3`
+forward onto it. There is nothing new to set, and no `agent.yaml` that works today stops
+working.
+
+One behaviour changes without being asked for: `limits.turnTimeoutMs` now also bounds the
+brain's tool calls. At its default that is the more permissive of the two clocks, so a call
+the brain used to abandon inside a still-live turn now runs to the end of it. An agent that
+lowered `turnTimeoutMs` to bound a wedged channel has tightened its tool calls by the same
+move — those calls were already outliving the turn that would have used their result, so
+nothing that reaches a channel today stops reaching it, but the number now means both
+things.
+
+- **A job short enough to wait for is no longer abandoned partway through the wait.** There
+  was a third clock nothing in the bundle named: the brain's MCP client gives up on a tool
+  call on its own timeout, and whenever that was shorter than the turn it was the one that
+  bound. `job_run` waits for exactly those jobs whose deadline fits inside
+  `limits.turnTimeoutMs` — correct by its own arithmetic, against a number that never
+  applied. The brain was handed a failing tool and told the channel the job had produced
+  nothing; the job then finished and posted its own, correct result, and the only record the
+  gateway kept of the dropped call read `outcome=ok`. The brain subprocess is now started
+  with its tool-call timeout set from `limits.turnTimeoutMs`, so the number `job_run` weighs
+  a job's deadline against is the number that applies. Raise `limits.turnTimeoutMs` and both
+  bounds move together; there is nothing new to set.
+
+- **A passing gate's own sentence can render as written.** The host puts `PROVEN:` in front
+  of every line a passing gate produces, which is right while the sentence after it is the
+  host's own machine phrasing and wrong for a job whose gates are a shift report — a body
+  that wrote *the bench is full, so I tended #3961 instead* composed something for a person
+  to read, and the machine word in front of it is the one thing making it read as
+  machinery. Declare `report.proven: verbatim` and that sentence posts as written.
+  It reaches PASS alone, and only the lines a body wrote: a passing gate that said nothing
+  still reads `PROVEN: …`, because the sentence there is the host's; FAIL and UNKNOWN keep
+  their label under every value, since that label is the whole of what stops a body's
+  reassuring prose from reading as a success. Nothing about how a verdict is derived or
+  recorded moves, and the headline stays host-phrased — a combined verdict carries none of
+  the body's words for `verbatim` to render. The default, `labelled`, is what every job
+  posts today, so a job that declares nothing reads exactly as it did.
+
+## [0.3.0] - 2026-09-03
+
+Everything below shipped after `v0.2.0`.
+
+Published as `ghcr.io/sageox/agent-base:0.3.0`, which takes `:latest` and `:0.3`. `:0.2`
+stays on 0.2.0, and `:0` is not published at all — before 1.0.0 a minor bump may break
+you. Pin the digest recorded on the GitHub Release in production; the tags are for
+humans.
+
+Still pre-1.0: configuration format and CLI flags may move between minor versions. Three
+things a deployment already running 0.2.0 has to act on.
+
+**A long job started from chat now answers the thread it was asked in**, and its `report`
+channel post is then made or spared on the same terms a waited-for run has always been on
+— so under the default announce mode a clean verdict no longer posts there at all. A
+channel read as the record of every detached run is now a channel that has stopped hearing
+about the successful ones; the run records still hold them.
+
+**On Buzz, a channel event now waits for the directory subscription** (kind 10100) to
+answer on the same socket, which is what lets `limits.maxAgentChainDepth` recognise a
+sibling. Bounded at thirty seconds on a relay that sends no EOSE, and skipped entirely on
+one that refuses the kind — where the cap goes on not firing, as it did before.
+
+**A `token:` that names a non-default secretRef and resolves to nothing now leaves the
+`ox` child with no credential**, rather than letting it inherit whatever `SAGEOX_TOKEN` the
+gateway process happens to hold — which on a host running several agents is another
+agent's. Such an agent loses team memory and says so, where before it answered as somebody
+else. The default ref is unaffected: it resolves from that same variable.
+
+Two things want the new image before they are worth configuring: `surface-read` is not a
+server an older binary can be asked to add, and `mention` on `post_message` is dropped by
+one as an undeclared argument, leaving a post that wakes nobody.
+
+**The Helm chart moves to 0.11.0**, for the one entry here that is templates rather than
+code: `persistence.jobCheckouts` mounts an agent's repository checkouts into its CronJob
+Pods. It renders on 0.2.0's image, and it is the only entry that does not need the new one.
+`values.yaml` is unchanged, so there is nothing new to set unless you want it; the
+dependency pin in the chart's README moves with the version.
+
+### Added
+
+- **An agent can read the surface it is already on.** `SurfaceAdapter` could post, react
+  and — since v0.1.0 — read back a thread it rooted, and could not answer the three
+  questions every agent eventually gets asked about its own surface: which channels am I
+  in, who else is in this one, who is this id. An agent that needed any of them had to be
+  handed a second client for the surface it was already connected to, with a second copy of
+  the credential. Four optional adapter methods now answer them — `listChannels`,
+  `listMembers`, `describeActor`, `readChannel` — over calls both adapters were already
+  making internally, and the credential stays in the gateway. **`listChannels` answers from the
+  surface rather than from `agent.yaml`**, which is the point of it: a channel the bot was
+  never invited to, or a Buzz directory record that omits one, is an agent that connects,
+  authenticates, subscribes and is never spoken to, with no error on either side. The two
+  surfaces spell it differently and the guide says so — Slack lists every channel the bot
+  joined, so the answer can be wider than the configuration; on Buzz being in a channel and
+  being addressable in it are two facts, so it returns the overlap of the configured channels
+  and the agent's own directory record and is never wider than the configured list.
+  **`listMembers` is the surface's own roster on both**, `conversations.members` on Slack and
+  the relay's channel-membership event on Buzz — never a directory record, which is its
+  author's claim about itself and would confirm membership for a key that was never granted
+  any. Where a surface can also say whether a mention of a member *in that channel* would
+  reach them, the ref carries `mentionable`: `false` is somebody in the room who cannot be
+  addressed there, which is the silence a roll call would otherwise grade as a dead agent.
+  **Empty and cannot-answer never collapse** — a surface that cannot make a read
+  refuses it by name, because zero members and no membership read look identical to anything
+  handed `[]` for both.
+
+  The brain reaches them through a new built-in `surface-read` server, four tools
+  allowlisted separately (`sageox-agent mcp add surface-read`) and each capped. The two that
+  name a channel, `list_members` and `read_channel`, resolve it against the configured list
+  exactly as a post does, so no id the brain computes reaches a conversation the agent does
+  not serve. The two that do not — `list_channels` and `describe_actor` — are surface-wide by
+  design, and the guide says plainly what granting the second one means: the agent can
+  resolve any id its surface will answer for.
+  Nothing on it publishes, so nothing on it is egress; what comes back is other people's
+  text and is untrusted exactly as an inbound message is. `read_channel` answers `more`
+  beside its messages, because a short list and a quiet channel are otherwise the same list
+  — Slack serves as few as fifteen records a request to an app distributed outside the
+  Marketplace, so coming back short of what was asked for is ordinary there rather than
+  exceptional, and the agent is told which kind of short it is holding. A probing job body gets the one
+  read it was missing on its own per-run channel: `channel_members` takes no destination at
+  all, and is what lets a roll call say whether an agent that did not answer was slow or was
+  never in the room.
+
+- **The job body contract says what a body finds on disk.** A body never writes
   `workspace/` — the repository checkouts and the `ox` index there are built by
   `sageox-agent run`, in its own process, so what a body finds there depends on where it is
   running: a run the brain starts is inside that process and, on an agent whose brain has
   code tools, sees one — while every other run is a standalone `job run`, which builds no
-  workspace whatever its trigger. A body that reads a checkout works when someone asks for
-  it and fails on its tick. `docs/job-contract.md` has the rule, what to do instead, and
-  why a shared working tree is the wrong fix; `job run` is now held to it by a test that fails if
-  it ever starts warming a workspace of its own.
+  workspace whatever its trigger and reads one only where its target makes one visible.
+  `docs/job-contract.md` has the rule, the test to make before looking, and what to do when
+  the answer is no; `job run` is now held to it by a test that fails if it ever starts
+  warming a workspace of its own.
+
+- **A scheduled job can read the agent's repository checkouts.** A job Pod's `/agents` is an
+  `emptyDir`, so a body on its 3am tick started from nothing — no checkout, and no way to
+  afford the clone inside its budget — while the agent Pod beside it held the same
+  repositories, cloned once and fast-forwarded since, on its claim. The chart's new
+  `persistence.jobCheckouts` mounts `workspace/repos` from that claim into the agent's
+  CronJob Pods, read-only and `subPath`-narrowed, with a required pod affinity onto the
+  agent's node — the price a `ReadWriteOnce` claim charges, and the reason a tick that
+  cannot land there is lost as a `DeadlineExceeded` Job rather than run without the code it
+  was written to read. The `ox` index does not come with them: `ox` opens its store
+  read-write and reports one it cannot write as corrupt, so a shared index would answer a
+  search from nothing rather than fail. Off by default, per agent, and
+  [the chart's README](deploy/helm/README.md#a-job-that-reads-the-agents-checkouts) has the
+  three things it deliberately does not do.
+
+- **A post can wake one person or agent.** `post_message` takes `mention` — one principal,
+  by the id on a message's `from` line or a name the surface lists — and the adapter renders
+  it as its own addressing primitive: a `p` tag on Buzz, `<@id>` on Slack. Until now a
+  brain's post reached a channel and woke nobody in it: on Buzz the `p` tag is the only wake
+  trigger, and on Slack the `<@…>` a brain writes into text is escaped, so a cross-post could
+  inform a channel but never reach anyone. Whom the agent may address is bounded twice. The
+  id must be one the manifest names in `owner` or `allowlist`, or one the surface itself
+  vouches for — on Buzz, an agent with a directory record, which is also where the name
+  comes from — and the recipient's own `respondTo` gate still decides whether being
+  mentioned wakes them. One addressed post per turn, tied to the single conversation
+  mid-turn, so one admitted message wakes at most one principal and a call with no turn
+  behind it wakes nobody. The resolved id is written on an `addressed …` line beside the
+  `tool_call` that asked for it. A `mentions` list stays a probing job's capability.
+
+- **What the addressed principal answers comes home to the conversation that asked.** A
+  post that names someone opens a *link* from the post to the message it was made on behalf
+  of, and for the next hour, or twenty lines, that principal's replies under that post are
+  brought into the asking thread verbatim — `ida (buzz · hive): passed, 0 failures` — as
+  this agent's own message. A person in Slack can ask an agent on Buzz a question and read
+  the answer where they asked it, and an agent on Buzz can put a question to a person in
+  Slack the same way. No brain is involved: the gateway relays deterministic text under a
+  label it wrote, through the same guarded path a reply takes, so public consent and the
+  leak scan apply on the home channel and the surface's own escaping keeps a mention inside
+  the relayed text from addressing anyone. It is not a bridge, and every bound that keeps it
+  from becoming one is stated in code: a link opens only from an addressed post, only the
+  addressed principal's replies under that one root come home, a bystander's never, the
+  agent's own never, and the link closes on its count and its clock. A reply that came home
+  starts no turn, even when it mentions the agent: it was addressed to the person who
+  asked. The kill switch silences relays too. `relay from=… home=… result=sent|refused|failed`
+  is the log line.
+
+- **A job that outlasts the turn answers the conversation that asked.** `job_run` started
+  such a job, said "running", and the verdict went to the job's `report` channel alone —
+  the person who asked in a Slack thread had to go and look. The job door now keeps the
+  message it was answering and, when the run settles, replies into it with the same text a
+  waited-for call returns, through the gateway's guarded reply path. The status post is
+  then made or spared as it is for a waited-for run, so a clean verdict no longer posts
+  twice. Shutdown pays the same debt: a run the host gives up on tells the asker so, inside
+  the grace it already had. A reply the home channel refuses, or a call the gateway could
+  not pin to one conversation, leaves the status post as the answer, as before, and the
+  tool says which of the two it promised. `job_answer … result=lost` is the log line.
 
 ### Changed
 
@@ -90,6 +316,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two failure classes latch and only two — a rejected credential, and an `ox` that is not
   on `PATH`. A lookup that merely fell over does not: the next one may well answer, and
   announcing an outage a retry disproves is how people learn to skim announcements.
+
+- **The agent-to-agent chain cap now applies on Buzz.** The adapter marked only its own
+  key as an agent, because recognising a sibling needs a roster the toolkit does not own —
+  so `limits.maxAgentChainDepth` never fired there, and two agents that allowlist each other
+  could answer one another until `maxTurnsPerThread`, since every reply `p`-tags the author
+  it answers. The relay already holds the roster: every mentionable agent publishes a
+  directory record (kind 10100), the record clients gate a mention on. The adapter now
+  subscribes to that kind and delivers a channel event only once the directory has
+  answered on the current socket — two REQs are two subscriptions a relay may interleave,
+  and a sibling's message replayed ahead of the record naming it would slip past the cap as
+  a person's; events that arrive early are held and released in order, on a reconnect as
+  on the first connection, for at most thirty seconds on a relay that sends no EOSE and not
+  at all on one that refuses the kind — and sets `isAgent` for any author it lists, so the cap the
+  design spec promised (§8 rule 4) holds on Buzz as it does on Slack. Nothing is declared
+  and nothing is pruned: a record that disappears does not make its author a person.
 
 ## [0.2.0] - 2026-09-02
 

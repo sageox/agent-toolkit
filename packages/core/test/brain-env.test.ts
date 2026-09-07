@@ -71,4 +71,13 @@ describe("brainEnv", () => {
     const env = brainEnv({ ...gatewayEnv, ANTHROPIC_MODEL: "claude-haiku-4-5" });
     expect("ANTHROPIC_MODEL" in env).toBe(false);
   });
+
+  it("bounds the brain's tool calls by the turn it is answering inside", () => {
+    expect(brainEnv(gatewayEnv, { turnTimeoutMs: 300_000 }).MCP_TOOL_TIMEOUT).toBe("300000");
+  });
+
+  it("overrides an ambient tool timeout, which no manifest could be read to allow", () => {
+    const env = brainEnv({ ...gatewayEnv, MCP_TOOL_TIMEOUT: "5000" }, { turnTimeoutMs: 300_000 });
+    expect(env.MCP_TOOL_TIMEOUT).toBe("300000");
+  });
 });

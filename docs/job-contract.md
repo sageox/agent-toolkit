@@ -112,23 +112,41 @@ not inherited any more than anything else is.
 directory — `./body.sh` resolves because of it. In a container deployment a scheduled run
 stages that directory for itself, fresh, and drops it when the run ends.
 
-**`workspace/` is not part of it, and a body must not read it.** The repository checkouts
-under `workspace/repos` and the `ox` index under `workspace/ox-data` belong to
-`sageox-agent run`: it builds them at startup, in its own process, for the brain's code
-tools. Nothing else builds them — not `job run`, whatever its trigger — so what a body finds
-there depends on where it is running. A run the brain starts is inside the gateway's own
-process, and on an agent whose brain has code tools it does see a workspace: a racing one,
-because startup creates each repository's directory before `git` fills it and waits for
-neither the clone nor the index. Every other run is a standalone `job run`, which builds
-none, and in a container deployment does not share a filesystem with the gateway at all. A
-body that reads a checkout is a body that works when someone asks for it and fails on its
-3am tick.
+**`workspace/` is the agent's, and a body never writes it.** The repository checkouts under
+`workspace/repos` and the `ox` index under `workspace/ox-data` belong to `sageox-agent run`:
+it clones, fast-forwards and indexes them at startup, in its own process, for the brain's
+code tools. Nothing else builds them — not `job run`, whatever its trigger — so a body
+writing there is a second writer on a tree it does not own, and a body deleting there
+deletes an index the agent pays minutes to rebuild.
 
-**A body that wants a repository clones one** — shallow, and inside its budget. Durable state
-a body genuinely shares with the agent is a mount the deployment gives it
-([`sharedVolumes`](../deploy/helm/README.md#jobs) is the Kubernetes spelling), and a working
-tree is not that: the agent fast-forwards its checkout at every start, so a body writing
-there is a second writer on a tree it does not own.
+**Whether a body may read them depends on the deployment, so test before you look.** A run
+the brain starts is inside the gateway's own process and sees the workspace that process
+built — a racing one, because startup creates each repository's directory before `git` fills
+it and waits for neither the clone nor the index. A standalone `job run` sees what its target
+gave it: on a single host that is the same directory, and in a container deployment it is
+nothing at all unless the deployment says otherwise, which the chart spells
+`persistence.jobCheckouts`
+([the chart's README](../deploy/helm/README.md#a-job-that-reads-the-agents-checkouts)).
+One directory per repository, named `<owner>--<repo>` in lower case, and the test is
+`git -C workspace/repos/acme--widgets rev-parse --verify HEAD`, not the directory: startup
+creates it, and `git clone` creates `.git` inside it, before either has a ref to resolve.
+What that proves is one clone that got as far as writing one — never a lock. The agent
+fast-forwards these trees at every start, so a body reads a snapshot that can move under it,
+and a body that needs one that cannot clones its own.
+
+**A body that needs a tree either way clones one** — shallow, and inside its budget. From
+the mount when there is one: `git clone --depth 1 workspace/repos/acme--widgets ./work` is
+local, needs no token, and costs no network. Durable state a body genuinely shares with the
+agent is a mount the deployment gives it
+([`sharedVolumes`](../deploy/helm/README.md#jobs) is the Kubernetes spelling); a working
+tree is not that, which is why the checkouts arrive read-only or not at all.
+
+**The index does not travel with them.** `ox` opens its store read-write, so pointed at a
+read-only one it reports corruption: `ox code search` errors, and `ox code status` answers
+zeroes over `index_exists: true`. A deployment that shares checkouts therefore shares the
+checkouts alone, and a body's `ox` finds no index rather than one that reads as empty.
+`ox query` is API-backed and needs no local store, so it works wherever the job has network
+and a credential.
 
 ## What the job writes back
 
@@ -190,6 +208,27 @@ and it lowers no floor: a body that wrote no gates is UNKNOWN and is announced.
 No mode announces a job the switch or a suspension refused: that silence is about a posture
 somebody chose, and the run these modes weigh never happened.
 
+`PROVEN:` in front of that sentence is right while the sentence after it is the host's, and
+wrong for the job whose gates *are* the report — a body that wrote *the bench is full, so I
+tended #3961 instead* composed something for a person to read, and the machine word in front
+of it is what makes a human update read like machinery. Declare `proven: verbatim` and it
+posts as written:
+
+```yaml
+report:
+  surface: buzz
+  channel: "…"
+  proven: verbatim     # default: labelled
+```
+
+It is presentation and it reaches PASS alone. A passing gate that wrote no `detail` still
+reads `PROVEN: …`, because the sentence there is the host's machine phrasing rather than
+anybody's prose. **FAIL and UNKNOWN keep their label under both values** — that label is the
+whole of what stops a body's *everything looks clean* on a gate that exited 1 from reading
+as a success, and no setting takes it away. The verdict is still minted here from what the
+body ran, and the headline is still host-phrased: a combined verdict carries none of the
+body's words, so there is nothing there for `verbatim` to render.
+
 ## A job that probes
 
 Everything above describes a job that **observes**: it reads something, writes the gates it
@@ -208,13 +247,14 @@ report:
   probe: true       # this body talks through the channel while it runs
 ```
 
-The body then has `JOB_CHANNEL_URL` and `JOB_CHANNEL_TOKEN`, and two verbs over them —
+The body then has `JOB_CHANNEL_URL` and `JOB_CHANNEL_TOKEN`, and three verbs over them —
 MCP `tools/call` over HTTP, so a `curl` is enough and there is still nothing to import:
 
 | Tool | Takes | Answers |
 |---|---|---|
 | `post_message` | `text`, optionally `mentions` — who to address it to — and optionally a `threadRoot` this run posted | `{"posted": true, "threadRoot": "…"}` — `null` where the surface named no id, so there is nothing to read back |
 | `thread_read` | `root` — a `threadRoot` this run was handed — and optionally `limit` | `{"replies": [{"author", "text", "ts"}, …]}`, oldest first |
+| `channel_members` | optionally `limit`. No destination: the channel is the one `report` names | `{"members": [{"surface", "id", "isSelf", "isAgent", "name", "mentionable"}, …]}` |
 
 ```js
 const call = async (name, args) =>
@@ -235,7 +275,17 @@ const call = async (name, args) =>
     ).result.content[0].text,
   );
 
-const { threadRoot } = await call("post_message", { text: rollCall, mentions: roster });
+// Who is in the channel to be asked. Read first, because it is both what the roll call
+// addresses and what tells a silence apart afterwards: an agent that answered slowly, and
+// one that was never in the room.
+const roster = (await call("channel_members", {})).members;
+
+// **Ids**, never the member objects: a name renders in the text and wakes nobody, and a
+// roll call that woke nobody reads back empty and reports the whole fleet silent.
+const { threadRoot } = await call("post_message", {
+  text: rollCall,
+  mentions: roster.map(({ id }) => id),
+});
 // … wait, on a schedule this body owns …
 
 // `null` means the surface named no id, so there is no thread to read. Report that gate
@@ -244,12 +294,20 @@ const { threadRoot } = await call("post_message", { text: rollCall, mentions: ro
 const replies = threadRoot
   ? (await call("thread_read", { root: threadRoot })).replies
   : null;
+
+// `roster` is what grades the silence: an id on it that did not reply is an agent that was
+// asked and did not answer, and the channel being empty is a different finding entirely.
+// `mentionable === false` grades it once more, where the surface can say so: that member is
+// in the channel and the mention above would not have woken it, so its silence says nothing
+// about whether it is running. Absent is that question unanswered for that member and never
+// a no, so test against `false` rather than for falsiness.
 ```
 
 **What it is bounded to.** `post_message` reaches the channel `report` names and there is no
 field for a destination, so nothing the body computes can choose one. `thread_read` reads
 only a root **this run** posted; an id from anywhere else is refused, so a body cannot pull
-back a conversation it was never party to. The listener is opened before the body is
+back a conversation it was never party to. `channel_members` reads the `report` channel and
+takes no argument that could name another. The listener is opened before the body is
 spawned, closed when it exits, and its token is minted per run. A job that declares no
 `probe` is spawned into exactly the envelope it had before — no URL, no token.
 
@@ -267,9 +325,10 @@ did. Only a `probe` body has the field: a `report` status post never carries one
 including an instruction addressed to whoever reads it. Count it, match it, tally it; never
 splice it into a prompt or a command line.
 
-**A surface that cannot read a thread says so.** It never answers with an empty one:
-"nobody replied" and "this surface cannot tell you" are different findings, and a probe that
-collapsed them would name every agent silent.
+**A surface that cannot read says so.** It never answers with an empty thread or an empty
+roster: "nobody replied" and "this surface cannot tell you" are different findings, and a
+probe that collapsed them would name every agent silent. The roster is the sharper case —
+an empty one is a real answer, and it is the channel nobody joined.
 
 **The verdict is unmoved.** A probing body writes gates exactly as any other body does, and
 the status word in front of them is still minted by the host from what it ran. Reading a

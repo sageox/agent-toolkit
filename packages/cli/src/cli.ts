@@ -39,10 +39,14 @@ import {
   serveBrokerServer,
   SurfaceEgress,
   serveSurfaceEgress,
+  serveSurfaceRead,
   SURFACE_EGRESS_SERVER,
   SURFACE_EGRESS_TOOL,
   SURFACE_EGRESS_TOOL_NAMES,
+  SURFACE_READ_SERVER,
+  SURFACE_READ_TOOL_NAMES,
   SURFACE_REACT_TOOL,
+  qualifyTool,
   JobHost,
   jobDeadlineMs,
   describeJobRun,
@@ -54,10 +58,12 @@ import {
   type JobConfig,
   type JobParams,
   type JobPoster,
+  type JobMembers,
   type JobReader,
   type JobRun,
   type SwitchSource,
   type McpServerDecl,
+  type InboundEvent,
 } from "@sageox/agent-toolkit-core";
 import { ConsoleAdapter } from "@sageox/agent-toolkit-adapter-console";
 import {
@@ -234,6 +240,12 @@ function readManifest(path: string): AgentManifest {
   // normalized in its own namespace rather than all of them as Nostr keys.
   if (manifest.owner) manifest.owner = manifest.owner.map(normalizeActorId);
   if (manifest.allowlist) manifest.allowlist = manifest.allowlist.map(normalizeActorId);
+  // The third list, and the one whose omission is silent: a wrong `owner` locks its owner
+  // out on the next message, while an npub here matches nobody until the emergency it
+  // exists for.
+  if (manifest.killSwitchParkBy) {
+    manifest.killSwitchParkBy = manifest.killSwitchParkBy.map(normalizeActorId);
+  }
   return manifest;
 }
 
@@ -320,6 +332,21 @@ async function buildBrain(
     addHosted(SURFACE_EGRESS_SERVER, server, `${label} tool`);
   }
 
+  // Allowed *and* carried by some surface, which is the same pair the two tools above are
+  // decided by. The server offers only the allowed reads, so one allowlisted read is enough
+  // to want it — and none means the brain is offered nothing, not an empty server.
+  const reads = SURFACE_READ_TOOL_NAMES.filter(
+    (tool) => policy?.allowsTool(qualifyTool(SURFACE_READ_SERVER, tool)).ok === true,
+  );
+  if (reads.length && egress?.canRead()) {
+    const server = await serveSurfaceRead(egress, policy!, serveAt);
+    addHosted(SURFACE_READ_SERVER, server, `surface read tools (${reads.join(", ")})`);
+  } else if (reads.length) {
+    process.stdout.write(
+      "  note: surface read tools are allowed, but no configured surface answers a read\n",
+    );
+  }
+
   // User-declared MCP servers. The broker holds their credentials, enforces the tool
   // policy, and pins schemas; this only gives the brain a way to reach it.
   if (manifest.mcpServers.length && !policy) {
@@ -377,6 +404,7 @@ async function buildBrain(
       // job would report to `#hive` on a clock and go quiet the moment someone asked.
       post: egress && jobPoster(egress),
       read: egress && jobReader(egress),
+      members: egress && jobMembers(egress),
     });
     const server = await serveJobs(
       {
@@ -393,7 +421,9 @@ async function buildBrain(
         // marks. Without it every request is automation, including the ones a person is
         // waiting on, and a parked job could only be run by arming the switch and
         // remembering to disarm it.
-        asking: egress && (() => egress.asking()),
+        answering: egress && (() => egress.answeringEvent()),
+        // How the verdict of a run that outlasts the turn reaches the message that asked.
+        reply: egress && jobAnswerer(egress),
         // Who that author has to be for the run to count as a person's. `owner` and not
         // `respondTo`: an allowlist says who may speak to this agent, and a fleet's names
         // siblings.
@@ -427,8 +457,13 @@ async function buildBrain(
           signer: await resolveBuzzSigner(buzz.identity, { dir: secretsDir }),
           writeScope: cfg.writeScope,
           // The write side of §6.3 rule 4. The switch lives in this brain, so this brain is
-          // where "anyone may park a job, only a human may arm one" stops being steering.
+          // where "who may park a job, and who may arm one" stops being steering.
           killSwitches: jobSwitches(manifest).map((s) => s.key),
+          // A `tools/call` carries nothing about the turn, so who is asking comes off the
+          // same live-turn registry `answering` reads above. The author rather than a
+          // verdict: this brain's test is not the job door's — see `admits`.
+          parkBy: manifest.killSwitchParkBy ?? [],
+          asking: egress && (() => egress.asking()),
         },
         serveAt,
       );
@@ -457,7 +492,7 @@ async function buildBrain(
 
   if (codeWorkspace) {
     const server = await serveCodeWorkspace(codeWorkspace, serveAt);
-    addHosted(CODE_SERVER, server, "code search");
+    addHosted(CODE_SERVER, server, "code tools");
   }
 
   // ACP applies the same tool policy to these memory servers as to every other tool the
@@ -474,6 +509,8 @@ async function buildBrain(
       // is never in it.
       apiKey: resolveSecret("ANTHROPIC_API_KEY", { dir: secretsDir }),
       model: manifest.brain.model,
+      // The number `job_run` weighs a job's deadline against, so the two cannot disagree.
+      turnTimeoutMs: manifest.limits.turnTimeoutMs,
     }),
     closeHosted: async () => {
       await teamBrain?.stopSync();
@@ -544,6 +581,7 @@ async function reposCmd(argv: string[]): Promise<void> {
  */
 const BUILTIN_MCP_SERVERS: Record<string, readonly string[]> = {
   [SURFACE_EGRESS_SERVER]: SURFACE_EGRESS_TOOL_NAMES,
+  [SURFACE_READ_SERVER]: SURFACE_READ_TOOL_NAMES,
   [JOB_SERVER]: [JOB_RUN_TOOL_NAME],
 };
 
@@ -1529,6 +1567,23 @@ function jobReader(egress: SurfaceEgress): JobReader {
   return (root, limit) => egress.readThread(root, limit);
 }
 
+/** How a probing job reads its report channel's roster. Bound beside {@link jobReader}. */
+function jobMembers(egress: SurfaceEgress): JobMembers {
+  return (to, limit) => egress.listMembers(to.surface, to.channel, limit);
+}
+
+/**
+ * How a detached run answers the conversation that asked for it: the guarded reply the
+ * turn itself would have made, into the same thread. A refusal is thrown so the host counts
+ * the run as unanswered and lets the status post carry it instead.
+ */
+function jobAnswerer(egress: SurfaceEgress) {
+  return async (home: InboundEvent, text: string): Promise<void> => {
+    const verdict = await egress.replyTo(home, { text });
+    if (!verdict.ok) throw new Error(`answer refused by ${verdict.rule}: ${verdict.reason}`);
+  };
+}
+
 /**
  * Where this job's status post goes, live, or nothing when it declares no destination.
  *
@@ -1545,7 +1600,9 @@ async function jobReporter(
   manifest: AgentManifest,
   job: JobConfig,
   secretsDir?: string,
-): Promise<{ post: JobPoster; read: JobReader; stop: () => Promise<void> } | undefined> {
+): Promise<
+  { post: JobPoster; read: JobReader; members: JobMembers; stop: () => Promise<void> } | undefined
+> {
   const kind = job.report?.surface;
   // `loadManifest` already refuses a `report.surface` this agent does not declare.
   const surface = kind && manifest.surfaces.find((s) => s.kind === kind);
@@ -1560,7 +1617,12 @@ async function jobReporter(
   // Slack, put the whole status post behind an inbound connection it does not need.
   await adapter.start();
   const egress = new SurfaceEgress({ manifest, adapters: [adapter] });
-  return { post: jobPoster(egress), read: jobReader(egress), stop: () => adapter.stop() };
+  return {
+    post: jobPoster(egress),
+    read: jobReader(egress),
+    members: jobMembers(egress),
+    stop: () => adapter.stop(),
+  };
 }
 
 /**
@@ -1665,6 +1727,7 @@ async function jobCmd(argv: string[]): Promise<void> {
     switchSource,
     post: reporter?.post,
     read: reporter?.read,
+    members: reporter?.members,
     secretOpts: { dir: jobSecretDirs(argv, secretsDir) },
   });
   let run: JobRun;
@@ -1683,7 +1746,7 @@ async function jobCmd(argv: string[]): Promise<void> {
   // Headline, then the gates beneath it — the shape a job's status post takes, and the
   // reason it takes it: the verdict is what gets read, and the gates are why it says that.
   // The same rendering the chat tool returns, so one run reads one way wherever it lands.
-  process.stdout.write(describeJobRun(run));
+  process.stdout.write(describeJobRun(run, job.report?.proven));
   const denied = run.outcome === "denied-switch" || run.outcome === "denied-suspend";
   if (denied && trigger === "on-request") {
     process.stdout.write("  a run started from this CLI is `system`, and does not bypass\n");
@@ -2185,6 +2248,15 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
         "arm a job with `sageox-agent job arm <slug>` on this host, park it with `job park` — " +
           "the agent's own brain may park a switch through brain_write and can never arm one",
       );
+      // "no listed agent" rather than "no agent": the gate refuses on positive evidence of
+      // one, so an asker no surface flags is admitted. Read as a deny-all this line would
+      // promise a boundary the code does not implement.
+      const parkers = manifest.killSwitchParkBy ?? [];
+      ok.push(
+        "a park through a turn is honoured from a human, and from " +
+          (parkers.length ? parkers.join(", ") : "no listed agent") +
+          " — an asker this surface cannot identify as an agent is honoured too",
+      );
       if (!manifest.brains.some((brain) => brain.preset === "private")) {
         // Reported, not enforced: a fail-open job declared this posture on purpose. But
         // nothing can park it either, and a kill switch nobody can flip is one in name.
@@ -2550,10 +2622,10 @@ running it:
                                run one declared job once and exit — what a CronJob execs.
                                The trigger is stamped from this flag; a run started here is
                                \`system\`, so it does not bypass a parked job
-  job arm | park <slug>       flip one job's kill switch. Anyone may park a job, and only
-                               a human may arm one — so this host, holding the agent's
-                               signing key, is the only place arming happens. The agent's
-                               own brain can park a switch and is refused if it tries to arm
+  job arm | park <slug>       flip one job's kill switch. Only a human may arm one — so
+                               this host, holding the agent's signing key, is the only place
+                               arming happens. The agent's own brain can park a switch, from
+                               a turn \`killSwitchParkBy\` admits, and never arm one
   try [--brain mock|claude-acp] [--model <id>]
                                talk to a throwaway agent, no config at all
 

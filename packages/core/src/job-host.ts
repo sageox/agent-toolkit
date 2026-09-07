@@ -14,7 +14,7 @@ import {
 } from "./kill-switch.ts";
 import { passthroughEnv } from "./brain-env.ts";
 import { errorLine } from "./errors.ts";
-import type { EventRef, ThreadReply } from "./events.ts";
+import type { ActorRef, EventRef, ThreadReply } from "./events.ts";
 import { serveJobChannel } from "./job-channel.ts";
 import type { HostedMcp } from "./mcp-http.ts";
 import { withTimeout } from "./gateway.ts";
@@ -25,6 +25,7 @@ import {
   describeVerdict,
   isProven,
   verdictFromGate,
+  type ProvenVoice,
   type Verdict,
 } from "./verdict.ts";
 
@@ -185,6 +186,33 @@ export type JobPoster = (
  */
 export type JobReader = (root: EventRef, limit?: number) => Promise<readonly ThreadReply[]>;
 
+/**
+ * How a probing job reads the membership of the channel it reports into.
+ *
+ * Takes the `report` destination rather than a channel of its own, exactly as `post` does:
+ * a body has no field to name a channel with, so there is no value it can compute that
+ * points this anywhere else.
+ *
+ * Unset is not "nobody is in the channel" — it is "no surface here can say", and the job
+ * channel refuses the read. That distinction is the whole reason this exists: a roll call
+ * nobody answered and a channel nobody joined read the same until the roster is asked for.
+ */
+export type JobMembers = (
+  report: NonNullable<JobConfig["report"]>,
+  limit?: number,
+) => Promise<readonly ActorRef[]>;
+
+/**
+ * How whoever asked for a detached run hears how it ended.
+ *
+ * Bound by the door that knows who asked — the chat tool holds the message it was answering
+ * — and handed in per run, so this host sees a function and never a surface, a channel, or
+ * an author. Called inside the run's settlement, after the record and before the status
+ * post, and on the shutdown path too: a person told "started" is owed a last word from
+ * whichever settler gets there.
+ */
+export type JobAnswer = (run: JobRun) => Promise<void>;
+
 export interface JobHostOptions {
   /**
    * How a job's kill switch is read. Bind `engramSwitchSource` from the Buzz adapter in
@@ -202,6 +230,11 @@ export interface JobHostOptions {
    * which a `report.probe` job is told plainly rather than left to read as silence.
    */
   read?: JobReader;
+  /**
+   * How a probing job's body reads its report channel's membership — the other half of
+   * diagnosing a silence. Unset is refused rather than answered as an empty roster.
+   */
+  members?: JobMembers;
   /** Where verdict artifacts are written. Defaults to a directory under the system temp. */
   workDir?: string;
   /** Every run record, always — denied and dropped ticks included. */
@@ -465,8 +498,16 @@ export class JobHost {
     job: JobConfig,
     requestedBy: JobRequester,
     params: JobParams = {},
+    answer?: JobAnswer,
   ): Promise<JobStart> {
-    const { finished, ...start } = await this.begin(job, "on-request", requestedBy, params, true);
+    const { finished, ...start } = await this.begin(
+      job,
+      "on-request",
+      requestedBy,
+      params,
+      true,
+      answer,
+    );
     if (start.refused) {
       await finished;
       return start;
@@ -576,8 +617,20 @@ export class JobHost {
    * which a settlement exists nowhere a shutdown could find it. Both settlers go through
    * here, because either one can be the sentence a shutdown would otherwise cut off.
    */
-  private async settle(job: JobConfig, run: JobRun, detached: boolean): Promise<void> {
-    const said = this.announce(job, run, detached);
+  private async settle(
+    job: JobConfig,
+    run: JobRun,
+    detached: boolean,
+    answer?: JobAnswer,
+  ): Promise<void> {
+    const said = (async () => {
+      // The asker first. A detached run that reached the person who asked is, to the
+      // channel, a run somebody waited for: the verdict arrived where the question was, so
+      // the status post is made or spared on the same terms as any other. One that could
+      // not be answered leaves the post as the answer, which is what it was before.
+      const answered = answer ? await this.answer(job, run, answer) : false;
+      await this.announce(job, run, detached && !answered);
+    })();
     this.saying.add(said);
     try {
       await said;
@@ -586,8 +639,29 @@ export class JobHost {
     }
   }
 
+  /**
+   * Tells whoever asked. Best-effort: the record already holds the run, so a reply that
+   * cannot land is one line here and the status post takes its place.
+   */
+  private async answer(job: JobConfig, run: JobRun, answer: JobAnswer): Promise<boolean> {
+    try {
+      await answer(run);
+      return true;
+    } catch (error) {
+      console.warn(
+        `job_answer slug=${job.slug} runId=${run.runId} result=lost reason=${errorLine(error)}`,
+      );
+      return false;
+    }
+  }
+
   /** One abandoned run: the record, then the last thing its channel will hear about it. */
-  private async giveUp(job: JobConfig, base: RunBase, admission: JobAdmission): Promise<void> {
+  private async giveUp(
+    job: JobConfig,
+    base: RunBase,
+    admission: JobAdmission,
+    answer?: JobAnswer,
+  ): Promise<void> {
     if (!this.claim(base.runId)) return; // its body finished first and has already spoken
     const run = this.record({
       ...base,
@@ -603,7 +677,7 @@ export class JobHost {
         `this host was asked to stop while the ${job.slug} body was still running, ` +
         "so nothing here will read what it proved",
     });
-    await this.settle(job, run, true);
+    await this.settle(job, run, true, answer);
   }
 
   private async run(
@@ -628,7 +702,7 @@ export class JobHost {
     const report = job.report;
     const post = this.opts.post;
     if (!report || !post || !announces(run, detached, report.announce)) return;
-    const { headline, detail } = jobStatus(run);
+    const { headline, detail } = jobStatus(run, report.proven);
 
     // Every line is attempted on its own. One rejection is as likely to be about one
     // message — too long, rate-limited, refused by the guard — as about the channel, and a
@@ -677,6 +751,7 @@ export class JobHost {
     requestedBy: JobRequester | null,
     params: JobParams,
     detached = false,
+    answer?: JobAnswer,
   ): Promise<Started> {
     const startedAt = Date.now();
     const runId = randomUUID();
@@ -776,13 +851,13 @@ export class JobHost {
         );
       }
       running = true;
-      if (detached) this.owed.set(runId, () => this.giveUp(job, base, admission));
+      if (detached) this.owed.set(runId, () => this.giveUp(job, base, admission, answer));
       return {
         runId,
         refused: null,
         // The claim is `finish`'s to take, so nothing is deleted from `owed` here: releasing
         // it on the way out would drop a settlement that a shutdown had already made.
-        finished: this.finish(job, base, admission, detached).finally(() =>
+        finished: this.finish(job, base, admission, detached, answer).finally(() =>
           this.inFlight.delete(job.slug),
         ),
       };
@@ -797,6 +872,7 @@ export class JobHost {
     base: RunBase,
     admission: JobAdmission,
     detached: boolean,
+    answer?: JobAnswer,
   ): Promise<JobRun> {
     const done = {
       ...base,
@@ -810,7 +886,7 @@ export class JobHost {
     if (detached && !this.claim(base.runId)) return this.seal(done);
 
     const run = this.record(done);
-    await this.settle(job, run, detached);
+    await this.settle(job, run, detached, answer);
     return run;
   }
 
@@ -911,7 +987,12 @@ export class JobHost {
           `${job.report.surface}:${job.report.channel}`,
       );
     }
-    return serveJobChannel({ report: job.report, post: this.opts.post, read: this.opts.read });
+    return serveJobChannel({
+      report: job.report,
+      post: this.opts.post,
+      read: this.opts.read,
+      members: this.opts.members,
+    });
   }
 
   private spawnBody(job: JobConfig, env: NodeJS.ProcessEnv): Promise<Execution> {
@@ -1119,7 +1200,10 @@ export class JobHost {
  * {@link describeJobRun}. The verdict line is `describeVerdict`'s, so an unrun gate cannot
  * be phrased as a passing one here either.
  */
-export function jobStatus(run: JobRun): { headline: string; detail: readonly string[] } {
+export function jobStatus(
+  run: JobRun,
+  proven?: ProvenVoice,
+): { headline: string; detail: readonly string[] } {
   // With one gate the combined verdict already *is* that gate, said once — and a count is
   // only information when there is something for it to be a count of.
   const threaded = run.gates.length > 1;
@@ -1130,7 +1214,7 @@ export function jobStatus(run: JobRun): { headline: string; detail: readonly str
     headline:
       `job ${run.jobSlug} ${run.outcome} in ${run.endedAt - run.startedAt}ms — ` +
       `${run.reason}. ${describeVerdict(run.verdict)}${tally}`,
-    detail: threaded ? run.gates.map(describeVerdict) : [],
+    detail: threaded ? run.gates.map((gate) => describeVerdict(gate, proven)) : [],
   };
 }
 
@@ -1142,8 +1226,8 @@ export function jobStatus(run: JobRun): { headline: string; detail: readonly str
  * another in a channel is two reports of one run, and the one somebody acts on is whichever
  * they saw.
  */
-export function describeJobRun(run: JobRun): string {
-  const { headline, detail } = jobStatus(run);
+export function describeJobRun(run: JobRun, proven?: ProvenVoice): string {
+  const { headline, detail } = jobStatus(run, proven);
   const lines = [headline, ...detail.map((line) => `  ${line}`)];
   // Only ever true for a run a human asked for, so it reaches the person who asked. It is
   // deliberately not in the headline: the channel is told about runs, not about postures.
