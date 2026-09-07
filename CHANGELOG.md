@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**An agent with `repos.conf` can be asked what has been moving lately.** `code_insights`
+joins `code_search` and `code_status` on the code server: the most-changed files, recent
+commits, and open pull requests and issues, from the same one-shot index and the same
+read-only checkout. It takes `days` and `limit`, both capped by the gateway, and each row
+is bounded — a commit body has no length `ox` limits, and ten of them would be the turn
+rather than an answer. Run `sageox-agent repos add <url>` again on an existing agent to
+allow `mcp__code__code_insights`; `doctor` names it until you do.
+
+Insights responses are validated before rendering. Query diagnostics and error/status
+responses report unavailable data rather than no activity, even when `ox` exits
+successfully. The audit records argument shapes so invalid numeric arguments cannot
+write private text into the log.
+
+Its tracker sections report **`unknown`** when the repository has no indexed records of
+that type. When records exist, they list open items or report `none` among the indexed
+records. Fresh toolkit indexes have no tracker records: warmup runs only `ox index code`,
+while pull requests and issues come from `ox index github`, which needs a forge token.
+Counts from the warmup canary distinguish missing tracker data from a successful empty
+response. The tool runs `ox` in the gateway over the existing checkout.
+
 **A job kill switch is no longer parkable by any agent that gets a turn.** `brain_write`
 bounded the switch by value alone — every value that arms refused, every value that parks
 admitted, whoever asked — so a sibling agent could stop a lane by asking the agent that

@@ -486,7 +486,7 @@ async function buildBrain(
 
   if (codeWorkspace) {
     const server = await serveCodeWorkspace(codeWorkspace, serveAt);
-    addHosted(CODE_SERVER, server, "code search");
+    addHosted(CODE_SERVER, server, "code tools");
   }
 
   // ACP applies the same tool policy to these memory servers as to every other tool the
