@@ -1,9 +1,9 @@
-import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CLI, run as exec } from "./cli-harness.ts";
+import { CLI, run as exec, runCli } from "./cli-harness.ts";
 
 let bundle: string;
 
@@ -59,6 +59,33 @@ beforeEach(() => {
   declare(shift());
 });
 afterEach(() => rmSync(bundle, { recursive: true, force: true }));
+
+describe("sageox-agent job diagnostics", () => {
+  it("retrieves retained diagnostics through operator Kubernetes access without a gateway token or bundle", async () => {
+    const diagnostics = { runId: "a".repeat(40), complete: true, stderr: { text: "Traceback: failure", truncated: false } };
+    const kubectl = join(bundle, "kubectl");
+    writeFileSync(kubectl, `#!${process.execPath}\n` +
+      'require("fs").writeFileSync(process.env.ARGS_FILE, JSON.stringify(process.argv.slice(2)));\n' +
+      `process.stdout.write(${JSON.stringify(JSON.stringify({ data: { diagnostics: JSON.stringify(diagnostics) } }))});\n`);
+    chmodSync(kubectl, 0o755);
+    const ref = `run-${"b".repeat(40)}`;
+    const env = { PATH: `${bundle}:${process.env.PATH}`, ARGS_FILE: join(bundle, "args.json"),
+      AGENT_JOB_DISPATCHER_URL: "", AGENT_JOB_DISPATCHER_TOKEN: "", AGENT_TOOLKIT_HOME: join(bundle, "absent") };
+    const { stdout } = await runCli(["job", "diagnostics", ref, "--namespace", "agents", "--context", "operator"], env);
+    expect(JSON.parse(stdout)).toEqual(diagnostics);
+    expect(JSON.parse(readFileSync(env.ARGS_FILE, "utf8"))).toEqual(["get", "configmap", ref, "--namespace", "agents", "--context", "operator", "--output=json"]);
+    await expect(runCli(["job", "diagnostics", "--all", "--namespace", "agents"], env)).rejects.toThrow("usage:");
+  });
+
+  it("reports denied operator access without echoing kubectl stderr into a result", async () => {
+    const kubectl = join(bundle, "kubectl");
+    writeFileSync(kubectl, '#!/bin/sh\necho "private backend error" >&2\nexit 1\n');
+    chmodSync(kubectl, 0o755);
+    await expect(runCli(["job", "diagnostics", `run-${"b".repeat(40)}`, "--namespace", "agents"], {
+      PATH: `${bundle}:${process.env.PATH}`,
+    })).rejects.toThrow("operator Kubernetes credentials");
+  });
+});
 
 /**
  * The job host through the door a CronJob uses, against a bundle whose job body is a
@@ -327,4 +354,12 @@ describe("doctor and the job arming path", () => {
     const { stdout } = await cli("doctor");
     expect(stdout).toContain("killSwitch declared by shift but this agent has no private brain");
   });
+});
+
+it.each(["profiles", "namespace", "name"])("requires dispatcher --%s before reading the bundle or environment", async (missing) => {
+  const flags = ["profiles", "namespace", "name"].filter((name) => name !== missing).flatMap((name) => [`--${name}`, "unused"]);
+  const { stdout, code } = await cli("job", "dispatcher", ...flags);
+  expect(code).toBe(1);
+  expect(stdout).toContain("usage: sageox-agent job dispatcher");
+  expect(stdout).not.toContain("TypeError");
 });

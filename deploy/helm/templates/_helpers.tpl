@@ -105,7 +105,7 @@ scheduled run is lost.
 {{- define "agent.agentVolumeMounts" -}}
 - name: agent-data
   mountPath: /agents
-{{- if and .job .agent.persistence.jobCheckouts }}
+{{- if and .job (not .job.worker) .agent.persistence.jobCheckouts }}
 - name: checkouts
   mountPath: /agents/{{ .name }}/workspace/repos
   subPath: {{ .name }}/workspace/repos
@@ -120,7 +120,7 @@ scheduled run is lost.
   mountPath: {{ include "agent.secretsMountPath" . }}
   readOnly: true
 {{- end }}
-{{- if and .job (include "agent.hasJobSecrets" .agent) }}
+{{- if and .job (not .job.worker) (include "agent.hasJobSecrets" .agent) }}
 - name: job-secrets
   mountPath: {{ include "agent.jobSecretsMountPath" . }}
   readOnly: true
@@ -204,7 +204,7 @@ No volume at all is the case where the bundle rides inside `bundle.stageImage` i
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}
 {{- end }}
-{{- if and .job .agent.persistence.jobCheckouts }}
+{{- if and .job (not .job.worker) .agent.persistence.jobCheckouts }}
 - name: checkouts
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}
@@ -219,7 +219,7 @@ No volume at all is the case where the bundle rides inside `bundle.stageImage` i
     claimName: {{ $volume.claimName }}
 {{- end }}
 {{- include "agent.secretVolume" (dict "name" "secrets" "source" .agent.secrets) }}
-{{- if and .job (include "agent.hasJobSecrets" .agent) }}
+{{- if and .job (not .job.worker) (include "agent.hasJobSecrets" .agent) }}
 {{- include "agent.secretVolume" (dict "name" "job-secrets" "source" .agent.jobSecrets) }}
 {{- end }}
 {{- end -}}
@@ -280,4 +280,18 @@ the day a second schedule appears somewhere else.
 {{- else -}}
 {{- include "agent.agentFullname" . -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "agent.dispatcherName" -}}
+{{- printf "dispatcher-%s" (include "agent.agentFullname" . | sha256sum | trunc 40) -}}
+{{- end -}}
+
+{{- define "agent.dispatcherEnv" -}}
+- name: AGENT_JOB_DISPATCHER_URL
+  value: http://{{ include "agent.dispatcherName" . }}.{{ .root.Release.Namespace }}.svc:8090
+- name: AGENT_JOB_DISPATCHER_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ .agent.dispatcher.tokenSecret | quote }}
+      key: token
 {{- end -}}

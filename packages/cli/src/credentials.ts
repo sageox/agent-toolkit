@@ -352,6 +352,7 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
   // this error otherwise offers — mount the file here, add it to `.env` — are both the
   // arrangement the split was for.
   manifest.jobs.forEach((job, index) => {
+    if (job.worker) return;
     for (const [envVar, ref] of Object.entries(job.run.secrets)) {
       declared.push({
         ...spawnedSecretSpec(ref, envVar, "the job body"),

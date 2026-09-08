@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Jobs can run on demand in their own digest-pinned runtime images on Kubernetes. A shared dispatcher retains run IDs and bounded verdicts across restarts, serializes requested and scheduled workers, prevents duplicate body starts, and supports status retrieval and cancellation. Failed runs automatically post failure details and a redacted error excerpt to the configured report destination and original conversation; no manual diagnostic command is needed. Full redacted stdout/stderr tails and execution facts remain available for seven days through operator-only `job diagnostics`. Worker credentials use a separate identity; existing local jobs remain compatible. See [external jobs](docs/external-jobs.md).
 - **The team brain can report ledger readiness and list sessions from an operator-synced
   repository.** `team_status` checks search access and each repository's ledger separately;
   `team_sessions` lists bounded results only after current credential access, repository

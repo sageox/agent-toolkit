@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { resolve, join } from "node:path";
+import { dirname, resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   Gateway,
@@ -48,6 +48,15 @@ import {
   SURFACE_REACT_TOOL,
   qualifyTool,
   JobHost,
+  ExternalJobs,
+  ExternalRequestSchema,
+  workerResult,
+  type WorkerDiagnostics,
+  JobDispatcher,
+  JobKubeApi,
+  WorkerProfilesSchema,
+  serveJobDispatcher,
+  JobSchema,
   jobDeadlineMs,
   describeJobRun,
   serveJobs,
@@ -391,11 +400,14 @@ async function buildBrain(
   // meets after deploying, and one said in two places is one that gets maintained in neither.
   const requestable = requestableJobs(manifest.jobs);
   let jobs: JobHost | undefined;
-  if (requestable.length && policy?.allowsTool(JOB_RUN_TOOL).ok === true) {
+  const observeExternal = manifest.jobs.some((job) => job.worker) &&
+    ["job_status", "job_cancel"].some((tool) => policy?.allowsTool(`mcp__jobs__${tool}`).ok);
+  if (policy && ((requestable.length && policy.allowsTool(JOB_RUN_TOOL).ok) || observeExternal)) {
     // One host for this process, so single-flight per slug holds across every request — and
     // handed back to the caller, because a detached run outlives the turn that started it
     // and something has to settle it when this process is told to stop.
     jobs = new JobHost({
+      external: externalJobs(),
       switchSource: await jobSwitchSource(manifest, secretsDir),
       secretOpts: { dir: secretsDir },
       // A job started from chat announces itself exactly as a scheduled one does. The
@@ -582,7 +594,7 @@ async function reposCmd(argv: string[]): Promise<void> {
 const BUILTIN_MCP_SERVERS: Record<string, readonly string[]> = {
   [SURFACE_EGRESS_SERVER]: SURFACE_EGRESS_TOOL_NAMES,
   [SURFACE_READ_SERVER]: SURFACE_READ_TOOL_NAMES,
-  [JOB_SERVER]: [JOB_RUN_TOOL_NAME],
+  [JOB_SERVER]: [JOB_RUN_TOOL_NAME, "job_status", "job_cancel"],
 };
 
 /** Options `mcp add` takes a value for, so none of those values is read as the server name. */
@@ -635,12 +647,10 @@ async function mcpAddCmd(argv: string[]): Promise<void> {
 
   const builtInTools = named ? BUILTIN_MCP_SERVERS[named] : undefined;
   if (!custom && builtInTools) {
-    // The gateway serves the job tool only for jobs that armed the door, so a policy
-    // written before any job does is a permission for a tool that will never exist —
-    // silent, and the shape `repos add` refuses too.
+    // External jobs also expose status and cancellation, including scheduled-only jobs.
     if (named === JOB_SERVER) {
       const { jobs } = readManifest(agent.config);
-      if (!requestableJobs(jobs).length) {
+      if (!requestableJobs(jobs).length && !jobs.some((job) => job.worker)) {
         throw new Error(
           (jobs.length
             ? `no job in ${agent.name} declares trigger.onRequest`
@@ -1670,14 +1680,106 @@ function jobParamFlags(argv: string[], job: JobConfig, trigger: string): JobPara
  * the two apart, neither bypasses a parked job, which is the safe direction and mildly
  * annoying for the operator. Ask through a chat surface to bypass.
  */
+function externalJobs(): ExternalJobs | undefined {
+  const url = process.env.AGENT_JOB_DISPATCHER_URL;
+  if (!url) return undefined;
+  const token = process.env.AGENT_JOB_DISPATCHER_TOKEN;
+  if (!token) throw new Error("AGENT_JOB_DISPATCHER_TOKEN is required with AGENT_JOB_DISPATCHER_URL");
+  return new ExternalJobs(url, token);
+}
+
 async function jobCmd(argv: string[]): Promise<void> {
   const sub = argv[0];
+  if (sub === "diagnostics") {
+    const ref = argv[1];
+    const namespace = optionValue(argv, "namespace", "a Kubernetes namespace");
+    const context = optionValue(argv, "context", "a Kubernetes context");
+    if (!ref || !/^run-[a-f0-9]{40}$/.test(ref) || !namespace || !/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/.test(namespace) || namespace.length > 63) {
+      throw new Error("usage: sageox-agent job diagnostics <diagnostics.ref> --namespace <namespace> [--context <context>]");
+    }
+    let json: string;
+    try {
+      // Operator credentials only. Never the gateway's dispatcher bearer or an MCP tool.
+      json = execFileSync("kubectl", ["get", "configmap", ref, "--namespace", namespace,
+        ...(context ? ["--context", context] : []), "--output=json"],
+      { encoding: "utf8", timeout: 10000, maxBuffer: 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    } catch {
+      throw new Error("cannot retrieve diagnostics with operator Kubernetes credentials; check kubectl, context, namespace and ConfigMap read access");
+    }
+    const value = JSON.parse(json).data?.diagnostics;
+    if (!value) throw new Error("diagnostics are unavailable or their retention period has expired");
+    process.stdout.write(JSON.stringify(JSON.parse(value), null, 2) + "\n");
+    return;
+  }
+  if (sub === "worker") {
+    const runFile = argv[1] ?? "/run/job/run";
+    const raw = JSON.parse(readFileSync(runFile, "utf8"));
+    const token = readFileSync(join(dirname(runFile), "token"), "utf8");
+    const request = ExternalRequestSchema.parse(raw.request);
+    const job = JobSchema.parse(raw.job);
+    const url = process.env.AGENT_JOB_DISPATCHER_URL;
+    if (!url || !token) throw new Error("worker dispatch capability missing");
+    const claim = await fetch(new URL(`/runs/${request.runId}/claim`, url), {
+      method: "POST", headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10_000), redirect: "error",
+    });
+    if (!claim.ok) throw new Error("worker claim refused; this body will not execute");
+    process.chdir(job.worker!.directory);
+    let pending: WorkerDiagnostics | undefined;
+    let uploading: Promise<void> | undefined;
+    const publish = (diagnostics: WorkerDiagnostics) => {
+      pending = diagnostics;
+      if (uploading) return;
+      // Serialize snapshots; a slow connection holds at most the newest pending tail.
+      uploading = (async () => {
+        while (pending) {
+          const next = pending;
+          pending = undefined;
+          try {
+            const response = await fetch(new URL(`/runs/${request.runId}/diagnostics`, url), {
+              method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+              body: JSON.stringify(next), signal: AbortSignal.timeout(2000), redirect: "error",
+            });
+            if (!response.ok) throw new Error("diagnostic checkpoint refused");
+            await response.body?.cancel();
+          } catch { console.warn("worker diagnostic checkpoint unavailable; retained diagnostics may be incomplete"); }
+        }
+      })().finally(() => { uploading = undefined; });
+    };
+    const host = new JobHost({ onDiagnostics: publish, diagnosticSecrets: [token] });
+    const run = await host.executeWorker(job, request);
+    writeFileSync("/dev/termination-log", JSON.stringify(workerResult(run)));
+    await uploading;
+    return;
+  }
+  if (sub === "dispatcher") {
+    const profilesFile = optionValue(argv, "profiles", "a worker profiles file");
+    const namespace = optionValue(argv, "namespace", "a Kubernetes namespace");
+    const name = optionValue(argv, "name", "a dispatcher name");
+    if (!profilesFile || !namespace || !name) throw new Error("usage: sageox-agent job dispatcher --profiles <file> --namespace <namespace> --name <name> [--agent <name>]");
+    const agent = await agentFromFlag(argv);
+    const manifest = readManifest(agent.config);
+    const profiles = WorkerProfilesSchema.parse(JSON.parse(readFileSync(profilesFile, "utf8")));
+    const url = process.env.AGENT_JOB_DISPATCHER_URL;
+    const token = process.env.AGENT_JOB_DISPATCHER_TOKEN;
+    if (!url || !token) throw new Error("dispatcher URL and token required");
+    const dispatcher = new JobDispatcher({
+      api: new JobKubeApi(namespace), name,
+      jobs: manifest.jobs, profiles, url,
+    });
+    const server = await serveJobDispatcher(dispatcher, token);
+    const stop = () => { void server.close().then(() => process.exit(0)); };
+    process.once("SIGTERM", stop);
+    process.once("SIGINT", stop);
+    return;
+  }
   const slug = argv[1];
-  if ((sub !== "run" && sub !== "arm" && sub !== "park") || !slug || slug.startsWith("--")) {
+  if ((!["run", "arm", "park", "status", "cancel"].includes(sub ?? "")) || !slug || slug.startsWith("--")) {
     throw new Error(
       "usage: sageox-agent job run <slug> [--trigger schedule|on-request|webhook] " +
         "[--param <name>=<value>]... [--agent <name>]\n" +
-        "       sageox-agent job arm | park <slug> [--agent <name>]",
+        "       sageox-agent job arm | park <slug> [--agent <name>]\n" +
+        "       sageox-agent job status | cancel <slug> --run-id <id> [--agent <name>]",
     );
   }
   const trigger = flag(argv, "trigger", "schedule")!;
@@ -1698,7 +1800,16 @@ async function jobCmd(argv: string[]): Promise<void> {
         : `${manifest.name} declares no jobs`,
     );
   }
-  if (sub !== "run") return jobSwitchCmd(manifest, job, sub, secretsDir);
+  if (sub === "status" || sub === "cancel") {
+    const external = externalJobs();
+    if (!job.worker || !external) throw new Error("external execution is unavailable for this job");
+    const runId = optionValue(argv, "run-id", "a run ID");
+    if (!runId) throw new Error("--run-id is required");
+    const status = await (sub === "cancel" ? external.cancel(slug, runId) : external.status(slug, runId));
+    process.stdout.write(JSON.stringify(status) + "\n");
+    return;
+  }
+  if (sub === "arm" || sub === "park") return jobSwitchCmd(manifest, job, sub, secretsDir);
 
   // Before anything is opened: a mistyped flag is a refusal at the terminal, not a relay
   // connection and a chdir that a throw would leave behind.
@@ -1725,6 +1836,8 @@ async function jobCmd(argv: string[]): Promise<void> {
   process.chdir(agent.dir);
 
   const host = new JobHost({
+    external: externalJobs(),
+    requestId: process.env.AGENT_JOB_REQUEST_ID ? `${process.env.AGENT_JOB_REQUEST_ID}:${slug}` : undefined,
     switchSource,
     post: reporter?.post,
     read: reporter?.read,
@@ -1758,7 +1871,7 @@ async function jobCmd(argv: string[]): Promise<void> {
   // is the honest rendering of that. A job that crashed or blew its budget is not, and
   // neither is one started through a door it never declared — a parked job is a posture
   // somebody chose, while an undeclared trigger is a job wired to the wrong job.
-  if (run.outcome === "crashed" || run.outcome === "budget-bowout") process.exit(1);
+  if (["crashed", "budget-bowout", "unknown", "cancelled"].includes(run.outcome)) process.exit(1);
   if (run.outcome === "denied-trigger") process.exit(1);
 }
 
@@ -2324,7 +2437,7 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
     // will see: whoever asked is told it started and never hears again, which is the
     // silence the job tool exists to end.
     const unheard = requestable.filter(
-      (job) => jobDeadlineMs(job) > manifest.limits.turnTimeoutMs && !job.report,
+      (job) => !job.worker && jobDeadlineMs(job) > manifest.limits.turnTimeoutMs && !job.report,
     );
     if (unheard.length) {
       warnings.push(
@@ -2623,6 +2736,10 @@ running it:
                                run one declared job once and exit — what a CronJob execs.
                                The trigger is stamped from this flag; a run started here is
                                \`system\`, so it does not bypass a parked job
+  job status | cancel <slug> --run-id <id>
+                               retrieve a durable external result or cancel its worker
+  job diagnostics <ref> --namespace <namespace> [--context <context>]
+                               retrieve retained logs using operator Kubernetes credentials
   job arm | park <slug>       flip one job's kill switch. Only a human may arm one — so
                                this host, holding the agent's signing key, is the only place
                                arming happens. The agent's own brain can park a switch, from

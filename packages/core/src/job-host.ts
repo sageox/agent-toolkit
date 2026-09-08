@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open, readFile, rm } from "node:fs/promises";
+import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { ExternalJobs, externalRun, jobDefinition, type ExternalRequest, type ExternalStatus } from "./external-jobs.ts";
 import {
   admitJob,
   type JobAdmission,
@@ -13,7 +14,8 @@ import {
   type SwitchSource,
 } from "./kill-switch.ts";
 import { passthroughEnv } from "./brain-env.ts";
-import { errorLine } from "./errors.ts";
+import { errorLine, errorText } from "./errors.ts";
+import { diagnosticOutput, type ExecutionInfo, type WorkerDiagnostics } from "./job-diagnostics.ts";
 import type { ActorRef, EventRef, ThreadReply } from "./events.ts";
 import { serveJobChannel } from "./job-channel.ts";
 import type { HostedMcp } from "./mcp-http.ts";
@@ -53,6 +55,8 @@ import {
  */
 export type JobOutcome =
   | "completed"
+  | "cancelled"
+  | "unknown"
   | "denied-trigger"
   | "denied-switch"
   | "denied-suspend"
@@ -114,6 +118,8 @@ export interface JobRun {
   parameters: JobParams;
   /** One line for the log and the status post. Never carries a backend's error text. */
   reason: string;
+  /** Host-minted process facts only; diagnostic text stays on the private worker path. */
+  execution?: ExecutionInfo;
 }
 
 /**
@@ -210,10 +216,18 @@ export type JobMembers = (
  * an author. Called inside the run's settlement, after the record and before the status
  * post, and on the shutdown path too: a person told "started" is owed a last word from
  * whichever settler gets there.
+ * The optional failure report is formatted for outward delivery, separate from the run
+ * so diagnostic text cannot accidentally enter model-facing records.
  */
-export type JobAnswer = (run: JobRun) => Promise<void>;
+export type JobAnswer = (run: JobRun, failureReport?: string) => Promise<void>;
 
 export interface JobHostOptions {
+  external?: ExternalJobs;
+  requestId?: string;
+  /** Worker-only diagnostic sink. The CLI supplies a run-scoped write capability. */
+  onDiagnostics?: (diagnostics: WorkerDiagnostics) => void;
+  /** Additional host capabilities to redact, beyond the body's declared credentials. */
+  diagnosticSecrets?: readonly string[];
   /**
    * How a job's kill switch is read. Bind `engramSwitchSource` from the Buzz adapter in
    * production; leaving it unset is not "no switch" but an unreadable one, which a
@@ -405,6 +419,8 @@ interface Execution {
   signal: NodeJS.Signals | null;
   /** True when this host stopped it for running out of wall clock. */
   bowedOut: boolean;
+  interrupted?: boolean;
+  info?: ExecutionInfo;
 }
 
 export class JobHost {
@@ -442,7 +458,45 @@ export class JobHost {
    */
   private closed = false;
 
+  private externalWaits = new AbortController();
+  private diagnosticSequence = 0;
+
   constructor(private opts: JobHostOptions = {}) {}
+
+  private reportDiagnostics(diagnostics: Omit<WorkerDiagnostics, "sequence">): void {
+    try { this.opts.onDiagnostics?.({ ...diagnostics, sequence: this.diagnosticSequence++ }); }
+    catch { console.warn("job diagnostics unavailable"); }
+  }
+
+  status(job: JobConfig, runId: string): Promise<ExternalStatus> {
+    if (!job.worker || !this.opts.external) throw new Error("external execution is unavailable for this job");
+    return this.opts.external.status(job.slug, runId);
+  }
+
+  cancel(job: JobConfig, runId: string): Promise<ExternalStatus> {
+    if (!job.worker || !this.opts.external) throw new Error("external execution is unavailable for this job");
+    return this.opts.external.cancel(job.slug, runId);
+  }
+
+  /** Only the standalone worker entrypoint calls this with a dispatcher-owned record. */
+  async executeWorker(job: JobConfig, request: ExternalRequest): Promise<JobRun> {
+    if (!job.worker || jobDefinition(job) !== request.definition) throw new Error("worker definition mismatch");
+    jobParams(job, request.parameters);
+    const remaining = request.startedAt + job.budget.wallClockMs - Date.now();
+    if (remaining <= 0) {
+      const execution: ExecutionInfo = { state: "timed-out", startedAt: Date.now(), endedAt: Date.now(), exitCode: null, signal: null };
+      this.reportDiagnostics({ execution, stdout: { text: "", truncated: false }, stderr: { text: "", truncated: false }, complete: true });
+      return this.record({
+        ...request, outcome: "budget-bowout", execution,
+        gates: [verdictFromGate({ gate: "worker", executed: false, exitCode: null })],
+        reason: "the worker's wall-clock budget expired before its body could start",
+      });
+    }
+    return this.finish({ ...job, budget: { ...job.budget, wallClockMs: remaining } }, request, {
+      admitted: true, switch: request.switch, bypassedSwitch: request.bypassedSwitch,
+      reason: "admitted by gateway",
+    }, false);
+  }
 
   /**
    * A clock tick. Nobody asked for it, so there is nobody to bypass a parked switch.
@@ -499,6 +553,7 @@ export class JobHost {
     requestedBy: JobRequester,
     params: JobParams = {},
     answer?: JobAnswer,
+    requestId?: string,
   ): Promise<JobStart> {
     const { finished, ...start } = await this.begin(
       job,
@@ -507,6 +562,7 @@ export class JobHost {
       params,
       true,
       answer,
+      requestId,
     );
     if (start.refused) {
       await finished;
@@ -516,12 +572,13 @@ export class JobHost {
     // it. `finish` writes the record and says the run out loud itself, so what can still
     // reject here is the host — a work directory it could not make — and the only thing left
     // to do with that is put it where an operator looks.
-    finished.catch((error) =>
+    finished.catch((error) => {
+      if (job.worker && this.closed) return;
       console.warn(
         `job_run slug=${job.slug} runId=${start.runId} result=lost reason=` +
           errorLine(error),
-      ),
-    );
+      );
+    });
     return start;
   }
 
@@ -559,6 +616,7 @@ export class JobHost {
    */
   async abandon(withinMs = SAY_GRACE_MS): Promise<void> {
     this.closed = true;
+    this.externalWaits.abort();
     const said = (async () => {
       // `owed` is not cleared: the entry *is* the claim, and dropping the map wholesale
       // would take it out from under a body finishing normally at this moment. Each
@@ -624,12 +682,18 @@ export class JobHost {
     answer?: JobAnswer,
   ): Promise<void> {
     const said = (async () => {
+      // Fetch once for outward delivery. Never attach diagnostic text to the run record,
+      // onRun callback, or model-facing status and tool responses.
+      const failureReport = job.worker && !isProven(run.verdict) && (answer || (job.report && this.opts.post))
+        ? await this.opts.external!.failureReport(job.slug, run.runId)
+          .catch(() => "Additional error output could not be retrieved.")
+        : undefined;
       // The asker first. A detached run that reached the person who asked is, to the
       // channel, a run somebody waited for: the verdict arrived where the question was, so
       // the status post is made or spared on the same terms as any other. One that could
       // not be answered leaves the post as the answer, which is what it was before.
-      const answered = answer ? await this.answer(job, run, answer) : false;
-      await this.announce(job, run, detached && !answered);
+      const answered = answer ? await this.answer(job, run, answer, failureReport) : false;
+      await this.announce(job, run, detached && !answered, failureReport);
     })();
     this.saying.add(said);
     try {
@@ -643,9 +707,9 @@ export class JobHost {
    * Tells whoever asked. Best-effort: the record already holds the run, so a reply that
    * cannot land is one line here and the status post takes its place.
    */
-  private async answer(job: JobConfig, run: JobRun, answer: JobAnswer): Promise<boolean> {
+  private async answer(job: JobConfig, run: JobRun, answer: JobAnswer, failureReport?: string): Promise<boolean> {
     try {
-      await answer(run);
+      await answer(run, failureReport);
       return true;
     } catch (error) {
       console.warn(
@@ -686,7 +750,7 @@ export class JobHost {
     requestedBy: JobRequester | null,
     params: JobParams,
   ): Promise<JobRun> {
-    return (await this.begin(job, trigger, requestedBy, params)).finished;
+    return (await this.begin(job, trigger, requestedBy, params, false, undefined, this.opts.requestId)).finished;
   }
 
   /**
@@ -698,7 +762,7 @@ export class JobHost {
    * behind it. The record is already written whatever happens here, which is what makes it
    * safe for this to swallow.
    */
-  private async announce(job: JobConfig, run: JobRun, detached = false): Promise<void> {
+  private async announce(job: JobConfig, run: JobRun, detached = false, failureReport?: string): Promise<void> {
     const report = job.report;
     const post = this.opts.post;
     if (!report || !post || !announces(run, detached, report.announce)) return;
@@ -724,6 +788,7 @@ export class JobHost {
     // alternative is dropping the lines that say *why* the headline reads the way it does.
     const root = await say(headline);
     for (const line of detail) await say(line, root);
+    if (failureReport) await say(failureReport, root);
 
     // One line for the run rather than one per failure: a channel that is down fails every
     // post, and the same sentence logged five times is still one fact. The count is what
@@ -731,7 +796,7 @@ export class JobHost {
     if (lost.length > 0) {
       console.warn(
         `job_status slug=${job.slug} result=partial ` +
-          `lost=${lost.length}/${detail.length + 1} reason=${lost[0]}`,
+          `lost=${lost.length}/${detail.length + 1 + (failureReport ? 1 : 0)} reason=${lost[0]}`,
       );
     }
   }
@@ -752,9 +817,14 @@ export class JobHost {
     params: JobParams,
     detached = false,
     answer?: JobAnswer,
+    requestId?: string,
   ): Promise<Started> {
     const startedAt = Date.now();
-    const runId = randomUUID();
+    const runId = job.worker
+      ? createHash("sha256").update(requestId ?? randomUUID()).digest("hex").slice(0, 40)
+      : randomUUID();
+    if (job.worker) jobParams(job, params);
+    if (job.worker && !this.opts.external) throw new Error(`job ${job.slug} requires an external dispatcher; no local execution fallback`);
     const base: RunBase = {
       jobSlug: job.slug,
       runId,
@@ -796,7 +866,7 @@ export class JobHost {
 
     // Claimed before the first `await`, so two ticks in one turn of the event loop cannot
     // both find the slug free and both proceed.
-    if (this.inFlight.has(job.slug)) {
+    if (!job.worker && this.inFlight.has(job.slug)) {
       return refuse(
         this.record({
           ...base,
@@ -808,7 +878,7 @@ export class JobHost {
         }),
       );
     }
-    this.inFlight.add(job.slug);
+    if (!job.worker) this.inFlight.add(job.slug);
 
     // Released here for every path that does not reach a body. The path that does hands the
     // claim to `finish` instead: a detached run's caller has already been answered, and
@@ -849,6 +919,30 @@ export class JobHost {
               "so the run was never started",
           }),
         );
+      }
+      if (job.worker) {
+        const request: ExternalRequest = {
+          ...base, definition: jobDefinition(job), switch: admission.switch,
+          bypassedSwitch: admission.bypassedSwitch,
+        };
+        let status: ExternalStatus;
+        try {
+          status = await this.opts.external!.dispatch(request);
+        } catch {
+          throw new Error(`external dispatch uncertain for run ${runId}; retrieve its status before retrying`);
+        }
+        if (status.state === "finished") {
+          const run = externalRun(request, status);
+          return { runId, refused: run, finished: Promise.resolve(run) };
+        }
+        // A gateway shutdown stops observation only. Kubernetes still owns the worker,
+        // deadline and durable record, so shutdown must never mark this run abandoned.
+        const finished = this.opts.external!.wait(request, this.externalWaits.signal).then(async (run) => {
+          this.opts.onRun?.(run);
+          await this.settle(job, run, detached, answer);
+          return run;
+        });
+        return { runId, refused: null, finished };
       }
       running = true;
       if (detached) this.owed.set(runId, () => this.giveUp(job, base, admission, answer));
@@ -894,7 +988,7 @@ export class JobHost {
   private async execute(
     job: JobConfig,
     base: RunBase,
-  ): Promise<Pick<JobRun, "outcome" | "gates" | "reason">> {
+  ): Promise<Pick<JobRun, "outcome" | "gates" | "reason" | "execution">> {
     const verdictPath = join(await this.workDir(), `${job.slug}-${base.runId}.json`);
     const unstarted = verdictFromGate({ gate: jobGate(job), executed: false, exitCode: null });
 
@@ -904,6 +998,13 @@ export class JobHost {
       channel = await this.openChannel(job);
       env = this.envelope(job, base, verdictPath, channel);
     } catch (error) {
+      let execution: ExecutionInfo | undefined;
+      if (job.worker) {
+        execution = { state: "not-started", startedAt: Date.now(), endedAt: Date.now(), exitCode: null, signal: null };
+        const stderr = diagnosticOutput(this.opts.diagnosticSecrets ?? [], (text) => process.stderr.write(text));
+        stderr.write(errorText(error)); stderr.end();
+        this.reportDiagnostics({ execution, stdout: { text: "", truncated: false }, stderr: stderr.snapshot(), complete: true });
+      }
       // Opened before it was known whether the envelope could be built, so a listener can
       // already be up when this runs.
       await channel?.close();
@@ -917,6 +1018,7 @@ export class JobHost {
       // {@link openChannel}.
       return {
         outcome: "crashed",
+        execution,
         gates: [unstarted],
         reason: `the job body could not be started: ${errorLine(error)}`,
       };
@@ -929,6 +1031,7 @@ export class JobHost {
     if (!execution.started) {
       return {
         outcome: "crashed",
+        execution: execution.info,
         gates: [unstarted],
         reason: `the job body could not be started: ${job.run.command} did not run`,
       };
@@ -942,21 +1045,23 @@ export class JobHost {
     const processGate = verdictFromGate({
       gate: jobGate(job),
       executed: true,
-      exitCode: execution.bowedOut ? null : execution.exitCode,
+      exitCode: execution.bowedOut || execution.interrupted ? null : execution.exitCode,
     });
 
     if (execution.bowedOut) {
       return {
         outcome: "budget-bowout",
+        execution: execution.info,
         gates: [processGate, ...gates],
         reason:
           `the job body was still running after its ${job.budget.wallClockMs}ms wall clock ` +
           `and was asked to stop, with ${job.budget.deadlineHeadroomMs}ms to finish writing`,
       };
     }
-    if (execution.exitCode === null) {
+    if (execution.exitCode === null || execution.interrupted) {
       return {
         outcome: "crashed",
+        execution: execution.info,
         gates: [processGate, ...gates],
         reason: `the job body died on ${execution.signal ?? "an unreported signal"}`,
       };
@@ -965,6 +1070,7 @@ export class JobHost {
     // found is the verdict's business, and it is a FAIL.
     return {
       outcome: "completed",
+      execution: execution.info,
       gates: [processGate, ...gates],
       reason: `the job body exited ${execution.exitCode}`,
     };
@@ -997,11 +1103,23 @@ export class JobHost {
 
   private spawnBody(job: JobConfig, env: NodeJS.ProcessEnv): Promise<Execution> {
     return new Promise<Execution>((resolve) => {
+      const knownSecrets = [...(this.opts.diagnosticSecrets ?? []), ...Object.keys({ ...job.run.secrets, ...job.run.jobSecrets })
+        .map((name) => env[name]).filter((value): value is string => Boolean(value))];
+      const stdout = job.worker && diagnosticOutput(knownSecrets, (text) => {
+        if (!process.stdout.write(text)) child.stdout?.pause();
+      });
+      const stderr = job.worker && diagnosticOutput(knownSecrets, (text) => {
+        if (!process.stderr.write(text)) child.stderr?.pause();
+      });
+      let info: ExecutionInfo = { state: "starting", startedAt: Date.now(), exitCode: null, signal: null };
+      const publish = (complete = false) => {
+        if (stdout && stderr) this.reportDiagnostics({ execution: info, stdout: stdout.snapshot(), stderr: stderr.snapshot(), complete });
+      };
       // `command` + `args[]` is the whole interface: no shell, so nothing can be word-split
       // or interpolated into one. Only the bundle ever names these — never a channel
       // message, an issue body, or a webhook payload.
       const child = spawn(job.run.command, job.run.args, {
-        stdio: ["ignore", "inherit", "inherit"],
+        stdio: ["ignore", job.worker ? "pipe" : "inherit", job.worker ? "pipe" : "inherit"],
         env,
         // Its own process group, so stopping a job stops what the job started. Every
         // real job body shells out — to a coding harness, to a test run, to `gh` — and
@@ -1014,6 +1132,17 @@ export class JobHost {
         // deadline takes the whole pod — and it is the deployment every job runs in.
         detached: true,
       });
+      const resumeOut = () => child.stdout?.resume();
+      const resumeErr = () => child.stderr?.resume();
+      if (stdout && stderr) {
+        // Keep the forwarding buffers bounded when the container's log sink is slow.
+        process.stdout.on("drain", resumeOut);
+        process.stderr.on("drain", resumeErr);
+        child.stdout!.setEncoding("utf8").on("data", (text: string) => stdout.write(text));
+        child.stderr!.setEncoding("utf8").on("data", (text: string) => stderr.write(text));
+        child.once("spawn", () => { info = { ...info, state: "running" }; publish(); });
+      }
+      const checkpoint = job.worker ? setInterval(() => publish(), 1000) : undefined;
 
       /** The group, not the process. Already-gone is not a failure to stop something. */
       const stop = (signal: NodeJS.Signals) => {
@@ -1025,6 +1154,9 @@ export class JobHost {
       };
 
       let bowedOut = false;
+      let interrupted = false;
+      const interrupt = () => { interrupted = true; stop("SIGTERM"); publish(); };
+      if (job.worker) process.once("SIGTERM", interrupt);
       // SIGTERM at the budget, SIGKILL at the deadline: the gap is the body's chance to
       // release what it claimed. A job that ignores SIGTERM still cannot outlive the
       // platform's own deadline, which is the same sum.
@@ -1037,11 +1169,32 @@ export class JobHost {
       const settle = (execution: Execution) => {
         clearTimeout(bowOut);
         clearTimeout(hardStop);
+        if (checkpoint) clearInterval(checkpoint);
+        if (job.worker) {
+          process.stdout.removeListener("drain", resumeOut);
+          process.stderr.removeListener("drain", resumeErr);
+          process.removeListener("SIGTERM", interrupt);
+          stdout && stdout.end(); stderr && stderr.end();
+          info = {
+            ...info, endedAt: Date.now(), exitCode: execution.exitCode,
+            signal: execution.signal ? constants.signals[execution.signal] : null,
+            state: !execution.started ? "not-started" : bowedOut ? "timed-out" : interrupted ? "interrupted"
+              : execution.signal ? "signalled" : "exited",
+          };
+          execution.info = info;
+          execution.interrupted = interrupted;
+          publish(true);
+        }
         resolve(execution);
       };
-      child.on("error", () =>
-        settle({ started: false, exitCode: null, signal: null, bowedOut: false }),
-      );
+      let startFailed = false;
+      child.on("error", (error) => {
+        startFailed = true;
+        if (stderr) stderr.write(errorText(error));
+        else settle({ started: false, exitCode: null, signal: null, bowedOut: false });
+      });
+      // Drain the pipes before sealing a worker's diagnostics; exit can precede stderr.
+      if (job.worker) child.once("close", (exitCode, signal) => settle({ started: !startFailed, exitCode, signal, bowedOut }));
       child.on("exit", (exitCode, signal) => {
         // The job is over when its body is, so nothing the body started may outlive it.
         //
@@ -1057,7 +1210,7 @@ export class JobHost {
         // would have been grouped with is already gone. Nothing a host does closes that —
         // there is no group left to signal. The container boundary is what covers it.
         stop("SIGKILL");
-        settle({ started: true, exitCode, signal, bowedOut });
+        if (!job.worker) settle({ started: true, exitCode, signal, bowedOut });
       });
     });
   }
@@ -1147,7 +1300,23 @@ export class JobHost {
       verdictFromGate({ gate: `${jobGate(job)}:verdict`, executed: false, exitCode: null }),
     ];
     try {
-      const parsed = VerdictArtifactSchema.safeParse(JSON.parse(await readFile(verdictPath, "utf8")));
+      let artifact: string;
+      if (!job.worker) artifact = await readFile(verdictPath, "utf8");
+      else {
+        const file = await open(verdictPath, "r");
+        try {
+          const buffer = Buffer.alloc(64 * 1024 + 1);
+          let bytesRead = 0;
+          while (bytesRead < buffer.length) {
+            const chunk = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+            if (!chunk.bytesRead) break;
+            bytesRead += chunk.bytesRead;
+          }
+          if (bytesRead > 64 * 1024) return unproven;
+          artifact = buffer.toString("utf8", 0, bytesRead);
+        } finally { await file.close(); }
+      }
+      const parsed = VerdictArtifactSchema.safeParse(JSON.parse(artifact));
       if (!parsed.success || parsed.data.gates.length === 0) return unproven;
       return parsed.data.gates.map(verdictFromGate);
     } catch {

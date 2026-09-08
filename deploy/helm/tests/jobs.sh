@@ -289,4 +289,89 @@ out=$(helm template agents "$chart" --values "$values" --values "$csi" \
 grep -qF "harry/secrets and harry/jobSecrets" <<<"$out" \
   || fail "refused for the wrong reason: one class from two sources"
 
+
+# External schedules are launchers: they retain admission credentials, but receive no
+# task credentials, mutable checkout, or Kubernetes token. One dispatcher serves all jobs.
+render --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
+  --set 'agents.harry.jobs[0].worker.secrets.TASK_TOKEN.name=task-credentials' \
+  --set 'agents.harry.jobs[0].worker.secrets.TASK_TOKEN.key=token' \
+  --set agents.harry.jobSecrets.kubernetesSecret=old-job-secrets \
+  --set agents.harry.jobSecrets.csi.secretProviderClass= \
+  --set agents.harry.persistence.jobCheckouts=true \
+  --set agents.harry.serviceAccount.automountJobToken=true
+present 'name: AGENT_JOB_DISPATCHER_URL'
+present 'name: AGENT_JOB_REQUEST_ID'
+absent 'task-credentials'
+absent 'old-job-secrets'
+absent 'mountPath: /agents/harry/workspace/repos'
+absent 'automountServiceAccountToken: true'
+
+rendered=$(helm template agents "$chart" --values "$values" \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
+  --show-only templates/dispatcher.yaml)
+counted 1 'kind: Deployment'
+present 'resources: ["jobs"]'
+present 'resources: ["configmaps"]'
+present 'resources: ["secrets"]'
+present 'verbs: ["create"]'
+absent 'mountPath: /mnt/secrets-store'
+absent 'mountPath: /mnt/job-secrets-store'
+
+if helm template agents "$chart" --values "$values" \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' >"$work/invalid" 2>&1; then
+  fail 'worker without dispatcher was accepted'
+fi
+if helm template agents "$chart" --values "$values" \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=agents-harry' >"$work/invalid" 2>&1; then
+  fail 'worker sharing the gateway identity was accepted'
+fi
+
+# Isolation covers every agent in a release, including externally managed accounts.
+if helm template agents "$chart" --values "$values" \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=agents-ida' >"$work/invalid" 2>&1; then
+  fail 'worker sharing another gateway identity was accepted'
+fi
+for secret in agent-ida ida-dispatcher-auth; do
+  if helm template agents "$chart" --values "$values" \
+    --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+    --set agents.ida.dispatcher.tokenSecret=ida-dispatcher-auth \
+    --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
+    --set "agents.harry.jobs[0].worker.secrets.TASK_TOKEN.name=$secret" \
+    --set 'agents.harry.jobs[0].worker.secrets.TASK_TOKEN.key=token' >"$work/invalid" 2>&1; then
+    fail 'worker sharing another gateway or dispatcher secret was accepted'
+  fi
+done
+rendered=$(helm template agents "$chart" --values "$values" \
+  --set agents.ida.dispatcher.tokenSecret=ida-dispatcher-auth --show-only templates/dispatcher.yaml)
+dispatcher_account=$(awk '/^kind: ServiceAccount$/{found=1;next} found && /^  name:/{print $2;exit}' <<<"$rendered")
+for subject in 'agents.harry.jobs[0].worker.serviceAccountName' agents.harry.serviceAccount.name; do
+  if helm template agents "$chart" --values "$values" \
+    --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+    --set agents.ida.dispatcher.tokenSecret=ida-dispatcher-auth \
+    --set "$subject=$dispatcher_account" >"$work/invalid" 2>&1; then
+    fail 'worker or gateway sharing another dispatcher identity was accepted'
+  fi
+done
+
+# Fail at chart validation, before a profile can crash the dispatcher at startup.
+for resource in 'cpu=1' 'requests.cpu=1' 'limits.memory=128'; do
+  if helm template agents "$chart" --values "$values" \
+    --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+    --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
+    --set "agents.harry.jobs[0].worker.resources.$resource" >"$work/invalid" 2>&1; then
+    fail "invalid worker resources passed values validation: $resource"
+  fi
+done
+rendered=$(helm template agents "$chart" --values "$values" \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
+  --set-string 'agents.harry.jobs[0].worker.resources.requests.cpu=1' \
+  --set-string 'agents.harry.jobs[0].worker.resources.limits.memory=128Mi' \
+  --show-only templates/dispatcher.yaml)
+present '\"resources\":{\"limits\":{\"memory\":\"128Mi\"},\"requests\":{\"cpu\":\"1\"}}'
+
 printf 'jobs.sh: ok\n'

@@ -28,6 +28,8 @@ pnpm test
 
 The checked-in [`.mise.toml`](.mise.toml) can install and select the expected
 Node.js, pnpm, and `age` versions when you use [mise](https://mise.jdx.dev/).
+The external-worker contract tests also use `python3` and a C compiler available as `cc`
+(Xcode Command Line Tools on macOS; GCC or Clang on Linux).
 
 Changes under `deploy/` may also need Helm and Terraform. CI runs the canonical
 chart and Terraform checks, and builds `deploy/docker/Dockerfile` for both
