@@ -216,7 +216,7 @@ export class JobDispatcher {
     for (let attempt = 0; ; attempt++) {
       const cm = await this.owned(runId, slug);
       const run = this.read(cm);
-      if (run.status.state === "finished" || run.status.outcome === "cancelled") return run.status;
+      if (run.status.state === "finished" || run.status.state === "cancelling") return run.status;
       run.status.state = "cancelling";
       run.status.outcome = cause ? "unknown" : "cancelled";
       if (cause) cm.data!.diagnostics = JSON.stringify({ ...JSON.parse(cm.data?.diagnostics ?? "{}"), dispatcherError: cause });

@@ -176,9 +176,12 @@ resource limits. A dispatcher restart or profile update cannot change an admitte
 configuration. The values of referenced Secrets remain managed by Kubernetes; rotating a
 Secret before a worker starts changes the value it receives.
 
-If claim Secret creation is rejected or its response is lost, the dispatcher stops the
-Job and reports that dispatch failure as UNKNOWN without retrying execution. Cleanup
-removes any resulting worker before releasing its overlap lock.
+If claim Secret creation is rejected or its response is lost, the dispatcher requests
+cancellation and reports that dispatch failure as UNKNOWN without retrying execution.
+The first durable stop reason is retained when cancellations race. Cleanup removes any
+resulting worker before releasing its overlap lock. If the Kubernetes API cannot persist
+cancellation, the run remains uncertain: an already admitted worker may still execute
+once. A failed cancellation write is never reported as a finished or stopped run.
 
 Before running its body, a worker claims that run once through the dispatcher. Replacement
 Pods cannot claim it again. A lost claim response can prevent execution; it never authorizes

@@ -201,6 +201,7 @@ describe("durable Kubernetes job lifecycle", () => {
     await a.dispatch(req); await a.reconcile();
     expect(await a.status("task", req.runId)).toMatchObject({ state: "cancelling", outcome: "unknown" });
     const b = dispatcher(api);
+    expect(await b.cancel("task", req.runId)).toMatchObject({ state: "cancelling", outcome: "unknown" });
     await b.reconcile(); await b.reconcile(); await b.reconcile();
     expect(await b.status("task", req.runId)).toMatchObject({ state: "finished", outcome: "unknown" });
     const report = await b.failureReport("task", req.runId);
@@ -213,6 +214,50 @@ describe("durable Kubernetes job lifecycle", () => {
     expect(calls.mock.calls.filter(([method, resource]) => method === "POST" && resource === "secrets")).toHaveLength(1);
     await b.dispatch(request(manifest().jobs[0]!, "b")); await b.reconcile();
     expect(api.created).toBe(2); // the prior run's overlap lock was released
+  });
+
+  it("preserves the first stop reason when a stale cancellation races a dispatch failure", async () => {
+    const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+    await a.dispatch(req); await a.reconcile();
+    const original = api.call.bind(api);
+    let raced = false;
+    vi.spyOn(api, "call").mockImplementation(async (method, resource, suffix, body) => {
+      if (method === "PUT" && resource === "configmaps" && !raced) {
+        raced = true;
+        await dispatcher(api).cancel("task", req.runId, "claim-secret-unavailable");
+      }
+      return original(method, resource, suffix, body);
+    });
+    expect(await a.cancel("task", req.runId)).toMatchObject({ state: "cancelling", outcome: "unknown" });
+    await a.reconcile(); await a.reconcile();
+    expect(await a.failureReport("task", req.runId)).toContain("Worker claim Secret creation was not confirmed");
+  });
+
+  it("keeps an admitted run uncertain after an unpersisted cancellation, without replay or false completion", async () => {
+    const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+    const original = api.call.bind(api);
+    vi.spyOn(api, "call").mockImplementation(async (method, resource, suffix, body) => {
+      if (method === "POST" && resource === "secrets") {
+        await original(method, resource, suffix, body);
+        throw new Error("lost Secret response");
+      }
+      if (method === "PUT" && resource === "configmaps" && JSON.parse((body as KubeObject).data!.run!).status.state === "cancelling") {
+        throw new KubeError(503); // no cancellation state has been persisted
+      }
+      return original(method, resource, suffix, body);
+    });
+    await a.dispatch(req); await a.reconcile();
+    expect(await a.status("task", req.runId)).toMatchObject({ state: "dispatching" });
+    expect((await a.status("task", req.runId)).outcome).toBeUndefined();
+    await expect(a.failureReport("task", req.runId)).rejects.toThrow();
+    const b = dispatcher(api), token = runToken(api, req.runId);
+    await b.dispatch(req); await b.reconcile();
+    const claims = await Promise.allSettled([a.claim(req.runId, token), b.claim(req.runId, token)]);
+    expect(claims.filter((claim) => claim.status === "fulfilled")).toHaveLength(1);
+    await completed(api, b, req, JSON.stringify({ outcome: "completed", counts: { PASS: 2, FAIL: 0, UNKNOWN: 0 } }));
+    expect(await b.status("task", req.runId)).toMatchObject({ state: "finished", outcome: "completed", result: { counts: { PASS: 2 } } });
+    await b.dispatch(req); await b.reconcile();
+    expect(api.created).toBe(1);
   });
 
   it("recovers a completed result when the dispatcher returns after the deadline", async () => {
