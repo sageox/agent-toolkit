@@ -7,7 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Jobs can run on demand in their own digest-pinned runtime images on Kubernetes. A shared dispatcher retains run IDs and bounded verdicts across restarts, serializes requested and scheduled workers, prevents duplicate body starts, and supports status retrieval and cancellation. Failed runs automatically post failure details and a redacted error excerpt to the configured report destination and original conversation; no manual diagnostic command is needed. Full redacted stdout/stderr tails and execution facts remain available for seven days through operator-only `job diagnostics`. Worker credentials use a separate identity; existing local jobs remain compatible. See [external jobs](docs/external-jobs.md).
+## [0.4.0] - 2026-09-07
+
+Everything below shipped after `v0.3.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.4.0` takes `:latest` and `:0.4`.
+`:0.3` stays on 0.3.1. Before 1.0.0 a minor release may break configuration, so no
+`:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
+**Before upgrading, add top-level `killSwitchParkBy` to every `agent.yaml` with a job
+that declares `killSwitch`.** The new runtime refuses to load such a manifest without
+it. Use `killSwitchParkBy: []` to refuse parking requests from all recognized agents,
+or list the stable agent ids whose parking requests should be accepted, including any
+fleet supervisor that must retain that ability. Unidentified authors and calls without
+a single attributable live turn remain permitted; this field does not prove an author
+is human. Manifests without job kill switches need no change.
+
+Existing agents opt into the new tools by re-running `sageox-agent memory add team`
+for the ledger readers, `sageox-agent repos add <url>` for `code_insights`, and
+`sageox-agent mcp add jobs` for job status and cancellation. The ledger readers require
+a verified fresh repository ledger; code insights reports unknown tracker data until
+pull requests and issues have been indexed.
+
+**The Helm chart moves to 0.12.0** for the dispatcher and isolated workers. External
+jobs require Kubernetes 1.34 or newer, a separate worker ServiceAccount, a dispatcher
+authentication Secret, and a worker image built from the same toolkit release. Follow
+the [external jobs setup](docs/external-jobs.md), including its namespace and credential
+requirements. Existing local jobs need no worker configuration.
+
+- **Jobs can run on demand in their own digest-pinned runtime images on Kubernetes.**
+  A shared dispatcher retains run IDs and bounded verdicts across restarts, serializes
+  requested and scheduled workers, prevents duplicate body starts, and supports status
+  retrieval and cancellation. Failed runs automatically post failure details and a
+  redacted error excerpt to the configured report destination and original conversation;
+  no manual diagnostic command is needed. Full redacted stdout/stderr tails and execution
+  facts remain available for seven days through operator-only `job diagnostics`. Worker
+  credentials use a separate identity; existing local jobs remain compatible. See
+  [external jobs](docs/external-jobs.md).
+
 - **The team brain can report ledger readiness and list sessions from an operator-synced
   repository.** `team_status` checks search access and each repository's ledger separately;
   `team_sessions` lists bounded results only after current credential access, repository
@@ -36,54 +73,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owners, stops Git on shutdown, and waits for a changed mounted credential after an
   authentication failure. No additional Kubernetes Secret is required.
 
-**An agent with `repos.conf` can be asked what has been moving lately.** `code_insights`
-joins `code_search` and `code_status` on the code server: the most-changed files, recent
-commits, and open pull requests and issues, from the same one-shot index and the same
-read-only checkout. It takes `days` and `limit`, both capped by the gateway, and each row
-is bounded — a commit body has no length `ox` limits, and ten of them would be the turn
-rather than an answer. Run `sageox-agent repos add <url>` again on an existing agent to
-allow `mcp__code__code_insights`; `doctor` names it until you do.
+- **An agent with `repos.conf` can be asked what has been moving lately.** `code_insights`
+  joins `code_search` and `code_status` on the code server: the most-changed files, recent
+  commits, and open pull requests and issues, from the same one-shot index and the same
+  read-only checkout. It takes `days` and `limit`, both capped by the gateway, and each row
+  is bounded — a commit body has no length `ox` limits, and ten of them would be the turn
+  rather than an answer. Run `sageox-agent repos add <url>` again on an existing agent to
+  allow `mcp__code__code_insights`; `doctor` names it until you do.
 
-Insights responses are validated before rendering. Query diagnostics and error/status
-responses report unavailable data rather than no activity, even when `ox` exits
-successfully. The audit records argument shapes so invalid numeric arguments cannot
-write private text into the log.
+  Insights responses are validated before rendering. Query diagnostics and error/status
+  responses report unavailable data rather than no activity, even when `ox` exits
+  successfully. The audit records argument shapes so invalid numeric arguments cannot
+  write private text into the log.
 
-Its tracker sections report **`unknown`** when the repository has no indexed records of
-that type. When records exist, they list open items or report `none` among the indexed
-records. Fresh toolkit indexes have no tracker records: warmup runs only `ox index code`,
-while pull requests and issues come from `ox index github`, which needs a forge token.
-Counts from the warmup canary distinguish missing tracker data from a successful empty
-response. The tool runs `ox` in the gateway over the existing checkout.
+  Its tracker sections report **`unknown`** when the repository has no indexed records of
+  that type. When records exist, they list open items or report `none` among the indexed
+  records. Fresh toolkit indexes have no tracker records: warmup runs only `ox index code`,
+  while pull requests and issues come from `ox index github`, which needs a forge token.
+  Counts from the warmup canary distinguish missing tracker data from a successful empty
+  response. The tool runs `ox` in the gateway over the existing checkout.
 
-**A job kill switch is no longer parkable by any agent that gets a turn.** `brain_write`
-bounded the switch by value alone — every value that arms refused, every value that parks
-admitted, whoever asked — so a sibling agent could stop a lane by asking the agent that
-owns it. Usually that self-corrects, because a human notices a stopped lane and restarts
-it; for a lane whose own job is noticing, nothing downstream reports it missing. The
-gateway is the only thing that ever saw who sent the message, so it now hands the author
-to the write: a park is refused when the turn being answered is from an agent the manifest
-does not name. Arming and the tombstone are unchanged and still refused for everyone.
+- **A job kill switch refuses parking requests from recognized agents outside
+  `killSwitchParkBy`.** `brain_write` bounded the switch by value alone — every value that
+  arms refused, every value that parks admitted, whoever asked — so a sibling agent could
+  stop a lane by asking the agent that owns it. Usually that self-corrects, because a human
+  notices a stopped lane and restarts it; for a lane whose own job is noticing, nothing
+  downstream reports it missing. The gateway is the only thing that ever saw who sent the
+  message, so it now hands the author to the write: a park is refused when the turn being
+  answered is from a recognized agent the manifest does not name. Arming and the tombstone
+  are unchanged and still refused for everyone.
 
-It narrows, and it is not a boundary. The test is positive evidence of an agent, so a
-surface that cannot identify one admits the park — on Buzz that is a pubkey with no
-directory record — as does a call the gateway cannot place in a single live turn. Refusing
-those would refuse a human's park too, and a refusal to park is a kill switch that failed.
-Steering and `suspend` still carry the rest.
+  It narrows, and it is not a boundary. The test is positive evidence of an agent, so a
+  surface that cannot identify one admits the park — on Buzz that is a pubkey with no
+  directory record — as does a call the gateway cannot place in a single live turn. Refusing
+  those would refuse a human's park too, and a refusal to park is a kill switch that failed.
+  Steering and `suspend` still carry the rest.
 
-**`killSwitchParkBy` is required once any job declares a `killSwitch`, and a manifest
-without it will not load.** Add `killSwitchParkBy: []` to keep parking to humans, or list
-the ids of the agents whose park this agent honours — a fleet supervisor that pulls an
-emergency brake is the case it exists for. Absent and empty are different answers and only
-one is a decision, so it is stated rather than defaulted, for the reason `failDirection`
-is: a release that enforced the rule while a manifest had not yet named its stopper would
-silence that stopper with nothing to say so. A pod that refuses to start is the louder
-half of that trade. Ids only, never names — a name is self-asserted in the surface's own
-directory record.
+- **`killSwitchParkBy` is required once any job declares a `killSwitch`, and a manifest
+  without it will not load.** Add `killSwitchParkBy: []` to refuse parking requests from all
+  recognized agents, or list the ids of the agents whose park this agent honours — a fleet
+  supervisor that pulls an emergency brake is the case it exists for. Absent and empty are
+  different answers and only one is a decision, so it is stated rather than defaulted, for
+  the reason `failDirection` is: a release that enforced the rule while a manifest had not
+  yet named its stopper would silence that stopper with nothing to say so. A pod that refuses
+  to start is the louder half of that trade. Ids only, never names — a name is self-asserted
+  in the surface's own directory record.
 
-Only the `private` brain reads a switch, so an agent whose memory is `local` or `shared`
-is unaffected. A job body holding its own credential writes engrams outside this path, as
-it always has.
+  The parking gate applies to the `private` brain; the manifest requirement applies to
+  every job with a `killSwitch`. A job body holding its own credential writes engrams
+  outside this path, as it always has.
 
 ## [0.3.1] - 2026-09-04
 
