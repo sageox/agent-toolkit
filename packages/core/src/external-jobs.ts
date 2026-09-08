@@ -128,6 +128,7 @@ export class ExternalJobs {
       }
       return schema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))));
     } catch {
+      signal?.throwIfAborted();
       throw new Error("job dispatcher returned an invalid, incomplete or oversized result");
     } finally { await reader?.cancel().catch(() => {}); }
   }

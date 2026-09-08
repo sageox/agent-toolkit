@@ -1667,6 +1667,15 @@ function jobParamFlags(argv: string[], job: JobConfig, trigger: string): JobPara
   return given;
 }
 
+/** Build the gateway dispatcher capability from its deployment credentials. */
+function externalJobs(): ExternalJobs | undefined {
+  const url = process.env.AGENT_JOB_DISPATCHER_URL;
+  if (!url) return undefined;
+  const token = process.env.AGENT_JOB_DISPATCHER_TOKEN;
+  if (!token) throw new Error("AGENT_JOB_DISPATCHER_TOKEN is required with AGENT_JOB_DISPATCHER_URL");
+  return new ExternalJobs(url, token);
+}
+
 /**
  * Runs one declared job, once, and exits. This is what a CronJob, a launchd job, or an
  * operator execs. `arm` and `park` are the other two doors, and they are
@@ -1682,14 +1691,6 @@ function jobParamFlags(argv: string[], job: JobConfig, trigger: string): JobPara
  * the two apart, neither bypasses a parked job, which is the safe direction and mildly
  * annoying for the operator. Ask through a chat surface to bypass.
  */
-function externalJobs(): ExternalJobs | undefined {
-  const url = process.env.AGENT_JOB_DISPATCHER_URL;
-  if (!url) return undefined;
-  const token = process.env.AGENT_JOB_DISPATCHER_TOKEN;
-  if (!token) throw new Error("AGENT_JOB_DISPATCHER_TOKEN is required with AGENT_JOB_DISPATCHER_URL");
-  return new ExternalJobs(url, token);
-}
-
 async function jobCmd(argv: string[]): Promise<void> {
   const sub = argv[0];
   if (sub === "diagnostics") {

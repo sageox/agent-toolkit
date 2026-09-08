@@ -220,6 +220,7 @@ function describeParams(job: JobConfig): string {
   return declared.length ? ` [params: ${declared.join(", ")}]` : "";
 }
 
+/** Describe declared job capabilities and their explicit request arguments to the brain. */
 function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
   const requestable = requestableJobs(jobs);
   const params = paramSchema(requestable);

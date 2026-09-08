@@ -838,6 +838,26 @@ it("aborts an in-flight status request when observation is abandoned", async () 
   }
 });
 
+it("preserves caller cancellation while reading an open status response body", async () => {
+  let reading!: () => void;
+  const pending = new Promise<void>((resolve) => { reading = resolve; });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => new Response(new ReadableStream({
+    pull(stream) {
+      init!.signal!.addEventListener("abort", () => stream.error(new Error("response body aborted")), { once: true });
+      reading();
+    },
+  }, { highWaterMark: 0 })));
+  const controller = new AbortController();
+  const reason = new Error("observer stopped during response body");
+  try {
+    const waiting = new ExternalJobs("http://dispatcher", "token").wait(request(manifest().jobs[0]!), controller.signal);
+    const rejected = expect(waiting).rejects.toBe(reason);
+    await pending;
+    controller.abort(reason);
+    await rejected;
+  } finally { controller.abort(); }
+});
+
 it("refuses unbound external tool requests before admission, including retries", async () => {
   const api = new Cluster(), dispatch = dispatcher(api), job = manifest().jobs[0]!;
   const remote = { dispatch: vi.fn((req: ExternalRequest) => dispatch.dispatch(req)) } as unknown as ExternalJobs;
