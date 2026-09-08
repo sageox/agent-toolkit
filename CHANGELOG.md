@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **External jobs can return bounded structured JSON answers through `job_status`.**
+  Reviewed jobs opt in with `output: {format: json}` and use a versioned section of
+  the existing artifact. Answers persist for seven days, independently of diagnostics,
+  and require an explicit read by the requesting author in the original conversation.
+  Missing, invalid, blocked or unavailable output does not erase execution facts or
+  valid gates, and delivery failures never rerun the job. See [the output contract](docs/external-jobs.md#structured-answers).
+
 ## [0.4.0] - 2026-09-07
 
 Everything below shipped after `v0.3.1`.

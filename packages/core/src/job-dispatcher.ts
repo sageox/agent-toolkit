@@ -8,6 +8,7 @@ import { admitJob } from "./kill-switch.ts";
 import { type JobConfig } from "./manifest.ts";
 import { tokenMatches, type ServeOptions } from "./mcp-http.ts";
 import { WorkerDiagnosticsSchema, type WorkerDiagnostics } from "./job-diagnostics.ts";
+import { FinalJobOutputSchema, JobOutputEnvelopeSchema, JOB_STATUS_LIMIT_BYTES } from "./job-output.ts";
 import {
   ExternalRequestSchema, WorkerResultSchema, RunIdSchema, FailureReportSchema, jobDefinition,
   type ExternalRequest, type ExternalStatus,
@@ -157,7 +158,8 @@ export class JobDispatcher {
     const name = this.name(request.runId);
     const run: StoredRun = {
       request, job, profile: this.opts.profiles[job.slug]!, deadline: request.startedAt + jobDeadlineMs(job),
-      status: { runId: request.runId, jobSlug: job.slug, startedAt: request.startedAt, state: "pending", diagnostics: { ref: name, complete: false } },
+      status: { runId: request.runId, jobSlug: job.slug, startedAt: request.startedAt, state: "pending", diagnostics: { ref: name, complete: false },
+        ...(job.output ? { output: { state: "pending" } } : {}) },
     };
     try {
       await this.opts.api.call("POST", "configmaps", "", {
@@ -178,8 +180,53 @@ export class JobDispatcher {
     return this.status(job.slug, request.runId);
   }
 
-  async status(slug: string, runId: string): Promise<ExternalStatus> {
-    return this.read(await this.owned(runId, slug)).status;
+  async status(slug: string, runId: string, outputReader?: string): Promise<ExternalStatus> {
+    const cm = await this.owned(runId, slug);
+    const run = this.read(cm);
+    const status = run.status;
+    if (status.output && status.state === "finished" && Date.now() - status.endedAt! > 7 * 86400_000) {
+      status.output = { state: "expired" };
+    }
+    if (outputReader !== undefined) {
+      // The operator CLI holds the gateway capability. MCP can only supply a fingerprint
+      // derived from the gateway's live inbound event, and never this operator override.
+      if (outputReader !== "operator" && (!run.request.outputReader || !tokenMatches(outputReader, run.request.outputReader))) throw new KubeError(403);
+      if (status.output?.state === "available") {
+        try {
+          const parsed = JobOutputEnvelopeSchema.safeParse(JSON.parse(cm.data?.output ?? "null"));
+          const publication = parsed.success && { state: "available" as const, value: parsed.data };
+          status.output = publication && createHash("sha256").update(JSON.stringify(publication)).digest("hex") === cm.data?.outputDigest
+            ? publication : { state: "unavailable" };
+        } catch { status.output = { state: "unavailable" }; }
+      }
+    }
+    return status;
+  }
+
+  /** One immutable publication by the admitted worker; private data never enters `run`. */
+  async recordOutput(runId: string, token: string, raw: unknown): Promise<void> {
+    const output = FinalJobOutputSchema.parse(raw);
+    const digest = createHash("sha256").update(JSON.stringify(output)).digest("hex");
+    for (let attempt = 0; ; attempt++) {
+      const cm = await this.owned(runId);
+      const run = this.read(cm);
+      if (!run.tokenHash || !tokenMatches(createHash("sha256").update(token).digest("hex"), run.tokenHash)) throw new KubeError(401);
+      if (!run.claimed || !run.job?.output || run.cleaned) throw new KubeError(409);
+      if (cm.data!.outputDigest) {
+        if (cm.data!.outputDigest !== digest) throw new KubeError(409);
+        return;
+      }
+      if (!["dispatching", "running"].includes(run.status.state)) throw new KubeError(409);
+      cm.data!.outputDigest = digest;
+      if (output.state === "available") cm.data!.output = JSON.stringify(output.value);
+      // The reconciler advertises this state only when execution settles. Persist the
+      // payload and its availability together in this ConfigMap resource-version update.
+      cm.data!.outputState = output.state;
+      try { await this.save(cm, run); return; }
+      catch (error) {
+        if (!(error instanceof KubeError && error.status === 409) || attempt >= 2) throw error;
+      }
+    }
   }
 
   /** A bounded excerpt for automatic chat reports; the full archive stays operator-only. */
@@ -301,6 +348,9 @@ export class JobDispatcher {
 
   private async finish(cm: KubeObject, run: StoredRun, outcome: ExternalStatus["outcome"]): Promise<void> {
     run.status = { ...run.status, state: "finished", outcome, endedAt: Date.now() };
+    if (run.status.output) {
+      run.status.output = { state: cm.data?.outputState as NonNullable<ExternalStatus["output"]>["state"] ?? "unavailable" };
+    }
     // Retain results independently of Pod cleanup. Never release a lock before this write.
     await this.save(cm, run);
   }
@@ -379,7 +429,7 @@ export class JobDispatcher {
         cm = cleared;
         await this.release(run);
       }
-      if (!run.cleaned || ((run.status.result || cm.data?.diagnostics) && Date.now() - run.status.endedAt! > 7 * 86400_000)) {
+      if (!run.cleaned || ((run.status.result || cm.data?.diagnostics || cm.data?.outputState) && Date.now() - run.status.endedAt! > 7 * 86400_000)) {
         run.cleaned = true;
         delete run.job;
         delete run.profile;
@@ -389,6 +439,10 @@ export class JobDispatcher {
           delete run.status.execution;
           delete run.status.diagnostics;
           delete cm.data!.diagnostics;
+          delete cm.data!.output;
+          delete cm.data!.outputState;
+          delete cm.data!.outputDigest;
+          if (run.status.output) run.status.output = { state: "expired" };
           run.status.outcome = "unknown";
         }
         await this.save(cm, run);
@@ -465,7 +519,7 @@ export class JobDispatcher {
     const terminated = pods.items?.length === 1 && pods.items[0]?.status?.containerStatuses?.find((c) => c.name === "worker")?.state?.terminated;
     let result;
     try {
-      if (run.claimed && terminated && terminated.exitCode === 0 && (terminated.message?.length ?? 0) <= 4096) {
+      if (run.claimed && terminated && terminated.exitCode === 0 && Buffer.byteLength(terminated.message ?? "") <= 4096) {
         result = WorkerResultSchema.parse(JSON.parse(terminated.message ?? ""));
       }
     } catch { /* A lost or corrupt result is unknown, never a successful container exit. */ }
@@ -486,18 +540,28 @@ export async function serveJobDispatcher(dispatcher: JobDispatcher, token: strin
       const url = new URL(req.url ?? "/", "http://dispatcher");
       const claim = /^\/runs\/([a-f0-9]{40})\/claim$/.exec(url.pathname);
       const diagnostics = req.method === "POST" && /^\/runs\/([a-f0-9]{40})\/diagnostics$/.exec(url.pathname);
+      const output = req.method === "POST" && /^\/runs\/([a-f0-9]{40})\/output$/.exec(url.pathname);
       const bearer = req.headers.authorization?.replace(/^Bearer /, "") ?? "";
       if (claim && req.method === "POST") {
         await dispatcher.claim(claim[1]!, bearer);
         res.writeHead(204).end();
         return;
       }
-      if (!diagnostics && !tokenMatches(bearer, token)) throw new KubeError(401);
+      if (!diagnostics && !output && !tokenMatches(bearer, token)) throw new KubeError(401);
       let body = "";
-      req.setEncoding("utf8");
+      let bytes = 0;
+      const decoder = new TextDecoder("utf-8", { fatal: true });
       for await (const chunk of req) {
-        body += String(chunk);
-        if (Buffer.byteLength(body) > (diagnostics ? 128 : 32) * 1024) throw new KubeError(413);
+        bytes += (chunk as Buffer).length;
+        if (bytes > (output ? JOB_STATUS_LIMIT_BYTES : (diagnostics ? 128 : 32) * 1024)) throw new KubeError(413);
+        try { body += decoder.decode(chunk as Buffer, { stream: true }); }
+        catch { throw new KubeError(400); }
+      }
+      try { body += decoder.decode(); } catch { throw new KubeError(400); }
+      if (output) {
+        await dispatcher.recordOutput(output[1]!, bearer, JSON.parse(body));
+        res.writeHead(204).end();
+        return;
       }
       if (diagnostics) {
         await dispatcher.recordDiagnostics(diagnostics[1]!, bearer, JSON.parse(body));
@@ -509,12 +573,14 @@ export async function serveJobDispatcher(dispatcher: JobDispatcher, token: strin
       let status;
       if (url.pathname === "/runs" && req.method === "POST") status = await dispatcher.dispatch(JSON.parse(body));
       else if (report && req.method === "GET") status = await dispatcher.failureReport(url.searchParams.get("job") ?? "", report[1]!);
-      else if (run && !run[2] && req.method === "GET") status = await dispatcher.status(url.searchParams.get("job") ?? "", run[1]!);
+      else if (run && !run[2] && req.method === "GET") status = await dispatcher.status(url.searchParams.get("job") ?? "", run[1]!, url.searchParams.get("outputReader") ?? undefined);
       else if (run?.[2] && req.method === "POST") {
         const args = z.object({ jobSlug: z.string() }).strict().parse(JSON.parse(body));
         status = await dispatcher.cancel(args.jobSlug, run[1]!);
       } else throw new KubeError(404);
-      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(status));
+      const response = JSON.stringify(status);
+      if (Buffer.byteLength(response) > JOB_STATUS_LIMIT_BYTES) throw new KubeError(503);
+      res.writeHead(200, { "content-type": "application/json" }).end(response);
     } catch (error) {
       res.writeHead(error instanceof KubeError ? error.status : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 503)
         .end("job request unavailable or refused");

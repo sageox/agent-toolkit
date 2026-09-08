@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CLI, run as exec, runCli } from "./cli-harness.ts";
@@ -59,6 +60,31 @@ beforeEach(() => {
   declare(shift());
 });
 afterEach(() => rmSync(bundle, { recursive: true, force: true }));
+
+it("requires explicit operator output retrieval on job status", async () => {
+  declare(shift(`    worker: {image: "example/worker@sha256:${"a".repeat(64)}", directory: /work}\n    output: {format: json}\n`));
+  const runId = "b".repeat(40);
+  const readers: (string | null)[] = [];
+  const server = createServer((req, res) => {
+    const reader = new URL(req.url!, "http://dispatcher").searchParams.get("outputReader");
+    readers.push(reader);
+    expect(req.headers.authorization).toBe("Bearer operator-credential");
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+      jobSlug: "shift", runId, startedAt: Date.now(), state: "finished", outcome: "completed",
+      output: { state: "available", ...(reader === "operator" ? { value: { version: 1, data: { records: [42] } } } : {}) },
+    }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const env = { AGENT_JOB_DISPATCHER_URL: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+    AGENT_JOB_DISPATCHER_TOKEN: "operator-credential" };
+  try {
+    for (const output of [false, true]) {
+      const { stdout } = await runCli(["job", "status", "shift", "--run-id", runId, "--bundle", bundle, ...(output ? ["--output"] : [])], env);
+      expect(JSON.parse(stdout).output).toEqual({ state: "available", ...(output ? { value: { version: 1, data: { records: [42] } } } : {}) });
+    }
+    expect(readers).toEqual([null, "operator"]);
+  } finally { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
 
 describe("sageox-agent job diagnostics", () => {
   it("retrieves retained diagnostics through operator Kubernetes access without a gateway token or bundle", async () => {
