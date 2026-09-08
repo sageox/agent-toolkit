@@ -1,8 +1,7 @@
 import { z } from "zod";
 import type { JobHostOptions, JobRun } from "./job-host.ts";
 
-const identifier = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,255}$/)
-  .refine((value) => !value.includes("://"), "expected an identifier, not a URL");
+const identifier = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,255}$/);
 const slug = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const subject = z.object({

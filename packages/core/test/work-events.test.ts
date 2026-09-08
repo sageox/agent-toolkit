@@ -87,9 +87,17 @@ it("contains asynchronous sink failures", async () => {
   expect(calls).toBe(1);
 });
 
-it.each(["id", "scope"])("rejects URL-shaped subject %s values", (field) => {
+it.each(["id", "scope"])("rejects URI delimiters in subject %s values", (field) => {
   const artifact = run.work!.artifacts![0]!;
-  expect(WorkReportSchema.safeParse({ artifacts: [{ ...artifact,
-    subject: { ...artifact.subject, [field]: "https://example.com/private-token" },
-  }] }).success).toBe(false);
+  for (const value of ["https://example.com/private-token", "mailto:private-token", "urn:private-token",
+    "file:/tmp/private-token", "FILE:/tmp/private-token", "issue:42"]) {
+    expect(WorkReportSchema.safeParse({ artifacts: [{ ...artifact,
+      subject: { ...artifact.subject, [field]: value },
+    }] }).success, value).toBe(false);
+  }
+  for (const value of ["42", "issue-42", "example/repo", "a_b.c"]) {
+    expect(WorkReportSchema.safeParse({ artifacts: [{ ...artifact,
+      subject: { ...artifact.subject, [field]: value },
+    }] }).success, value).toBe(true);
+  }
 });

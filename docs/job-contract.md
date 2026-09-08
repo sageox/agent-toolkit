@@ -363,10 +363,11 @@ named fleets. Consumers must ignore unsupported schema versions.
 A start means admission succeeded, before setup and process spawn. It is not proof
 that the process started: a later `crashed` result can report `executed: false`.
 `deadline_ms` is the declared duration (`wallClockMs + deadlineHeadroomMs`),
-not an absolute timestamp guessed before setup completes. Setup time does not consume
-the process budget. `JOB_DEADLINE_AT` remains the absolute wall-clock cutoff passed
-to the body; the host allows cleanup headroom after that cutoff. Refusals and overlap skips emit only
-a terminal record, with no admitted deadline. `run.completed` names a terminal
+not an absolute timestamp guessed before setup completes. For local jobs, setup time
+does not consume the process budget. `JOB_DEADLINE_AT` remains the absolute
+wall-clock cutoff passed to the body; the host allows cleanup headroom after that
+cutoff. Refusals and overlap skips emit only a terminal record, with no admitted
+deadline. `run.completed` names a terminal
 **event**, whose `outcome` can still be denied, skipped, crashed, abandoned, or
 `budget-bowout`. Its `occurred_at` is the host's settlement time.
 
@@ -382,6 +383,9 @@ observed outcome.
 External-dispatch jobs use the dispatcher's existing run ID and settlement. The
 gateway emits a start after dispatch admission, which can precede worker startup;
 a cached terminal result or dispatcher refusal emits only a terminal record.
+Their platform deadline remains admission-based: dispatch and worker startup consume
+the declared budget. The worker subtracts elapsed time since the request's `startedAt`
+before launching the body and can report a timeout without starting it.
 Current dispatcher results carry aggregate verdicts and optional execution facts,
 not individual checks or work metadata: these events are marked `partial`. This
 contract does not expand the worker's termination-log protocol or cloud policies.
@@ -435,9 +439,11 @@ work fields never change how gates mint verdicts. The exported
 
 Providers, checks, and next actors use lowercase letter/digit/hyphen identifiers
 of at most 64 characters, beginning with a letter. IDs/scopes use up to 256 ASCII
-letters/digits or `_.:/-`, beginning with a letter or digit. Arrays allow at most
-100 items. Unknown fields, invalid values, malformed JSON, missing files, and files
-over 64 KiB never become invented work. Terminal `report_status` distinguishes
+letters/digits or `_./-`, beginning with a letter or digit. Colons are excluded,
+so URI schemes cannot be embedded in either field. Put namespace information in
+`provider` and `kind`, and use the provider-native ID (for example, `42`, not
+`issue:42`). Arrays allow at most 100 items. Unknown fields, invalid values, malformed
+JSON, missing files, and files over 64 KiB never become invented work. Terminal `report_status` distinguishes
 `valid`, `missing`, `invalid`, and `oversized`; invalid/absent reports retain the
 existing unproven verdict and expose no work facts. Empty gates also stay unproven.
 A future incompatible vocabulary requires a new advertised version; producers
