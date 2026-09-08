@@ -374,16 +374,21 @@ for (const container of [...(pod.initContainers ?? []), ...(pod.containers ?? []
   }
 }
 
-for (const expected of [
-  { resources: ["secrets"], verbs: ["create"] },
-  { resources: ["configmaps"], verbs: ["get", "list", "create", "update", "delete"] },
-  { resources: ["jobs"], verbs: ["get", "create", "delete"] },
-  { resources: ["pods"], verbs: ["get", "list"] },
-]) {
+const expectedRules = [
+  { apiGroups: [""], resources: ["secrets"], verbs: ["create"] },
+  { apiGroups: [""], resources: ["configmaps"], verbs: ["get", "list", "create", "update", "delete"] },
+  { apiGroups: ["batch"], resources: ["jobs"], verbs: ["get", "create", "delete"] },
+  { apiGroups: [""], resources: ["pods"], verbs: ["get", "list"] },
+];
+if ((role?.rules ?? []).length !== expectedRules.length) {
+  throw new Error("dispatcher Role grants an unexpected number of rules");
+}
+for (const expected of expectedRules) {
   const rule = role?.rules?.find((candidate) =>
     JSON.stringify(candidate.resources) === JSON.stringify(expected.resources));
-  if (JSON.stringify(rule?.verbs) !== JSON.stringify(expected.verbs)) {
-    throw new Error(`dispatcher Role verbs for ${expected.resources[0]} are incorrect`);
+  if (JSON.stringify(rule?.verbs) !== JSON.stringify(expected.verbs)
+    || JSON.stringify(rule?.apiGroups) !== JSON.stringify(expected.apiGroups)) {
+    throw new Error(`dispatcher Role rule for ${expected.resources[0]} is incorrect`);
   }
 }
 NODE
