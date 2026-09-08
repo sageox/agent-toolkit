@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { JobHostOptions, JobRun } from "./job-host.ts";
 
-const identifier = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,255}$/);
+const identifier = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,255}$/)
+  .refine((value) => !value.includes("://"), "expected an identifier, not a URL");
 const slug = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const subject = z.object({
@@ -61,13 +62,14 @@ export const VerdictArtifactSchema = WorkReportSchema.extend({
 export type WorkCheck = { gate: string; executed: boolean; exitCode: number | null };
 export type WorkStart = Pick<JobRun, "jobSlug" | "runId" | "trigger" | "startedAt"> & {
   admittedAt: number;
-  deadlineAt: number;
+  deadlineMs: number;
 };
 
 // Includes the reserved wrapper and newline, below common container log buffers.
 export const MAX_WORK_EVENT_BYTES = 8 * 1024;
 export const MAX_WORK_REPORT_BYTES = 64 * 1024;
 
+/** Bound a JSONL record by dropping optional facts while preserving lifecycle identity. */
 export function workEventLine(event: Record<string, unknown>): string {
   const bounded = { ...event };
   const encode = () => JSON.stringify({ sageox_work_event: bounded }) + "\n";
@@ -133,7 +135,7 @@ export function jobWorkEvents(
   const identity = (run: WorkStart | JobRun) => ({
     schema_version: 1, agent, job: run.jobSlug, run_id: run.runId,
     trigger: run.trigger, started_at: new Date(run.startedAt).toISOString(),
-    ...(run.deadlineAt === undefined ? {} : { deadline_at: new Date(run.deadlineAt).toISOString() }),
+    ...(run.deadlineMs === undefined ? {} : { deadline_ms: run.deadlineMs }),
   });
   return {
     workEvents: true,

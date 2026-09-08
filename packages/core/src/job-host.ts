@@ -86,8 +86,8 @@ export type JobOutcome =
 export interface JobRun {
   work?: WorkReport;
   reportStatus?: "valid" | "missing" | "invalid" | "oversized";
-  /** Declared hard deadline, including cleanup headroom; absent for refusals. */
-  deadlineAt?: number;
+  /** Declared deadline duration, including cleanup headroom; absent for refusals. */
+  deadlineMs?: number;
   checks?: readonly WorkCheck[];
   jobSlug: string;
   runId: string;
@@ -153,7 +153,7 @@ export interface JobStart {
 /** The facts a run has before its body does. Named because four signatures below take it. */
 type RunBase = Pick<
   JobRun,
-  "jobSlug" | "runId" | "trigger" | "requestedBy" | "startedAt" | "parameters" | "deadlineAt" | "execution"
+  "jobSlug" | "runId" | "trigger" | "requestedBy" | "startedAt" | "parameters" | "deadlineMs" | "execution"
 >;
 
 /** {@link JobStart}, plus the record the run will end with. Never leaves this file. */
@@ -927,16 +927,16 @@ export class JobHost {
         }
         if (status.state === "finished") {
           const run = { ...externalRun(request, status),
-            ...(status.outcome === "skipped-overlap" ? {} : { deadlineAt: status.startedAt + jobDeadlineMs(job) }) };
+            ...(status.outcome === "skipped-overlap" ? {} : { deadlineMs: jobDeadlineMs(job) }) };
           this.observeRun(run);
           return { runId, refused: run, finished: Promise.resolve(run) };
         }
         base.startedAt = status.startedAt;
-        this.observeStart(base, status.startedAt + jobDeadlineMs(job));
+        this.observeStart(base, jobDeadlineMs(job));
         // A gateway shutdown stops observation only. Kubernetes still owns the worker,
         // deadline and durable record, so shutdown must never mark this run abandoned.
         const finished = this.opts.external!.wait(request, this.externalWaits.signal).then(async (run) => {
-          run.deadlineAt = base.deadlineAt;
+          run.deadlineMs = base.deadlineMs;
           this.observeRun(run);
           await this.settle(job, run, detached, answer);
           return run;
@@ -944,7 +944,7 @@ export class JobHost {
         return { runId, refused: null, finished };
       }
       running = true;
-      this.observeStart(base, Date.now() + jobDeadlineMs(job));
+      this.observeStart(base, jobDeadlineMs(job));
       if (detached) this.owed.set(runId, () => this.giveUp(job, base, admission, answer));
       return {
         runId,
@@ -1041,24 +1041,24 @@ export class JobHost {
     }
     const report = await this.readReport(verdictPath, job);
     const { gates, work, reportStatus } = report;
-    const checks = [{ gate: jobGate(job), executed: true, exitCode: execution.exitCode }, ...report.checks];
-
     // A body this host stopped never got to speak, whatever it managed to exit with on the
     // way out — a job told to stop has not finished its work, so a 0 from it is not a
     // statement about that work. `exitCode: null` is the one input that yields UNKNOWN for
     // a process that ran, and it is the same encoding a signal death already arrives as.
-    const processGate = verdictFromGate({
+    const processCheck = {
       gate: jobGate(job),
       executed: true,
       exitCode: execution.bowedOut || execution.interrupted ? null : execution.exitCode,
-    });
+    };
+    const processGate = verdictFromGate(processCheck);
+    const checks = [processCheck, ...report.checks];
 
     if (execution.bowedOut) {
       return {
         outcome: "budget-bowout",
         execution: execution.info,
         gates: [processGate, ...gates],
-      work, checks, reportStatus,
+        work, checks, reportStatus,
         reason:
           `the job body was still running after its ${job.budget.wallClockMs}ms wall clock ` +
           `and was asked to stop, with ${job.budget.deadlineHeadroomMs}ms to finish writing`,
@@ -1069,7 +1069,7 @@ export class JobHost {
         outcome: "crashed",
         execution: execution.info,
         gates: [processGate, ...gates],
-      work, checks, reportStatus,
+        work, checks, reportStatus,
         reason: `the job body died on ${execution.signal ?? "an unreported signal"}`,
       };
     }
@@ -1150,7 +1150,6 @@ export class JobHost {
         (this.opts.workEvents ? process.stdout : process.stderr).on("drain", resumeErr);
         child.stdout!.setEncoding("utf8").on("data", (text: string) => stdout.write(text));
         child.stderr!.setEncoding("utf8").on("data", (text: string) => stderr.write(text));
-
       }
       child.once("spawn", () => { base.execution = info = { ...info, state: "running" }; publish(); });
       const checkpoint = job.worker ? setInterval(() => publish(), 1000) : undefined;
@@ -1174,8 +1173,8 @@ export class JobHost {
       const bowOut = setTimeout(() => {
         bowedOut = true;
         stop("SIGTERM");
-      }, base.deadlineAt === undefined ? job.budget.wallClockMs : Math.max(0, Number(env.JOB_DEADLINE_AT) - Date.now()));
-      const hardStop = setTimeout(() => stop("SIGKILL"), base.deadlineAt === undefined ? jobDeadlineMs(job) : Math.max(0, base.deadlineAt - Date.now()));
+      }, job.budget.wallClockMs);
+      const hardStop = setTimeout(() => stop("SIGKILL"), jobDeadlineMs(job));
 
       const settle = (execution: Execution) => {
         clearTimeout(bowOut);
@@ -1278,7 +1277,7 @@ export class JobHost {
       JOB_VERDICT_PATH: verdictPath,
       JOB_WORK_SCHEMA_VERSION: this.opts.workEvents ? "1" : "",
       /** When this host will ask the body to stop. The body should bow out before it. */
-      JOB_DEADLINE_AT: String((base.deadlineAt ?? Date.now() + jobDeadlineMs(job)) - job.budget.deadlineHeadroomMs),
+      JOB_DEADLINE_AT: String(Date.now() + job.budget.wallClockMs),
       JOB_HARNESS_TIMEOUT_MS: String(job.budget.harnessTimeoutMs),
       JOB_MAX_ITERATIONS: String(job.budget.maxIterations),
       JOB_MAX_ATTEMPTS: String(job.budget.maxAttempts),
@@ -1357,15 +1356,17 @@ export class JobHost {
     return complete;
   }
 
-  private observeStart(base: RunBase, deadlineAt: number): void {
+  /** Record admission facts even without a listener; observer failures cannot deny a run. */
+  private observeStart(base: RunBase, deadlineMs: number): void {
+    base.deadlineMs = deadlineMs;
     if (!this.opts.onStart) return;
-    base.deadlineAt = deadlineAt;
     const { jobSlug, runId, trigger, startedAt } = base;
     try {
-      Promise.resolve(this.opts.onStart?.({ jobSlug, runId, trigger, startedAt, admittedAt: Date.now(), deadlineAt })).catch(() => {});
+      Promise.resolve(this.opts.onStart?.({ jobSlug, runId, trigger, startedAt, admittedAt: Date.now(), deadlineMs })).catch(() => {});
     } catch { /* Observers cannot change admission. */ }
   }
 
+  /** Publish local or dispatched settlement without letting a listener reject it. */
   private observeRun(run: JobRun): void {
     try { Promise.resolve(this.opts.onRun?.(run)).catch(() => {}); }
     catch { /* Observers cannot change settlement. */ }

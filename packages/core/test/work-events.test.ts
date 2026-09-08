@@ -17,7 +17,7 @@ describe("work events", () => {
     expect(jobWorkEvents("worker", {})).toEqual({});
     const lines: string[] = [];
     const opts = jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" }, (line) => lines.push(line));
-    opts.onStart!({ ...run, admittedAt: 1000, deadlineAt: 6000 });
+    opts.onStart!({ ...run, admittedAt: 1000, deadlineMs: 6000 });
     opts.onRun!(run);
     expect(lines).toHaveLength(2);
     expect(lines.join("")).not.toContain("secret");
@@ -77,7 +77,19 @@ it("contains output failures and keeps identity/outcome when optional facts over
 });
 
 it("contains asynchronous sink failures", async () => {
-  const opts = jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" }, async () => { throw new Error("sink unavailable"); });
+  let calls = 0;
+  const opts = jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" }, async () => {
+    calls++;
+    throw new Error("sink unavailable");
+  });
   opts.onRun!(run);
   await new Promise((resolve) => setImmediate(resolve));
+  expect(calls).toBe(1);
+});
+
+it.each(["id", "scope"])("rejects URL-shaped subject %s values", (field) => {
+  const artifact = run.work!.artifacts![0]!;
+  expect(WorkReportSchema.safeParse({ artifacts: [{ ...artifact,
+    subject: { ...artifact.subject, [field]: "https://example.com/private-token" },
+  }] }).success).toBe(false);
 });

@@ -499,3 +499,18 @@ it("finishes the job when the stdout consumer disconnects after admission", asyn
     expect(readFileSync(completed, "utf8")).toBe("done");
   } finally { child.kill("SIGKILL"); }
 });
+
+it("wraps the on-request denial explanation with the host status", async () => {
+  vi.stubEnv("AGENT_WORK_EVENTS", "1");
+  try {
+    // On-request only needs no switch or brain, so this path has no startup warning lines.
+    declare('  - slug: parked\n    archetype: queue\n    description: Parked work.\n' +
+      '    trigger: {onRequest: true}\n    suspend: true\n    budget: {wallClockMs: 4000}\n    run: {command: ./body.sh}\n');
+    body('exit 99');
+    const { stdout, code } = await job("parked", "--trigger", "on-request");
+    expect(code, stdout).toBe(0);
+    const records = stdout.trim().split("\n").map((line) => JSON.parse(line));
+    expect(records.filter((r) => r.sageox_work_event).map((r) => r.sageox_work_event.event)).toEqual(["run.completed"]);
+    expect(records.some((r) => r.job_diagnostic?.text.includes("does not bypass"))).toBe(true);
+  } finally { vi.unstubAllEnvs(); }
+});

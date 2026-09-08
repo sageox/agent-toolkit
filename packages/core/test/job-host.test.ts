@@ -222,6 +222,7 @@ describe("bounding", () => {
     // it managed to say on the way out.
     expect(run.outcome).toBe("budget-bowout");
     expect(run.verdict.status).toBe("UNKNOWN");
+    expect(run.checks?.[0]).toEqual({ gate: "job:sweep", executed: true, exitCode: null });
   });
 
   it("stops what the body left behind when the body exits under its budget", async () => {
@@ -930,7 +931,7 @@ describe("structured work lifecycle", () => {
   it("emits admission before completion for both scheduled and requested runs", async () => {
     const events: string[] = [];
     const h = new JobHost({ workDir, env: { ...process.env, MARKER: marker },
-      onStart: (r) => { events.push(`start:${r.trigger}`); expect(r.deadlineAt).toBeGreaterThan(r.startedAt); },
+      onStart: (r) => { events.push(`start:${r.trigger}`); expect(r.deadlineMs).toBe(jobDeadlineMs(job())); },
       onRun: (r) => events.push(`end:${r.trigger}`), workEvents: true,
     });
     const report = { gates: [{ gate: "ci", executed: true, exitCode: 0 }],
@@ -988,7 +989,7 @@ it("reports refusal, overlap, failure and timeout without confusing admission wi
   for (const run of [failed, timeout]) {
     const own = events.filter((event) => event.run_id === run.runId);
     expect(own.map((event) => event.event)).toEqual(["run.started", "run.completed"]);
-    expect(own[1]).toMatchObject({ outcome: run.outcome, verdict: run.verdict.status, deadline_at: own[0]!.deadline_at });
+    expect(own[1]).toMatchObject({ outcome: run.outcome, verdict: run.verdict.status, deadline_ms: own[0]!.deadline_ms });
   }
   expect(failed.verdict.status).toBe("FAIL");
   expect(timeout.outcome).toBe("budget-bowout");
@@ -1042,4 +1043,22 @@ it("keeps running and releases single-flight when event and diagnostic output th
     }
     expect(spawns()).toBe(2);
   } finally { sink.mockRestore(); }
+});
+
+it.each([false, true])("gives the process its full budget after slow setup (events=%s)", async (enabled) => {
+  const { jobWorkEvents } = await import("../src/work-events.ts");
+  const h = new JobHost({ workDir, ...jobWorkEvents("worker", { AGENT_WORK_EVENTS: enabled ? "1" : "0" }, () => {}) });
+  vi.useFakeTimers({ toFake: ["Date"] });
+  // Advance setup time without sleeping; process timers remain real.
+  const setup = vi.spyOn(h as unknown as { workDir(): Promise<string> }, "workDir").mockImplementation(async () => {
+    vi.setSystemTime(Date.now() + 700);
+    return workDir;
+  });
+  try {
+    const run = await h.tick(body(`${WRITE}JSON.stringify({gates:[{gate:"ci",executed:true,exitCode:0}]}))`,
+      { budget: "{wallClockMs: 500, deadlineHeadroomMs: 100}" }));
+    expect(run.outcome).toBe("completed");
+    expect(run.verdict.status).toBe("PASS");
+    expect(run.deadlineMs).toBe(600);
+  } finally { setup.mockRestore(); vi.useRealTimers(); }
 });

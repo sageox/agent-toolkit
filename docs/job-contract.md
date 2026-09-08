@@ -349,21 +349,23 @@ is required. Deployments must wait for a versioned toolkit release containing th
 contract before enabling it, and pin that release's image digest.
 
 A top-level `sageox_work_event` key is reserved for host lifecycle records. Read
-only stdout, accept `schema_version: 1`, and deduplicate by `(agent, run_id, event)`.
+only stdout, ignore ordinary host log lines, accept `schema_version: 1`, and deduplicate by `(agent, run_id, event)`.
 `run_id` is the host's existing opaque ID: do not derive another one from timestamps
 or artifact IDs. Scope the agent name by deployment when combining independently
 named fleets. Consumers must ignore unsupported schema versions.
 
 ```jsonl
-{"sageox_work_event":{"schema_version":1,"agent":"reviewer","job":"triage","run_id":"opaque-run-id","trigger":"schedule","started_at":"2026-09-07T03:00:00.000Z","deadline_at":"2026-09-07T03:05:00.000Z","event":"run.started","occurred_at":"2026-09-07T03:00:00.010Z"}}
-{"sageox_work_event":{"schema_version":1,"agent":"reviewer","job":"triage","run_id":"opaque-run-id","trigger":"schedule","started_at":"2026-09-07T03:00:00.000Z","deadline_at":"2026-09-07T03:05:00.000Z","event":"run.completed","occurred_at":"2026-09-07T03:00:12.000Z","outcome":"completed","verdict":"PASS","checks":[{"gate":"job:triage","executed":true,"exit_code":0,"source":"host"},{"gate":"ci","executed":true,"exit_code":0,"source":"producer"}],"report_status":"valid","partial":false}}
+{"sageox_work_event":{"schema_version":1,"agent":"reviewer","job":"triage","run_id":"opaque-run-id","trigger":"schedule","started_at":"2026-09-07T03:00:00.000Z","deadline_ms":300000,"event":"run.started","occurred_at":"2026-09-07T03:00:00.010Z"}}
+{"sageox_work_event":{"schema_version":1,"agent":"reviewer","job":"triage","run_id":"opaque-run-id","trigger":"schedule","started_at":"2026-09-07T03:00:00.000Z","deadline_ms":300000,"event":"run.completed","occurred_at":"2026-09-07T03:00:12.000Z","outcome":"completed","verdict":"PASS","checks":[{"gate":"job:triage","executed":true,"exit_code":0,"source":"host"},{"gate":"ci","executed":true,"exit_code":0,"source":"producer"}],"report_status":"valid","partial":false}}
 ```
 
 `started_at` records the attempt; the start event's `occurred_at` records admission.
 A start means admission succeeded, before setup and process spawn. It is not proof
 that the process started: a later `crashed` result can report `executed: false`.
-`deadline_at` is the declared hard deadline including cleanup headroom;
-`JOB_DEADLINE_AT` is earlier by that headroom. Refusals and overlap skips emit only
+`deadline_ms` is the declared duration (`wallClockMs + deadlineHeadroomMs`),
+not an absolute timestamp guessed before setup completes. Setup time does not consume
+the process budget. `JOB_DEADLINE_AT` remains the absolute wall-clock cutoff passed
+to the body; the host allows cleanup headroom after that cutoff. Refusals and overlap skips emit only
 a terminal record, with no admitted deadline. `run.completed` names a terminal
 **event**, whose `outcome` can still be denied, skipped, crashed, abandoned, or
 `budget-bowout`. Its `occurred_at` is the host's settlement time.

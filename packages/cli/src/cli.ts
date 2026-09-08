@@ -1864,13 +1864,13 @@ async function jobCmd(argv: string[]): Promise<void> {
   // Headline, then the gates beneath it — the shape a job's status post takes, and the
   // reason it takes it: the verdict is what gets read, and the gates are why it says that.
   // The same rendering the chat tool returns, so one run reads one way wherever it lands.
-  const description = describeJobRun(run, job.report?.proven);
-  if (process.env.AGENT_WORK_EVENTS === "1") writeJobDiagnostic("host", description);
-  else process.stdout.write(description);
+  let description = describeJobRun(run, job.report?.proven);
   const denied = run.outcome === "denied-switch" || run.outcome === "denied-suspend";
   if (denied && trigger === "on-request") {
-    process.stdout.write("  a run started from this CLI is `system`, and does not bypass\n");
+    description += "  a run started from this CLI is `system`, and does not bypass\n";
   }
+  if (process.env.AGENT_WORK_EVENTS === "1") writeJobDiagnostic("host", description);
+  else process.stdout.write(description);
 
   // The exit code answers "did the run happen", not "what did it find". A job that ran its
   // gates and found a real failure is a working job, and a green job with a FAIL verdict
