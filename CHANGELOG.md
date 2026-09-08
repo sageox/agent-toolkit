@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A repository that authors `agent.yaml` files can check them in CI.** `sageox-agent
+  validate <path…>` parses each file against the schema `run` loads at startup and exits
+  non-zero if any is invalid, naming the field path and the expectation for each problem.
+  It takes paths and nothing else: no agent home, no credentials, no network, and it
+  writes nothing. Reachable without a checkout through the runtime image, whose entry
+  point is the CLI — `docker run --rm -v "$PWD:/w" ghcr.io/sageox/agent-base:<tag>
+  validate /w/agent.yaml`. `doctor` still answers the rest, and a parked job is still
+  validated with the file it sits in. See
+  [the deployment contract](docs/deployment-contract.md#validating-a-manifest-before-it-merges).
+
 ## [0.4.1] - 2026-09-08
 
 On publication, `ghcr.io/sageox/agent-base:0.4.1` takes `:latest` and advances `:0.4`.

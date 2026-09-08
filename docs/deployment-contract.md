@@ -20,6 +20,35 @@ The runtime does not need an inbound port: Buzz and Slack use outbound connectio
 therefore should not create a Service or Ingress unless a future surface explicitly needs
 one.
 
+## Validating a manifest before it merges
+
+`sageox-agent validate <path…>` parses each file against the same schema `run` loads at
+startup and exits non-zero if any is invalid. It takes paths and nothing else — no agent
+home, no credentials, no network — so a repository that authors `agent.yaml` files can gate
+them in CI. The runtime image is the entry point, and its `validate` is the same code this
+repository's `./bin/sageox-agent validate` runs:
+
+```bash
+# The same tag the deployment runs: the gate is only worth having if it holds the schema
+# the runtime about to load this file holds.
+docker run --rm -v "$PWD:/w" ghcr.io/sageox/agent-base:0.4 validate /w/agent.yaml
+```
+
+Two properties make this worth a CI step rather than a later `doctor` run:
+
+- **A parked job is validated with the rest.** The manifest parses as a unit, so a job
+  carrying `suspend: true` and a missing required field takes down every job beside it.
+- **The failure is time-shifted, not silent.** Without the gate it merges green, deploys,
+  and arrives as an unrelated job's failure on its next tick.
+
+`doctor` remains the pre-flight for a configured agent — it also reads `.env`, resolves
+every declared `secretRef`, and checks the policy and the directory record. `validate`
+answers only the manifest half, which is the half a checkout can answer.
+
+**Do not mirror the schema downstream.** A hand-kept copy validates today's required fields
+and goes quiet the moment this repository adds one, reporting green on exactly the manifest
+the runtime will refuse.
+
 ## Jobs
 
 `jobs[]` declares an agent's scheduled work — a trigger, a hard switch, a bound, and the

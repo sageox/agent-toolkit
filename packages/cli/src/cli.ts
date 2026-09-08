@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { dirname, resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { z } from "zod";
 import {
   Gateway,
   MockBrain,
@@ -2144,6 +2145,65 @@ function manifestRespondToLabel(respondTo: string): string {
   return respondTo === "nobody" ? "nobody (it answers no one)" : respondTo;
 }
 
+/**
+ * `validate <path…>` — will the runtime load this file?
+ *
+ * `doctor` already answers that, through the same `readManifest` `run` calls at startup, but
+ * it asks more beside it: it reads `.env`, resolves every declared `secretRef`, and reads the
+ * agent's directory record off the relay. So it needs an agent home and a credential, and a
+ * repository that only *authors* `agent.yaml` files has neither. This takes paths, touches
+ * nothing else, and exits non-zero — the shape a CI step can hold.
+ *
+ * The schema is authored here, so the only alternative was a hand-kept copy downstream,
+ * which reports green on exactly the manifest this one refuses one release later.
+ *
+ * Every path is reported rather than stopping at the first failure: the manifest parses as
+ * a unit, so one job's missing field takes the whole file down, and an author fixing it
+ * wants the rest of the run's findings in the same output.
+ */
+function validateCmd(argv: string[]): boolean {
+  if (!argv.length) {
+    process.stderr.write("validate needs a path: `sageox-agent validate agent.yaml [more.yaml…]`\n");
+    return false;
+  }
+
+  let invalid = 0;
+  for (const path of argv) {
+    try {
+      // Named apart from a parse failure, because a glob that matched nothing and a manifest
+      // that does not load are different things to go fix. This is also why `readManifest`'s
+      // own absent-file message never fires here: it tells the reader to run `init`, which
+      // is not what a CI step pointed at the wrong path should do.
+      if (!existsSync(path)) throw new Error("no such file");
+      // `readManifest`, not `loadManifest`: `run` normalizes `owner`, `allowlist` and
+      // `killSwitchParkBy` after the schema passes, and `toHexPubkey` throws on a mistyped
+      // npub or an nsec written where a public key belongs. The schema admits both as
+      // strings, so validating one rung below the runtime would pass a file the runtime
+      // refuses at startup — this command's own failure mode.
+      const manifest = readManifest(path);
+      process.stdout.write(
+        `  ok    ${path} — ${manifest.name}, ${manifest.surfaces.length} surface(s), ` +
+          `${manifest.jobs.length} job(s)\n`,
+      );
+    } catch (error) {
+      invalid++;
+      // Zod's own rendering, because its default `message` is the whole issue list as JSON:
+      // true, and a screen of it for the two fields a reviewer has to fix. A zod that ever
+      // differs between this package and core falls through to that raw message.
+      const detail = error instanceof z.ZodError ? z.prettifyError(error) : errorText(error);
+      process.stdout.write(`  FAIL  ${path}\n`);
+      for (const line of detail.split("\n")) process.stdout.write(`        ${line}\n`);
+    }
+  }
+
+  if (invalid) {
+    process.stderr.write(`\n${invalid} of ${argv.length} file(s) invalid.\n`);
+    return false;
+  }
+  process.stdout.write(`\n${argv.length} file(s) valid.\n`);
+  return true;
+}
+
 async function doctorCmd(argv: string[]): Promise<boolean> {
   const agent = await agentFrom(argv);
   loadDotEnv(agent.env);
@@ -2745,6 +2805,10 @@ checking a relay:
   probe --relay <url> [--agent x]  connect read-only and report what it actually serves
 
 running it:
+  validate <path…>             parse each agent.yaml against the schema the runtime loads,
+                               and exit non-zero if any is invalid. No agent home, no
+                               credentials, no network — the one command a repository that
+                               authors manifests can run against a checkout in CI
   doctor [--bundle <dir>]      check config, credentials, and policy before running
   run [--bundle <dir>]         run every configured surface locally (Ctrl+C to stop)
   job run <slug> [--trigger schedule|on-request|webhook]
@@ -2789,6 +2853,11 @@ const commands: Record<string, (argv: string[]) => Promise<void> | void> = {
   probe: probeCmd,
   repos: reposCmd,
   mcp: mcpAddCmd,
+  // `exitCode`, not `exit`: a report of any size reaches a pipe whole. `process.exit`
+  // discards pending stdout writes, and a piped stdout is where every CI run reads this.
+  validate: (argv) => {
+    if (!validateCmd(argv)) process.exitCode = 1;
+  },
   doctor: async (argv) => {
     if (!await doctorCmd(argv)) process.exit(1);
   },
