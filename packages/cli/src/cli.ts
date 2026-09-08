@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { dirname, resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { z } from "zod";
 import {
   Gateway,
   MockBrain,
@@ -2144,6 +2145,59 @@ function manifestRespondToLabel(respondTo: string): string {
   return respondTo === "nobody" ? "nobody (it answers no one)" : respondTo;
 }
 
+/**
+ * `validate <path…>` — will the runtime load this file?
+ *
+ * `doctor` already answers that, through the same `loadManifest` the gateway calls at
+ * startup, but it asks more beside it: it reads `.env`, resolves every declared `secretRef`,
+ * and reads the agent's directory record off the relay. So it needs an agent home and a
+ * credential, and a repository that only *authors* `agent.yaml` files has neither. This
+ * takes paths, touches nothing else, and exits non-zero — the shape a CI step can hold.
+ *
+ * The schema is authored here, so the only alternative was a hand-kept copy downstream,
+ * which reports green on exactly the manifest this one refuses one release later.
+ *
+ * Every path is reported rather than stopping at the first failure: the manifest parses as
+ * a unit, so one job's missing field takes the whole file down, and an author fixing it
+ * wants the rest of the run's findings in the same output.
+ */
+function validateCmd(argv: string[]): boolean {
+  if (!argv.length) {
+    process.stderr.write("validate needs a path: `sageox-agent validate agent.yaml [more.yaml…]`\n");
+    return false;
+  }
+
+  let invalid = 0;
+  for (const path of argv) {
+    try {
+      // Named apart from a parse failure, because a glob that matched nothing and a manifest
+      // that does not load are different things to go fix, and `readFileSync` reports the
+      // second one's shape for both.
+      if (!existsSync(path)) throw new Error("no such file");
+      const manifest = loadManifest(readFileSync(path, "utf8"));
+      process.stdout.write(
+        `  ok    ${path} — ${manifest.name}, ${manifest.surfaces.length} surface(s), ` +
+          `${manifest.jobs.length} job(s)\n`,
+      );
+    } catch (error) {
+      invalid++;
+      // Zod's own rendering, because its default `message` is the whole issue list as JSON:
+      // true, and a screen of it for the two fields a reviewer has to fix. A zod that ever
+      // differs between this package and core falls through to that raw message.
+      const detail = error instanceof z.ZodError ? z.prettifyError(error) : errorText(error);
+      process.stdout.write(`  FAIL  ${path}\n`);
+      for (const line of detail.split("\n")) process.stdout.write(`        ${line}\n`);
+    }
+  }
+
+  if (invalid) {
+    process.stderr.write(`\n${invalid} of ${argv.length} file(s) invalid.\n`);
+    return false;
+  }
+  process.stdout.write(`\n${argv.length} file(s) valid.\n`);
+  return true;
+}
+
 async function doctorCmd(argv: string[]): Promise<boolean> {
   const agent = await agentFrom(argv);
   loadDotEnv(agent.env);
@@ -2745,6 +2799,10 @@ checking a relay:
   probe --relay <url> [--agent x]  connect read-only and report what it actually serves
 
 running it:
+  validate <path…>             parse each agent.yaml against the schema the runtime loads,
+                               and exit non-zero if any is invalid. No agent home, no
+                               credentials, no network — the one command a repository that
+                               authors manifests can run against a checkout in CI
   doctor [--bundle <dir>]      check config, credentials, and policy before running
   run [--bundle <dir>]         run every configured surface locally (Ctrl+C to stop)
   job run <slug> [--trigger schedule|on-request|webhook]
@@ -2789,6 +2847,9 @@ const commands: Record<string, (argv: string[]) => Promise<void> | void> = {
   probe: probeCmd,
   repos: reposCmd,
   mcp: mcpAddCmd,
+  validate: (argv) => {
+    if (!validateCmd(argv)) process.exit(1);
+  },
   doctor: async (argv) => {
     if (!await doctorCmd(argv)) process.exit(1);
   },
