@@ -40,6 +40,7 @@ trap 'rm -rf "$work"' EXIT
 # Three declared jobs across two agents: one scheduled, one on-request, one parked.
 render
 
+absent 'name: AGENT_WORK_EVENTS'
 counted 2 "kind: CronJob"
 # Anchored, because a separator swallowed into the end of the preceding line still reads as
 # `---` to a substring search while collapsing both objects into one document — of which
@@ -105,6 +106,26 @@ rendered=$(helm template agents "$chart" --values "$values" --show-only template
 present "claimName: agents-harry"
 present "claimName: agents-ida"
 absent "emptyDir"
+absent 'name: AGENT_WORK_EVENTS'
+
+# Work events reach both CLI hosts, only for the agent that opted in. This includes
+# local CronJobs, which otherwise have no env stanza at all.
+for template in deployment cronjob; do
+  rendered=$(helm template agents "$chart" --values "$values" \
+    --set agents.harry.workEvents=true --show-only "templates/$template.yaml")
+  counted 1 'name: AGENT_WORK_EVENTS'
+  if ! grep -A1 -F 'name: AGENT_WORK_EVENTS' <<<"$rendered" | grep -qF 'value: "1"'; then
+    fail "work events must use the runtime's exact opt-in value in $template"
+  fi
+  rendered=$(helm template agents "$chart" --values "$values" \
+    --set agents.harry.workEvents=false --show-only "templates/$template.yaml")
+  absent 'name: AGENT_WORK_EVENTS'
+done
+if helm template agents "$chart" --values "$values" \
+  --set-string agents.harry.workEvents=false >"$work/invalid" 2>&1; then
+  fail 'a string workEvents value was accepted instead of a boolean'
+fi
+grep -qF 'workEvents' "$work/invalid" || fail 'workEvents was refused for the wrong reason'
 
 # `persistence.jobCheckouts` mounts the one thing on the claim a scheduled run could not
 # cheaply build for itself: the checkouts the agent Pod clones and fast-forwards. Narrowed
@@ -293,6 +314,7 @@ grep -qF "harry/secrets and harry/jobSecrets" <<<"$out" \
 # External schedules are launchers: they retain admission credentials, but receive no
 # task credentials, mutable checkout, or Kubernetes token. One dispatcher serves all jobs.
 render --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set agents.harry.workEvents=true \
   --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
   --set 'agents.harry.jobs[0].worker.secrets.TASK_TOKEN.name=task-credentials' \
   --set 'agents.harry.jobs[0].worker.secrets.TASK_TOKEN.key=token' \
@@ -302,6 +324,7 @@ render --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
   --set agents.harry.serviceAccount.automountJobToken=true
 present 'name: AGENT_JOB_DISPATCHER_URL'
 present 'name: AGENT_JOB_REQUEST_ID'
+counted 1 'name: AGENT_WORK_EVENTS'
 absent 'task-credentials'
 absent 'old-job-secrets'
 absent 'mountPath: /agents/harry/workspace/repos'

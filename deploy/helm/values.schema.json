@@ -152,6 +152,10 @@
         "terminationGracePeriodSeconds", "resources", "sharedVolumes"
       ],
       "properties": {
+        "workEvents": {
+          "type": "boolean",
+          "description": "Opt in to structured job lifecycle events on the agent Deployment and scheduled job hosts. Omitted or false preserves ordinary logging. Requires toolkit 0.4.1 or newer."
+        },
         "dispatcher": {
           "type": "object",
           "additionalProperties": false,

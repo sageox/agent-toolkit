@@ -64,6 +64,10 @@ spec:
           env:
             - name: BRAIN_MCP_HOST
               value: 127.0.0.1
+            {{- if $agent.workEvents }}
+            - name: AGENT_WORK_EVENTS
+              value: "1"
+            {{- end }}
             {{- if $agent.dispatcher }}
             {{- include "agent.dispatcherEnv" $context | nindent 12 }}
             {{- end }}
