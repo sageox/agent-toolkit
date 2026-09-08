@@ -135,9 +135,9 @@ contain only a token hash; the claim Secret is projected into that worker and ga
 with its Job. The dispatcher cannot read Secrets directly, but creating workloads is privileged: keep
 its identity and API capability outside the brain. Gateway and workers do not mount a
 Kubernetes API token. A worker has its own ServiceAccount; the chart rejects reuse of the
-gateway or dispatcher accounts and Kubernetes Secret objects across every agent in the
-release. Accounts and credentials provisioned outside this release still require an
-operator to check their permissions.
+gateway or dispatcher accounts and of gateway, dispatcher, or scheduled-job Kubernetes
+Secret objects across every agent in the release. Accounts and credentials provisioned
+outside this release still require an operator to check their permissions.
 
 Install the release in a **dedicated namespace** (for example, `helm install agents
 ./deploy/helm --namespace agent-workloads --create-namespace ...`). This namespace is the
@@ -167,9 +167,12 @@ checks in the body remain its responsibility. No new approval workflow is introd
 
 Run IDs are backed by ConfigMaps, independent of gateway/dispatcher restarts. Repeating the
 same job and inputs within the same inbound message reuses an ID; use a new message for a
-new intentional execution. Scheduled launcher replacements use the scheduling Job's UID.
-Atomic ConfigMap creation and resource-version updates serialize workers across processes
-and across triggers. Overlap is refused, not queued.
+new intentional execution. The chart refuses external workers when rendered for Kubernetes
+older than 1.34. Scheduled launchers use the owning Job's
+`batch.kubernetes.io/controller-uid` label as their request ID, so replacement Pods for one
+Job keep one dispatcher request identity; a new scheduled Job gets a new identity. Atomic
+ConfigMap creation and resource-version updates serialize workers across processes and
+across triggers. Overlap is refused, not queued.
 
 Each admission stores the reviewed job and its worker identity, secret references and
 resource limits. A dispatcher restart or profile update cannot change an admitted run's

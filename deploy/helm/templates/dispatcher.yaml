@@ -97,7 +97,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       initContainers:
         {{- /* Reuse bundle staging without mounting any gateway or task credential. */}}
-        {{- include "agent.stageConfig" (dict "root" $ "name" $name "agent" (merge (dict "sharedVolumes" list) (deepCopy $agent))) | nindent 8 }}
+        {{- include "agent.stageConfig" (dict "root" $ "name" $name "agent" (mergeOverwrite (deepCopy $agent) (dict "sharedVolumes" list))) | nindent 8 }}
       containers:
         - name: dispatcher
           image: {{ $.Values.imageRef | quote }}
