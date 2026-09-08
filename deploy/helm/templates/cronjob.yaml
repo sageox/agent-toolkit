@@ -138,13 +138,19 @@ whole of what the second mount buys.
                 - --job-secrets
                 - {{ include "agent.jobSecretsMountPath" $context }}
                 {{- end }}
-              {{- if $job.worker }}
+              {{- if or $job.worker $agent.workEvents }}
               env:
+                {{- if $agent.workEvents }}
+                - name: AGENT_WORK_EVENTS
+                  value: "1"
+                {{- end }}
+                {{- if $job.worker }}
                 {{- include "agent.dispatcherEnv" $context | nindent 16 }}
                 - name: AGENT_JOB_REQUEST_ID
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.labels['batch.kubernetes.io/controller-uid']
+                {{- end }}
               {{- end }}
               resources:
                 {{- toYaml $agent.resources | nindent 16 }}

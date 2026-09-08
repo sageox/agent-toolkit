@@ -51,7 +51,7 @@ Or depend on it, and nest this chart's values under its name. Helm hands every s
 # Chart.yaml
 dependencies:
   - name: agent
-    version: 0.12.0
+    version: 0.12.1
     repository: "file://../agent-toolkit/deploy/helm"
 ```
 
@@ -62,6 +62,28 @@ agent:
   agents:
     harry: { ... }
 ```
+
+## Structured job logs
+
+With toolkit **0.4.1 or newer**, set `agents.<name>.workEvents: true` to enable
+`AGENT_WORK_EVENTS=1` on that agent's Deployment and CronJob hosts. Omitted or
+`false` preserves ordinary logging. Pin `imageRef` to the release's published digest.
+
+```yaml
+agents:
+  harry:
+    workEvents: true  # add to this agent's existing values
+```
+
+Collect `sageox_work_event` records from those containers' stdout. Child diagnostics
+use a separate envelope. External jobs report lifecycle and aggregate results from
+the launching host; their events remain partial because the dispatcher does not
+return individual worker checks or work metadata. See the
+[work event contract](../../docs/job-contract.md#structured-work-events-schema-1).
+
+Structured job answers need no chart setting: declare `output: {format: json}` in
+the bundle's `agent.yaml`, and use workers built from the same toolkit release as
+the gateway and dispatcher. See [structured answers](../../docs/external-jobs.md#structured-answers).
 
 ## Where a bundle comes from
 

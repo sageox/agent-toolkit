@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-08
+
+On publication, `ghcr.io/sageox/agent-base:0.4.1` takes `:latest` and advances `:0.4`.
+Pin the digest recorded on the GitHub Release in production. Existing manifests need
+no new fields; structured answers and work events are opt-in.
+
+Upgrade the gateway, dispatcher and worker images to the same toolkit release before
+enabling structured answers. Producers must check `JOB_OUTPUT_SCHEMA_VERSION` or
+`JOB_WORK_SCHEMA_VERSION` before emitting new artifact sections; older hosts reject
+unknown fields. Local verdict artifacts now also have a 64 KiB limit and must be
+regular UTF-8 files, not symlinks. Oversized or invalid reports yield unproven gates.
+
+- **Helm chart 0.12.1 adds `agents.<name>.workEvents` to enable structured job logs.**
+  Set it to `true` with toolkit 0.4.1 or newer to enable events on the Deployment and
+  scheduled job hosts. Omitted or `false` preserves ordinary logging. Structured answers
+  use the existing chart resources and need no new RBAC, Secrets or volumes.
 - Opt-in `AGENT_WORK_EVENTS=1` emits bounded, versioned job start/completion records
   from both scheduled and chat hosts. Job reports may include typed artifact,
   subject state, usage and health facts when `JOB_WORK_SCHEMA_VERSION=1` is present.
