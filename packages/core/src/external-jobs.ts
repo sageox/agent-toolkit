@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { JobRun } from "./job-host.ts";
 import { verdictFromGate } from "./verdict.ts";
 import { ExecutionInfoSchema } from "./job-diagnostics.ts";
+import { FinalJobOutputSchema, JobOutputStatusSchema, JOB_STATUS_LIMIT_BYTES, type FinalJobOutput } from "./job-output.ts";
 
 export const RunIdSchema = z.string().regex(/^[a-f0-9]{40}$/);
 export const ExternalRequestSchema = z.object({
@@ -20,6 +21,8 @@ export const ExternalRequestSchema = z.object({
     failure: z.enum(["no-signing-key", "no-owner", "backend-missing", "timeout", "unreachable", "auth-failed", "backend-error"]).optional(),
   }).strict().nullable(),
   bypassedSwitch: z.boolean(),
+  /** Gateway-derived audience fingerprint, never a model argument. Absent for operator-only output. */
+  outputReader: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict();
 export type ExternalRequest = z.infer<typeof ExternalRequestSchema>;
 
@@ -41,6 +44,7 @@ export const ExternalStatusSchema = z.object({
   endedAt: z.number().optional(),
   execution: ExecutionInfoSchema.optional(),
   diagnostics: z.object({ ref: z.string().regex(/^run-[a-f0-9]{40}$/), complete: z.boolean() }).strict().optional(),
+  output: JobOutputStatusSchema.optional(),
 }).strict();
 export type ExternalStatus = z.infer<typeof ExternalStatusSchema>;
 export const FailureReportSchema = z.string().max(2000);
@@ -109,17 +113,34 @@ export class ExternalJobs {
       throw new Error("job dispatcher unavailable; execution state is unknown, retrieve the run ID before retrying");
     }
     if (!response.ok) throw new Error(`job dispatcher refused (${response.status}); no local execution fallback`);
-    const text = await response.text();
-    if (text.length > 4096) throw new Error("job dispatcher returned an oversized result");
-    return schema.parse(JSON.parse(text));
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      reader = response.body?.getReader();
+      if (!reader) throw new Error("missing dispatcher response body");
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > JOB_STATUS_LIMIT_BYTES) throw new Error("job dispatcher returned an oversized result");
+        chunks.push(value);
+      }
+      return schema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))));
+    } catch {
+      signal?.throwIfAborted();
+      throw new Error("job dispatcher returned an invalid, incomplete or oversized result");
+    } finally { await reader?.cancel().catch(() => {}); }
   }
 
   dispatch(request: ExternalRequest): Promise<ExternalStatus> {
     return this.call("/runs", ExternalStatusSchema, ExternalRequestSchema.parse(request));
   }
 
-  status(jobSlug: string, runId: string, signal?: AbortSignal): Promise<ExternalStatus> {
-    return this.call(`/runs/${RunIdSchema.parse(runId)}?job=${encodeURIComponent(jobSlug)}`, ExternalStatusSchema, undefined, signal);
+  /** Retrieve execution facts; application data requires an explicit trusted reader. */
+  status(jobSlug: string, runId: string, signal?: AbortSignal, outputReader?: string): Promise<ExternalStatus> {
+    const reader = outputReader === undefined ? "" : `&outputReader=${encodeURIComponent(outputReader)}`;
+    return this.call(`/runs/${RunIdSchema.parse(runId)}?job=${encodeURIComponent(jobSlug)}${reader}`, ExternalStatusSchema, undefined, signal);
   }
 
   cancel(jobSlug: string, runId: string): Promise<ExternalStatus> {
@@ -138,4 +159,25 @@ export class ExternalJobs {
       await delay(1000, undefined, { signal });
     }
   }
+}
+
+/**
+ * Retry only delivery of the same sealed answer, never the claim or job body.
+ * False means no acknowledgement: a timed-out request may still persist. Keep attempts
+ * short because Kubernetes may terminate this worker at its existing job deadline.
+ */
+export async function publishJobOutput(url: string, token: string, runId: string, output: FinalJobOutput): Promise<boolean> {
+  const body = JSON.stringify(FinalJobOutputSchema.parse(output));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(new URL(`/runs/${RunIdSchema.parse(runId)}/output`, url), {
+        method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body, signal: AbortSignal.timeout(2000), redirect: "error",
+      });
+      await response.body?.cancel();
+      if (response.ok) return true;
+      if (response.status < 500) return false;
+    } catch { /* The same publication is safe after an ambiguous response. */ }
+  }
+  return false;
 }

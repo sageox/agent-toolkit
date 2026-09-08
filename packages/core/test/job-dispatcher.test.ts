@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import { JobDispatcher, KubeError, serveJobDispatcher, type KubeObject } from "../src/job-dispatcher.ts";
-import { ExternalJobs, externalRun, jobDefinition, workerResult, type ExternalRequest } from "../src/external-jobs.ts";
+import { ExternalJobs, externalRun, jobDefinition, workerResult, publishJobOutput, type ExternalRequest, type ExternalStatus } from "../src/external-jobs.ts";
+import { JOB_STATUS_LIMIT_BYTES, type FinalJobOutput } from "../src/job-output.ts";
 import { JobSchema, loadManifest, type JobConfig } from "../src/manifest.ts";
 import { JobHost, describeJobRun } from "../src/job-host.ts";
 import { jobHandler } from "../src/job-server.ts";
@@ -103,6 +104,223 @@ async function completed(api: Cluster, dispatch: JobDispatcher, req: ExternalReq
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe("durable application output", () => {
+  const answer: FinalJobOutput = { state: "available", value: { version: 1, data: { records: [{ id: 42, title: "confidential-result" }] } } };
+  const summary = JSON.stringify({ outcome: "completed", counts: { PASS: 2, FAIL: 0, UNKNOWN: 0 } });
+
+  it("publishes once, survives cleanup/restart, expires without replay and keeps payload out of other records", async () => {
+    const api = new Cluster(), job = manifest("output: {format: json}").jobs[0]!, a = dispatcher(api, [job]);
+    const req = { ...request(job), outputReader: "f".repeat(64) };
+    await a.dispatch(req); await a.reconcile();
+    const token = runToken(api, req.runId);
+    await a.claim(req.runId, token);
+    await Promise.all([a.recordOutput(req.runId, token, answer), dispatcher(api, [job]).recordOutput(req.runId, token, answer)]);
+    await expect(a.recordOutput(req.runId, token, { state: "missing" })).rejects.toThrow();
+    expect((await a.status(job.slug, req.runId, req.outputReader)).output).toEqual({ state: "pending" });
+    await completed(api, a, req, summary);
+    await a.recordOutput(req.runId, token, answer); // lost final acknowledgement is idempotent
+    await a.reconcile(); await a.reconcile();
+    expect(api.objects.has(`jobs/${runName(req.runId)}`)).toBe(false);
+    const b = dispatcher(api, [job]);
+    const status = await b.status(job.slug, req.runId);
+    expect(status.output).toEqual({ state: "available" });
+    expect((await b.status(job.slug, req.runId, req.outputReader)).output).toEqual(answer);
+    const cm = api.objects.get(`configmaps/${runName(req.runId)}`)!;
+    expect(cm.data!.run).not.toContain("confidential-result");
+    expect(cm.data!.diagnostics).not.toContain("confidential-result");
+    expect(JSON.stringify(externalRun(req, status))).not.toContain("confidential-result");
+    await expect(b.status("another-job", req.runId, req.outputReader)).rejects.toThrow();
+    await expect(b.status(job.slug, req.runId, "e".repeat(64))).rejects.toThrow();
+    await expect(new JobDispatcher({ api, name: "another-agent", jobs: [], profiles: {}, url: "http://dispatcher" })
+      .status(job.slug, req.runId, req.outputReader)).rejects.toThrow();
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 8 * 86400_000);
+    expect((await b.status(job.slug, req.runId, req.outputReader)).output).toEqual({ state: "expired" });
+    await b.reconcile();
+    expect(api.objects.get(`configmaps/${runName(req.runId)}`)!.data!.output).toBeUndefined();
+    expect((await b.status(job.slug, req.runId, req.outputReader)).output).toEqual({ state: "expired" });
+    await b.dispatch(req); await b.reconcile();
+    expect(api.created).toBe(1);
+  });
+
+  it.each(["missing", "invalid", "oversized", "interrupted", "blocked", "unavailable"] as const)("retains successful execution and gates with %s output", async (state) => {
+    const api = new Cluster(), job = manifest("output: {format: json}").jobs[0]!, a = dispatcher(api, [job]), req = request(job);
+    await a.dispatch(req); await a.reconcile();
+    await a.claim(req.runId, runToken(api, req.runId));
+    if (state !== "unavailable") await a.recordOutput(req.runId, runToken(api, req.runId), { state });
+    await completed(api, a, req, summary);
+    expect(await a.status(job.slug, req.runId, "operator")).toMatchObject({
+      outcome: "completed", result: { counts: { PASS: 2 } }, output: { state },
+    });
+    await a.dispatch(req); await a.reconcile();
+    expect(api.created).toBe(1);
+  });
+
+  it("rejects unclaimed, cross-run, undeclared, oversized and forged publications", async () => {
+    const api = new Cluster(), job = manifest("output: {format: json}").jobs[0]!, a = dispatcher(api, [job]), req = request(job);
+    await a.dispatch(req); await a.reconcile();
+    const token = runToken(api, req.runId);
+    await expect(a.recordOutput(req.runId, token, answer)).rejects.toThrow();
+    await a.claim(req.runId, token);
+    const other = request(job, "b");
+    await a.dispatch(other);
+    await expect(a.recordOutput(other.runId, token, answer)).rejects.toThrow();
+    await expect(a.recordOutput(req.runId, "gateway-token", answer)).rejects.toThrow();
+    for (const forged of [
+      { ...answer, counts: { PASS: 999 } }, { ...answer, runId: other.runId },
+      { state: "available", value: { version: 1, data: "界".repeat(6000) } },
+    ]) await expect(a.recordOutput(req.runId, token, forged)).rejects.toThrow();
+    expect((await a.status(job.slug, req.runId)).result).toBeUndefined();
+    const legacy = manifest().jobs[0]!, oldApi = new Cluster(), old = dispatcher(oldApi, [legacy]), oldReq = request(legacy);
+    await old.dispatch(oldReq); await old.reconcile(); await old.claim(oldReq.runId, runToken(oldApi, oldReq.runId));
+    await expect(old.recordOutput(oldReq.runId, runToken(oldApi, oldReq.runId), answer)).rejects.toThrow();
+  });
+
+  it("never advertises an unpersisted answer, even after a failed write or cancellation", async () => {
+    const api = new Cluster(), job = manifest("output: {format: json}").jobs[0]!, a = dispatcher(api, [job]), req = request(job);
+    await a.dispatch(req); await a.reconcile(); await a.claim(req.runId, runToken(api, req.runId));
+    const call = api.call.bind(api);
+    const save = vi.spyOn(api, "call").mockImplementation(async (...args) => {
+      if (args[0] === "PUT") throw new Error("store unavailable");
+      return call(...args);
+    });
+    await expect(a.recordOutput(req.runId, runToken(api, req.runId), answer)).rejects.toThrow();
+    save.mockRestore();
+    expect((await a.status(job.slug, req.runId, "operator")).output).toEqual({ state: "pending" });
+    const token = runToken(api, req.runId);
+    await a.cancel(job.slug, req.runId);
+    await expect(a.recordOutput(req.runId, token, answer)).rejects.toThrow();
+    await a.reconcile(); await a.reconcile();
+    expect(await a.status(job.slug, req.runId, "operator")).toMatchObject({ outcome: "cancelled", output: { state: "unavailable" } });
+    await a.dispatch(req); await a.reconcile();
+    expect(api.created).toBe(1);
+  });
+
+  it("reports lost or corrupt persisted output explicitly", async () => {
+    const api = new Cluster(), job = manifest("output: {format: json}").jobs[0]!, a = dispatcher(api, [job]), req = request(job);
+    await a.dispatch(req); await a.reconcile(); await a.claim(req.runId, runToken(api, req.runId));
+    await a.recordOutput(req.runId, runToken(api, req.runId), answer);
+    await completed(api, a, req, summary);
+    for (const corrupt of [undefined, "{", "null", JSON.stringify({ version: 1, data: "changed after publication" })]) {
+      api.objects.get(`configmaps/${runName(req.runId)}`)!.data!.output = corrupt!;
+      expect((await a.status(job.slug, req.runId, "operator")).output).toEqual({ state: "unavailable" });
+    }
+  });
+
+  it("retries delivery after a lost acknowledgement without executing again", async () => {
+    const api = new Cluster(), job = manifest("output: {format: json}").jobs[0]!, a = dispatcher(api, [job]), req = request(job);
+    await a.dispatch(req); await a.reconcile(); await a.claim(req.runId, runToken(api, req.runId));
+    const server = await serveJobDispatcher(a, "gateway-token".repeat(3), { host: "127.0.0.1", port: 0 });
+    const record = a.recordOutput.bind(a);
+    let calls = 0;
+    vi.spyOn(a, "recordOutput").mockImplementation(async (...args) => {
+      await record(...args);
+      if (++calls === 1) throw new Error("response lost after persistence");
+    });
+    try {
+      expect(await publishJobOutput(`http://127.0.0.1:${server.port}`, runToken(api, req.runId), req.runId, answer)).toBe(true);
+      expect(calls).toBe(2);
+      expect(api.created).toBe(1);
+    } finally { await server.close(); }
+  });
+
+  it("returns structured answers through authenticated job_status only to the original reader and conversation", async () => {
+    const api = new Cluster(), job = manifest("output: {format: json}").jobs[0]!, a = dispatcher(api, [job]);
+    const token = "private-gateway-token".repeat(3);
+    const server = await serveJobDispatcher(a, token, { host: "127.0.0.1", port: 0 });
+    const url = `http://127.0.0.1:${server.port}`, remote = new ExternalJobs(url, token);
+    const onRun = vi.fn(), reply = vi.fn(async () => {});
+    let host = new JobHost({ external: remote, onRun, switchSource: async () => ({ origin: "set", state: "off" }) });
+    const home: InboundEvent = { id: { surface: "slack", nativeId: "message" }, surface: "slack",
+      channel: { surface: "slack", id: "private", isPublic: false },
+      author: { surface: "slack", id: "owner", isSelf: false, isAgent: false }, text: "lookup", mentionsMe: true, ts: "", raw: null };
+    let current: InboundEvent | null = home;
+    const handler = (policy = new ToolPolicy(["mcp__jobs__*"], [])) => jobHandler({ jobs: [job], host, agentName: "demo", owner: ["owner"],
+      answering: () => current, reply, turnTimeoutMs: 120000, policy });
+    try {
+      const start = JSON.stringify(await handler()({ method: "tools/call", params: { name: "job_run", arguments: { job: job.slug } } }));
+      const id = /run id ([a-f0-9]{40})/.exec(start)![1]!;
+      await a.reconcile();
+      const req: ExternalRequest = JSON.parse(api.objects.get(`configmaps/${runName(id)}`)!.data!.run!).request;
+      const workerToken = runToken(api, id);
+      await a.claim(id, workerToken);
+      expect(await publishJobOutput(url, workerToken, id, answer)).toBe(true);
+      const spoofed = await fetch(`${url}/runs/${id}/output`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(answer) });
+      expect(spoofed.status).toBe(401);
+      for (const readerToken of [workerToken, "brain-token"]) {
+        await expect(new ExternalJobs(url, readerToken).status(job.slug, id, undefined, "operator")).rejects.toThrow();
+      }
+      await completed(api, a, req, summary);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledTimes(1), { timeout: 3000 });
+      expect(JSON.stringify(onRun.mock.calls)).not.toContain("confidential-result");
+      expect(JSON.stringify(reply.mock.calls)).not.toContain("confidential-result");
+      await host.abandon();
+      host = new JobHost({ external: new ExternalJobs(url, token) }); // no in-memory ownership survives
+      await a.reconcile(); await a.reconcile();
+      const statusCall = (includeOutput = false) => ({ method: "tools/call", params: { name: "job_status", arguments: { job: job.slug, runId: id, includeOutput } } });
+      expect(JSON.stringify(await handler()(statusCall()))).not.toContain("confidential-result");
+      const result = await handler()(statusCall(true)) as { content: { text: string }[] };
+      expect(JSON.parse(result.content[0]!.text)).toMatchObject({ verdict: "PASS", output: answer });
+      // Replies in the original thread retain access after restart.
+      current = { ...home, id: { surface: "slack", nativeId: "followup" }, threadRoot: home.id };
+      expect(JSON.stringify(await handler()(statusCall(true)))).toContain("confidential-result");
+      await expect(handler(new ToolPolicy([], ["mcp__jobs__job_status"]))(statusCall(true))).rejects.toThrow("refused");
+      for (const stranger of [null, { ...home, author: { ...home.author, id: "other" } },
+        { ...home, channel: { ...home.channel, id: "public", isPublic: true } },
+        { ...home, threadRoot: { surface: "slack", nativeId: "other-thread" } }, { ...home, surface: "buzz" }]) {
+        current = stranger;
+        await expect(handler()(statusCall(true))).rejects.toThrow();
+        expect(JSON.stringify(await handler()(statusCall()))).not.toContain("confidential-result");
+      }
+      current = home;
+      const status = host.status.bind(host);
+      vi.spyOn(host, "status").mockImplementation(async (...args) => { const result = await status(...args); current = null; return result; });
+      await expect(handler()(statusCall(true))).rejects.toThrow("lost its originating conversation");
+    } finally { await host.abandon(); await server.close(); }
+  });
+
+  it("bounds transport bytes and rejects interrupted responses without treating them as answers", async () => {
+    const server = createServer((req, res) => {
+      if (req.url?.includes("output")) { res.writeHead(503).end(); return; }
+      if (req.url?.includes("job=empty")) { res.writeHead(204).end(); return; }
+      if (req.url?.includes("job=interrupted")) { res.writeHead(200).write('{"runId":'); res.destroy(); return; }
+      res.writeHead(200).end("界".repeat(Math.ceil(JOB_STATUS_LIMIT_BYTES / 3) + 1));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      const remote = new ExternalJobs(url, "token");
+      await expect(remote.status("empty", "a".repeat(40))).rejects.toThrow("job dispatcher returned an invalid, incomplete or oversized result");
+      await expect(remote.status("oversized", "a".repeat(40))).rejects.toThrow("oversized");
+      await expect(remote.status("interrupted", "a".repeat(40))).rejects.toThrow();
+      expect(await publishJobOutput(url, "token", "a".repeat(40), answer)).toBe(false);
+    } finally { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
+  });
+
+  it("explains how to retrieve status when the complete model response exceeds its bound", async () => {
+    const status: ExternalStatus = { runId: "a".repeat(40), jobSlug: "task", startedAt: Date.now(), state: "finished",
+      result: { outcome: "completed", counts: { PASS: 2, FAIL: 0, UNKNOWN: 0 } },
+      output: { state: "available", value: { version: 1, data: "x".repeat(16000) } } };
+    // A legal dispatcher response exactly at its limit becomes too large when MCP adds the verdict.
+    status.jobSlug += "x".repeat(JOB_STATUS_LIMIT_BYTES - Buffer.byteLength(JSON.stringify(status)));
+    const job = { ...manifest("output: {format: json}").jobs[0]!, slug: status.jobSlug };
+    const host = new JobHost();
+    vi.spyOn(host, "status").mockImplementation(async (_job, _runId, reader) =>
+      reader ? status : { ...status, output: { state: "available" } });
+    const home: InboundEvent = { id: { surface: "console", nativeId: "message" }, surface: "console",
+      channel: { surface: "console", id: "chat", isPublic: false },
+      author: { surface: "console", id: "owner", isAgent: false, isSelf: false }, text: "status", mentionsMe: true, ts: "", raw: null };
+    const handler = jobHandler({ jobs: [job], host, agentName: "demo", answering: () => home,
+      turnTimeoutMs: 120000, policy: new ToolPolicy(["mcp__jobs__job_status"], []) });
+    const call = (includeOutput: boolean) => handler({ method: "tools/call", params: { name: "job_status",
+      arguments: { job: job.slug, runId: status.runId, includeOutput } } });
+    await expect(call(true)).rejects.toThrow("retry without includeOutput to read the status alone");
+    const result = await call(false) as { content: { text: string }[] };
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({ verdict: "PASS", output: { state: "available" } });
+    expect(Buffer.byteLength(result.content[0]!.text)).toBeLessThan(JOB_STATUS_LIMIT_BYTES);
+    expect(JSON.parse(result.content[0]!.text).output).not.toHaveProperty("value");
+  });
+});
 
 describe("durable Kubernetes job lifecycle", () => {
   it("deduplicates admission and serializes two dispatchers, requested and scheduled", async () => {
@@ -409,20 +627,24 @@ it("reports actual worker gate counts without counting summary groups as gates",
   expect(describeJobRun(run)).not.toContain("2 of 3 gates");
 });
 
-it("uses the same host contract for Python and a compiled executable, returning no worker prose or credentials", async () => {
+it.each([false, true])("uses the same host contract for Python and a compiled executable (output=%s)", async (enabled) => {
   const dir = await mkdtemp(join(tmpdir(), "worker-contract-"));
   try {
-    await writeFile(join(dir, "task.py"), 'import os,json\nassert os.environ["JOB_TRIGGER"] == "on-request"\nassert os.environ["API_TOKEN"] == "worker-secret"\njson.dump({"gates":[{"gate":"worker-secret", "detail":"worker-secret", "executed":True,"exitCode":0}]},open(os.environ["JOB_VERDICT_PATH"],"w"))\n');
-    await writeFile(join(dir, "task.c"), '#include <stdlib.h>\n#include <stdio.h>\nint main(void){FILE *f=fopen(getenv("JOB_VERDICT_PATH"),"w");fputs("{\\"gates\\":[{\\"gate\\":\\"compiled\\",\\"executed\\":true,\\"exitCode\\":0}]}",f);return fclose(f);}\n');
+    await writeFile(join(dir, "task.py"), 'import os,json\nassert os.environ["JOB_TRIGGER"] == "on-request"\nassert os.environ["API_TOKEN"] == "worker-secret"\nartifact={"gates":[{"gate":"worker-secret", "detail":"worker-secret", "executed":True,"exitCode":0}]}\nif os.environ.get("JOB_OUTPUT_SCHEMA_VERSION") == "1": artifact["output"]={"version":1,"data":{"records":[42]}}\njson.dump(artifact,open(os.environ["JOB_VERDICT_PATH"],"w"))\n');
+    await writeFile(join(dir, "task.c"), '#include <stdlib.h>\n#include <stdio.h>\n#include <string.h>\nint main(void){FILE *f=fopen(getenv("JOB_VERDICT_PATH"),"w");fputs("{\\"gates\\":[{\\"gate\\":\\"compiled\\",\\"executed\\":true,\\"exitCode\\":0}]",f);const char *v=getenv("JOB_OUTPUT_SCHEMA_VERSION");if(v && !strcmp(v,"1"))fputs(",\\"output\\":{\\"version\\":1,\\"data\\":{\\"records\\":[42]}}",f);fputs("}",f);return fclose(f);}\n');
     execFileSync("cc", [join(dir, "task.c"), "-o", join(dir, "task")]);
     for (const [command, args] of [["python3", [join(dir, "task.py")]], [join(dir, "task"), []]] as const) {
-      const original = manifest().jobs[0]!;
+      const original = manifest(enabled ? "output: {format: json}" : "").jobs[0]!;
       const job = { ...original, run: { ...original.run, command, args: [...args] } };
-      const host = new JobHost({ workDir: dir, secretOpts: { dir, env: { TASK_TOKEN: "worker-secret" } } });
+      const output = vi.fn();
+      const host = new JobHost({ workDir: dir, secretOpts: { dir, env: { TASK_TOKEN: "worker-secret" } }, onOutput: output });
       const run = await host.executeWorker(JobSchema.parse(job), request(job));
       expect(run.verdict.status).toBe("PASS");
       expect(workerResult(run)).toMatchObject({ outcome: "completed", counts: { PASS: 2, FAIL: 0, UNKNOWN: 0 }, execution: { state: "exited", exitCode: 0 } });
       expect(JSON.stringify(workerResult(run))).not.toContain("worker-secret");
+      if (enabled) expect(output.mock.calls[0]![1]).toEqual({ state: "available", value: { version: 1, data: { records: [42] } } });
+      else expect(output).not.toHaveBeenCalled();
+      expect(workerResult(run)).not.toHaveProperty("output");
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -614,6 +836,26 @@ it("aborts an in-flight status request when observation is abandoned", async () 
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+it("preserves caller cancellation while reading an open status response body", async () => {
+  let reading!: () => void;
+  const pending = new Promise<void>((resolve) => { reading = resolve; });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => new Response(new ReadableStream({
+    pull(stream) {
+      init!.signal!.addEventListener("abort", () => stream.error(new Error("response body aborted")), { once: true });
+      reading();
+    },
+  }, { highWaterMark: 0 })));
+  const controller = new AbortController();
+  const reason = new Error("observer stopped during response body");
+  try {
+    const waiting = new ExternalJobs("http://dispatcher", "token").wait(request(manifest().jobs[0]!), controller.signal);
+    const rejected = expect(waiting).rejects.toBe(reason);
+    await pending;
+    controller.abort(reason);
+    await rejected;
+  } finally { controller.abort(); }
 });
 
 it("refuses unbound external tool requests before admission, including retries", async () => {

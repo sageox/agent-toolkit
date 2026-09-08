@@ -16,6 +16,7 @@ import type { EventRef } from "../src/events.ts";
 import type { SwitchLookup, SwitchSource } from "../src/kill-switch.ts";
 import { loadManifest, type JobAnnounce, type JobConfig } from "../src/manifest.ts";
 import { combineVerdicts, describeVerdict, type ProvenVoice } from "../src/verdict.ts";
+import { collectJobOutput, JOB_OUTPUT_LIMIT_BYTES, type FinalJobOutput } from "../src/job-output.ts";
 
 const base =
   "name: x\nbrain: {provider: mock}\nsurfaces: [{kind: console}]\nrespondTo: anyone\n" +
@@ -97,6 +98,113 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await rm(workDir, { recursive: true, force: true });
+});
+
+describe("versioned application output", () => {
+  const gates = [{ gate: "lookup", executed: true, exitCode: 0 }];
+  it.each([
+    [undefined, "missing"],
+    [{ version: 2, data: {} }, "invalid"],
+    [{ version: 1 }, "invalid"],
+    [{ version: 1, data: {}, approved: true }, "invalid"],
+    [{ version: 1, data: "界".repeat(6000) }, "oversized"],
+    [{ version: 1, data: { message: "private worker-secret" } }, "blocked"],
+    [{ version: 1, data: { "worker-secret": "key" } }, "blocked"],
+    [{ version: 1, data: { records: [0, false, null, "found"] } }, "available"],
+  ].map(([output, state]) => ({ output, state })))("keeps valid gates with $state output", async ({ output, state }) => {
+    const { jobWorkEvents } = await import("../src/work-events.ts");
+    const events: string[] = [];
+    const reporting = jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" }, (line) => events.push(line));
+    const collected: FinalJobOutput[] = [];
+    const onRun = vi.fn(reporting.onRun);
+    const runtime = new JobHost({ workDir, ...reporting, onRun, diagnosticSecrets: ["worker-secret"],
+      onOutput: (_id, value) => { collected.push(value); } });
+    const work = { usage: { scanned: 2 } };
+    const run = await runtime.request(body(`${WRITE}${JSON.stringify(JSON.stringify({ gates, output, ...work }))})`,
+      { output: "{format: json}" }), { kind: "human", id: "owner" });
+    expect(run.outcome).toBe("completed");
+    expect(run.verdict.status).toBe("PASS");
+    expect(collected).toHaveLength(1);
+    expect(collected[0]!.state).toBe(state);
+    expect(onRun.mock.calls[0]![0]).not.toHaveProperty("output");
+    expect(JSON.stringify(onRun.mock.calls)).not.toContain("worker-secret");
+    expect(JSON.stringify(onRun.mock.calls)).not.toContain("found");
+    expect(run.work).toEqual(work);
+    const lifecycle = events.map((line) => JSON.parse(line).sageox_work_event);
+    expect(lifecycle.map((event) => event.event)).toEqual(["run.started", "run.completed"]);
+    expect(lifecycle[1]).toMatchObject({ verdict: "PASS", report_status: "valid", ...work });
+    expect(lifecycle[1]).not.toHaveProperty("output");
+    expect(events.join("")).not.toMatch(/worker-secret|found/);
+  });
+
+  it.each(["{", "", " ".repeat(65537)])("rejects incomplete or oversized artifact bytes without throwing", async (artifact) => {
+    const onOutput = vi.fn();
+    const runtime = new JobHost({ workDir, onOutput });
+    const run = await runtime.request(body(`${WRITE}${JSON.stringify(artifact)})`, { output: "{format: json}" }), { kind: "human", id: "owner" });
+    expect(run.outcome).toBe("completed");
+    expect(run.verdict.status).toBe("UNKNOWN");
+    expect(onOutput.mock.calls[0]![1]).toEqual({ state: artifact.length > 65536 ? "oversized" : "invalid" });
+  });
+
+  it("does not expose undeclared output and advertises support only on opt-in", async () => {
+    const onOutput = vi.fn();
+    const runtime = new JobHost({ workDir, onOutput });
+    for (const enabled of [false, true]) {
+      const script = `if(process.env.JOB_OUTPUT_SCHEMA_VERSION!==${JSON.stringify(enabled ? "1" : "")})process.exit(1);` +
+        `if(process.env.JOB_OUTPUT_MAX_BYTES!==${JSON.stringify(enabled ? "16384" : "")})process.exit(1);` +
+        `${WRITE}JSON.stringify({gates:${JSON.stringify(gates)},output:{version:1,data:"private-answer"}}))`;
+      const run = await runtime.request(body(script, enabled ? { output: "{format: json}" } : {}), { kind: "human", id: "owner" });
+      expect(run.verdict.status).toBe("PASS");
+      expect(onOutput).toHaveBeenCalledTimes(enabled ? 1 : 0);
+    }
+  });
+
+  it("reports a missing artifact explicitly", async () => {
+    const onOutput = vi.fn();
+    const run = await new JobHost({ workDir, onOutput }).request(body("", { output: "{format: json}" }), { kind: "human", id: "owner" });
+    expect(run.outcome).toBe("completed");
+    expect(run.verdict.status).toBe("UNKNOWN");
+    expect(onOutput.mock.calls[0]![1]).toEqual({ state: "missing" });
+  });
+
+  it("keeps output distinct from a failed process, forged gate and failing observer", async () => {
+    const onOutput = vi.fn((_id: string, _output: FinalJobOutput) => { throw new Error("private observer error"); });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const runtime = new JobHost({ workDir, onOutput });
+      const run = await runtime.request(body(`${WRITE}JSON.stringify({gates:[{gate:"fake",status:"PASS"}],output:{version:1,data:{outcome:"completed",approved:true}}}));process.exit(1)`,
+        { output: "{format: json}" }), { kind: "human", id: "owner" });
+      expect(run.outcome).toBe("completed");
+      expect(run.verdict.status).toBe("FAIL");
+      expect(onOutput.mock.calls[0]![1].state).toBe("available");
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("private observer");
+    } finally { warn.mockRestore(); }
+  });
+
+  it("rejects even valid JSON after an interrupted process instead of returning an incomplete plan", async () => {
+    const onOutput = vi.fn();
+    const runtime = new JobHost({ workDir, onOutput });
+    const run = await runtime.request(body(`${WRITE}JSON.stringify({gates:${JSON.stringify(gates)},output:{version:1,data:{plan:"partial"}}}));process.kill(process.pid,"SIGTERM")`,
+      { output: "{format: json}" }), { kind: "human", id: "owner" });
+    expect(run.outcome).toBe("crashed");
+    expect(run.verdict.status).toBe("UNKNOWN");
+    expect(run.gates.some((gate) => gate.status === "PASS")).toBe(true);
+    expect(onOutput.mock.calls[0]![1]).toEqual({ state: "interrupted" });
+  });
+
+  it("bounds UTF-8 envelope bytes exactly and rejects non-JSON and excessive nesting", () => {
+    const overhead = Buffer.byteLength(JSON.stringify({ version: 1, data: "" }));
+    const data = "é".repeat(Math.floor((JOB_OUTPUT_LIMIT_BYTES - overhead) / 2)) +
+      "x".repeat((JOB_OUTPUT_LIMIT_BYTES - overhead) % 2);
+    expect(collectJobOutput({ version: 1, data }, []).state).toBe("available");
+    expect(collectJobOutput({ version: 1, data: data + "x" }, []).state).toBe("oversized");
+    let deep: unknown = null;
+    for (let i = 0; i < 34; i++) deep = [deep];
+    for (const value of [undefined, Infinity, NaN, { x: undefined }, Array(1), deep]) {
+      expect(collectJobOutput({ version: 1, data: value }, []).state).toBe("invalid");
+    }
+    expect(collectJobOutput({ version: 1, data: "secret\n\"value" }, ["secret\n\"value"]).state).toBe("blocked");
+  });
 });
 
 describe("exit semantics", () => {

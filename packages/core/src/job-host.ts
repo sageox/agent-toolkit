@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { constants as fileFlags } from "node:fs";
 import { mkdir, open, rm } from "node:fs/promises";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import { ExternalJobs, externalRun, jobDefinition, type ExternalRequest, type ExternalStatus } from "./external-jobs.ts";
-import { VerdictArtifactSchema, MAX_WORK_REPORT_BYTES, writeJobDiagnostic, type WorkReport, type WorkCheck, type WorkStart } from "./work-events.ts";
+import { VerdictArtifactSchema, writeJobDiagnostic, type WorkReport, type WorkCheck, type WorkStart } from "./work-events.ts";
 import {
   admitJob,
   type JobAdmission,
@@ -16,6 +18,7 @@ import {
 import { passthroughEnv } from "./brain-env.ts";
 import { errorLine, errorText } from "./errors.ts";
 import { diagnosticOutput, type ExecutionInfo, type WorkerDiagnostics } from "./job-diagnostics.ts";
+import { collectJobOutput, JOB_ARTIFACT_LIMIT_BYTES, JOB_OUTPUT_LIMIT_BYTES, type FinalJobOutput } from "./job-output.ts";
 import type { ActorRef, EventRef, ThreadReply } from "./events.ts";
 import { serveJobChannel } from "./job-channel.ts";
 import type { HostedMcp } from "./mcp-http.ts";
@@ -231,6 +234,8 @@ export interface JobHostOptions {
   requestId?: string;
   /** Worker-only diagnostic sink. The CLI supplies a run-scoped write capability. */
   onDiagnostics?: (diagnostics: WorkerDiagnostics) => void;
+  /** Final application data; deliberately separate from run observers, logs and chat reports. */
+  onOutput?: (runId: string, output: FinalJobOutput) => void;
   /** Additional host capabilities to redact, beyond the body's declared credentials. */
   diagnosticSecrets?: readonly string[];
   /**
@@ -281,6 +286,9 @@ export interface JobHostOptions {
    */
   secretOpts?: { dir?: string | readonly string[]; env?: NodeJS.ProcessEnv };
 }
+
+// Validate sections independently: unusable application data must not erase valid gates.
+const JobArtifactSchema = VerdictArtifactSchema.extend({ gates: z.unknown() });
 
 /** The validated values one run was given, by declared name. */
 export type JobParams = Readonly<Record<string, string | number>>;
@@ -456,9 +464,9 @@ export class JobHost {
     catch { console.warn("job diagnostics unavailable"); }
   }
 
-  status(job: JobConfig, runId: string): Promise<ExternalStatus> {
+  status(job: JobConfig, runId: string, outputReader?: string): Promise<ExternalStatus> {
     if (!job.worker || !this.opts.external) throw new Error("external execution is unavailable for this job");
-    return this.opts.external.status(job.slug, runId);
+    return this.opts.external.status(job.slug, runId, undefined, outputReader);
   }
 
   cancel(job: JobConfig, runId: string): Promise<ExternalStatus> {
@@ -542,6 +550,7 @@ export class JobHost {
     params: JobParams = {},
     answer?: JobAnswer,
     requestId?: string,
+    outputReader?: string,
   ): Promise<JobStart> {
     const { finished, ...start } = await this.begin(
       job,
@@ -551,6 +560,7 @@ export class JobHost {
       true,
       answer,
       requestId,
+      outputReader,
     );
     if (start.refused) {
       await finished;
@@ -808,6 +818,7 @@ export class JobHost {
     detached = false,
     answer?: JobAnswer,
     requestId?: string,
+    outputReader?: string,
   ): Promise<Started> {
     const startedAt = Date.now();
     const runId = job.worker
@@ -918,6 +929,7 @@ export class JobHost {
         const request: ExternalRequest = {
           ...base, definition: jobDefinition(job), switch: admission.switch,
           bypassedSwitch: admission.bypassedSwitch,
+          ...(job.output && outputReader ? { outputReader } : {}),
         };
         let status: ExternalStatus;
         try {
@@ -1039,7 +1051,10 @@ export class JobHost {
         reason: `the job body could not be started: ${job.run.command} did not run`,
       };
     }
-    const report = await this.readReport(verdictPath, job);
+    const secrets = [...(this.opts.diagnosticSecrets ?? []), ...Object.keys({ ...job.run.secrets, ...job.run.jobSecrets })
+      .map((name) => env[name]).filter((value): value is string => Boolean(value))];
+    const report = await this.readReport(verdictPath, job, base.runId, secrets,
+      execution.bowedOut || execution.interrupted || execution.exitCode === null);
     const { gates, work, reportStatus } = report;
     // A body this host stopped never got to speak, whatever it managed to exit with on the
     // way out — a job told to stop has not finished its work, so a 0 from it is not a
@@ -1276,6 +1291,8 @@ export class JobHost {
       JOB_TRIGGER: base.trigger,
       JOB_VERDICT_PATH: verdictPath,
       JOB_WORK_SCHEMA_VERSION: this.opts.workEvents ? "1" : "",
+      JOB_OUTPUT_SCHEMA_VERSION: job.output ? "1" : "",
+      JOB_OUTPUT_MAX_BYTES: job.output ? String(JOB_OUTPUT_LIMIT_BYTES) : "",
       /** When this host will ask the body to stop. The body should bow out before it. */
       JOB_DEADLINE_AT: String(Date.now() + job.budget.wallClockMs),
       JOB_HARNESS_TIMEOUT_MS: String(job.budget.harnessTimeoutMs),
@@ -1307,37 +1324,53 @@ export class JobHost {
    * handle it. A job that ran, exited 0, and reported nothing has proven nothing, and an
    * empty gate list says so in the body's own words.
    */
-  private async readReport(verdictPath: string, job: JobConfig): Promise<{
+  private async readReport(verdictPath: string, job: JobConfig, runId: string, secrets: readonly string[], interrupted: boolean): Promise<{
     gates: readonly Verdict[]; checks: readonly WorkCheck[]; work?: WorkReport; reportStatus: JobRun["reportStatus"];
   }> {
     const missing = { gate: `${jobGate(job)}:verdict`, executed: false, exitCode: null };
     const unproven = { gates: [verdictFromGate(missing)], checks: [] };
+    let output: FinalJobOutput = { state: "invalid" };
     try {
       let artifact: string;
-      const file = await open(verdictPath, "r");
+      const file = await open(verdictPath, fileFlags.O_RDONLY | fileFlags.O_NOFOLLOW | fileFlags.O_NONBLOCK);
       try {
-        const buffer = Buffer.alloc(MAX_WORK_REPORT_BYTES + 1);
+        if (!(await file.stat()).isFile()) return { ...unproven, reportStatus: "invalid" };
+        const buffer = Buffer.alloc(JOB_ARTIFACT_LIMIT_BYTES + 1);
         let bytesRead = 0;
         while (bytesRead < buffer.length) {
           const chunk = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
           if (!chunk.bytesRead) break;
           bytesRead += chunk.bytesRead;
         }
-        if (bytesRead > MAX_WORK_REPORT_BYTES) return { ...unproven, reportStatus: "oversized" };
-        artifact = buffer.toString("utf8", 0, bytesRead);
+        if (bytesRead > JOB_ARTIFACT_LIMIT_BYTES) {
+          output = { state: "oversized" };
+          return { ...unproven, reportStatus: "oversized" };
+        }
+        artifact = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
       } finally { await file.close(); }
-      const parsed = VerdictArtifactSchema.safeParse(JSON.parse(artifact));
+      const parsed = JobArtifactSchema.safeParse(JSON.parse(artifact));
       if (!parsed.success) return { ...unproven, reportStatus: "invalid" };
-      const { gates, ...work } = parsed.data;
+      const { gates: rawGates, output: rawOutput, ...work } = parsed.data;
+      if (job.output) output = collectJobOutput(rawOutput, secrets);
+      const gates = VerdictArtifactSchema.shape.gates.safeParse(rawGates);
+      if (!gates.success) return { ...unproven, reportStatus: "invalid" };
       return {
-        gates: gates.length ? gates.map(verdictFromGate) : unproven.gates,
-        checks: gates.length ? gates.map(({ gate, executed, exitCode }) => ({ gate, executed, exitCode })) : unproven.checks,
+        gates: gates.data.length ? gates.data.map(verdictFromGate) : unproven.gates,
+        checks: gates.data.length ? gates.data.map(({ gate, executed, exitCode }) => ({ gate, executed, exitCode })) : unproven.checks,
         work: Object.keys(work).length ? work : undefined,
         reportStatus: "valid",
       };
     } catch (error) {
-      return { ...unproven, reportStatus: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "invalid" };
+      const reportStatus = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "invalid";
+      output = { state: reportStatus };
+      return { ...unproven, reportStatus };
     } finally {
+      if (job.output) {
+        try { this.opts.onOutput?.(runId, interrupted ? { state: "interrupted" } : output); }
+        catch { console.warn("job output collection unavailable"); }
+      }
+      // The gates are in the record now; leaving the file behind would accumulate one per
+      // tick on a host that runs a job every ten minutes.
       await rm(verdictPath, { force: true }).catch(() => {});
     }
   }

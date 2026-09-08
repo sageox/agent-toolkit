@@ -51,6 +51,8 @@ export type WorkReport = z.infer<typeof WorkReportSchema>;
 // Preserve the strict gates-only transport, including historical free-form details.
 // Only the host mints verdicts; a producer-supplied `status` invalidates the file.
 export const VerdictArtifactSchema = WorkReportSchema.extend({
+  // Validated and delivered independently; application answers never enter work events.
+  output: z.unknown().optional(),
   gates: z.array(z.object({
     gate: z.string().min(1),
     executed: z.boolean(),
@@ -66,7 +68,7 @@ export type WorkStart = Pick<JobRun, "jobSlug" | "runId" | "trigger" | "startedA
 
 // Includes the reserved wrapper and newline, below common container log buffers.
 export const MAX_WORK_EVENT_BYTES = 8 * 1024;
-export const MAX_WORK_REPORT_BYTES = 64 * 1024;
+export { JOB_ARTIFACT_LIMIT_BYTES as MAX_WORK_REPORT_BYTES } from "./job-output.ts";
 
 /** Bound a JSONL record by dropping optional facts while preserving lifecycle identity. */
 export function workEventLine(event: Record<string, unknown>): string {

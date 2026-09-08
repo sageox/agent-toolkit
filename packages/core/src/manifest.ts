@@ -784,6 +784,8 @@ export const JobSchema = z
      * process, not a turn on the agent's brain.
      */
     model: z.string().min(1).optional(),
+    /** Reviewed opt-in: application data is retrieved explicitly, never announced as a verdict. */
+    output: z.object({ format: z.literal("json") }).strict().optional(),
     /** A toolkit-compatible image with the task source baked in. Never a chat checkout. */
     worker: z.object({
       image: z.string().regex(/^\S+@sha256:[a-f0-9]{64}$/, "worker image must be pinned by sha256 digest"),
