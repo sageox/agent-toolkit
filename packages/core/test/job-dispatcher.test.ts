@@ -21,7 +21,6 @@ class Cluster {
   version = 0;
   loseCreate = false;
   holdDeletion = false;
-  loseSecretCreate = false;
   async call(method: string, resource: "configmaps" | "jobs" | "pods" | "secrets", suffix = "", body?: unknown): Promise<KubeObject> {
     const value = structuredClone(body) as KubeObject;
     const name = suffix.startsWith("/") ? suffix.slice(1) : value?.metadata?.name;
@@ -57,7 +56,6 @@ class Cluster {
       this.created++;
       if (this.loseCreate) throw new Error("connection lost after persisted creation");
     }
-    if (resource === "secrets" && this.loseSecretCreate) throw new Error("connection lost after persisted Secret creation");
     return structuredClone(value);
   }
 }
@@ -162,8 +160,8 @@ describe("durable Kubernetes job lifecycle", () => {
     expect((await a.status("task", req.runId)).outcome).toBe("budget-bowout");
   });
 
-  it("keeps claim tokens out of ConfigMaps and prevents duplicate claims after a lost Secret response", async () => {
-    const api = new Cluster(); api.loseSecretCreate = true;
+  it("keeps claim tokens out of ConfigMaps and prevents duplicate claims", async () => {
+    const api = new Cluster();
     const a = dispatcher(api), req = request(manifest().jobs[0]!);
     await a.dispatch(req); await a.reconcile();
     const token = runToken(api, req.runId);
@@ -184,6 +182,37 @@ describe("durable Kubernetes job lifecycle", () => {
     await a.reconcile(); await a.reconcile(); await a.reconcile();
     expect(api.objects.has(`secrets/${cm.metadata.name}`)).toBe(false);
     await expect(a.claim(req.runId, token)).rejects.toThrow();
+  });
+
+  it.each([false, true])("stops and reports a failed claim Secret creation without replay (persisted=%s)", async (persisted) => {
+    const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+    const original = api.call.bind(api);
+    const calls = vi.spyOn(api, "call").mockImplementation(async (method, resource, suffix, body) => {
+      if (method === "POST" && resource === "secrets") {
+        if (persisted) {
+          await original(method, resource, suffix, body);
+          // A worker can win its claim before the response is lost. It must be stopped too.
+          await a.claim(req.runId, (body as KubeObject).stringData!.token!);
+        }
+        throw new Error("synthetic API error containing private text");
+      }
+      return original(method, resource, suffix, body);
+    });
+    await a.dispatch(req); await a.reconcile();
+    expect(await a.status("task", req.runId)).toMatchObject({ state: "cancelling", outcome: "unknown" });
+    const b = dispatcher(api);
+    await b.reconcile(); await b.reconcile(); await b.reconcile();
+    expect(await b.status("task", req.runId)).toMatchObject({ state: "finished", outcome: "unknown" });
+    const report = await b.failureReport("task", req.runId);
+    expect(report).toContain("Worker claim Secret creation was not confirmed");
+    expect(report).not.toContain("private text");
+    expect(api.objects.has(`jobs/${runName(req.runId)}`)).toBe(false);
+    expect(api.objects.has(`secrets/${runName(req.runId)}`)).toBe(false);
+    await b.dispatch(req); await b.reconcile();
+    expect(api.created).toBe(1);
+    expect(calls.mock.calls.filter(([method, resource]) => method === "POST" && resource === "secrets")).toHaveLength(1);
+    await b.dispatch(request(manifest().jobs[0]!, "b")); await b.reconcile();
+    expect(api.created).toBe(2); // the prior run's overlap lock was released
   });
 
   it("recovers a completed result when the dispatcher returns after the deadline", async () => {

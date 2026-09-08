@@ -188,7 +188,7 @@ export class JobDispatcher {
     const { status } = this.read(cm);
     const counts = status.result?.counts;
     if (status.state !== "finished" || (counts && counts.PASS > 0 && !counts.FAIL && !counts.UNKNOWN)) throw new KubeError(409);
-    const diagnostics: Partial<WorkerDiagnostics> & { workers?: { reason?: string }[] } = JSON.parse(cm.data?.diagnostics ?? "{}");
+    const diagnostics: Partial<WorkerDiagnostics> & { dispatcherError?: string; workers?: { reason?: string }[] } = JSON.parse(cm.data?.diagnostics ?? "{}");
     let reasons = diagnostics.workers?.map((worker) => worker.reason);
     if (!reasons) {
       // Reporting may beat cleanup, which normally archives these platform facts.
@@ -206,17 +206,20 @@ export class JobDispatcher {
       ...(stream?.truncated || text.length > 1600 ? ["earlier output omitted"] : [])].join("; ");
     // Quote job text as data, and prevent a script's backticks from closing the fence.
     const excerpt = text.slice(-1600).replace(/^[\uDC00-\uDFFF]/, "").replace(/`/g, "'");
-    return FailureReportSchema.parse((platform ? `Worker state: ${platform}.\n` : "") +
+    const dispatchFailure = diagnostics.dispatcherError === "claim-secret-unavailable"
+      ? "Worker claim Secret creation was not confirmed; the dispatcher stopped this run without retrying execution.\n" : "";
+    return FailureReportSchema.parse(dispatchFailure + (platform ? `Worker state: ${platform}.\n` : "") +
       (excerpt ? `Last ${source} (${notes}):\n\`\`\`\n${excerpt}\n\`\`\`` : "The worker did not retain error output."));
   }
 
-  async cancel(slug: string, runId: string): Promise<ExternalStatus> {
+  async cancel(slug: string, runId: string, cause?: "claim-secret-unavailable"): Promise<ExternalStatus> {
     for (let attempt = 0; ; attempt++) {
       const cm = await this.owned(runId, slug);
       const run = this.read(cm);
       if (run.status.state === "finished" || run.status.outcome === "cancelled") return run.status;
       run.status.state = "cancelling";
-      run.status.outcome = "cancelled";
+      run.status.outcome = cause ? "unknown" : "cancelled";
+      if (cause) cm.data!.diagnostics = JSON.stringify({ ...JSON.parse(cm.data?.diagnostics ?? "{}"), dispatcherError: cause });
       try { await this.save(cm, run); return run.status; }
       catch (error) {
         if (!(error instanceof KubeError && error.status === 409) || attempt >= 2) throw error;
@@ -428,11 +431,17 @@ export class JobDispatcher {
       // The Pod waits for this Secret. A lost create response never authorizes a retry.
       // Job ownership also garbage-collects a Secret created after concurrent cancellation.
       if (!created.metadata.uid) throw new Error("worker Job identity missing");
-      await this.opts.api.call("POST", "secrets", "", {
-        apiVersion: "v1", kind: "Secret", metadata: { name, labels: this.label,
-          ownerReferences: [{ apiVersion: "batch/v1", kind: "Job", name, uid: created.metadata.uid }] },
-        stringData: { token },
-      });
+      try {
+        await this.opts.api.call("POST", "secrets", "", {
+          apiVersion: "v1", kind: "Secret", metadata: { name, labels: this.label,
+            ownerReferences: [{ apiVersion: "batch/v1", kind: "Job", name, uid: created.metadata.uid }] },
+          stringData: { token },
+        });
+      } catch {
+        // The write may have succeeded. Stop any resulting Pod before releasing the lock,
+        // and report the uncertain dispatch promptly instead of consuming the full budget.
+        await this.cancel(run.request.jobSlug, run.request.runId, "claim-secret-unavailable");
+      }
       // Do not write running here: the worker may already have claimed with a new RV.
       return;
     }
