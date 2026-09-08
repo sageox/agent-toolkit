@@ -135,9 +135,9 @@ contain only a token hash; the claim Secret is projected into that worker and ga
 with its Job. The dispatcher cannot read Secrets directly, but creating workloads is privileged: keep
 its identity and API capability outside the brain. Gateway and workers do not mount a
 Kubernetes API token. A worker has its own ServiceAccount; the chart rejects reuse of the
-gateway or dispatcher accounts and Kubernetes Secret objects across every agent in the
-release. Accounts and credentials provisioned outside this release still require an
-operator to check their permissions.
+gateway or dispatcher accounts and of gateway, dispatcher, or scheduled-job Kubernetes
+Secret objects across every agent in the release. Accounts and credentials provisioned
+outside this release still require an operator to check their permissions.
 
 Install the release in a **dedicated namespace** (for example, `helm install agents
 ./deploy/helm --namespace agent-workloads --create-namespace ...`). This namespace is the

@@ -33,6 +33,13 @@ render() {
   rendered=$(helm template agents "$chart" --values "$values" \
     --show-only templates/cronjob.yaml "$@")
 }
+refuses() {
+  local why="$1" want="$2" out
+  shift 2
+  out=$(helm template agents "$chart" --values "$values" "$@" 2>&1) \
+    && fail "expected a refusal: $why"
+  grep -qF "$want" <<<"$out" || fail "refused for the wrong reason: $why"
+}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -121,11 +128,8 @@ for template in deployment cronjob; do
     --set agents.harry.workEvents=false --show-only "templates/$template.yaml")
   absent 'name: AGENT_WORK_EVENTS'
 done
-if helm template agents "$chart" --values "$values" \
-  --set-string agents.harry.workEvents=false >"$work/invalid" 2>&1; then
-  fail 'a string workEvents value was accepted instead of a boolean'
-fi
-grep -qF 'workEvents' "$work/invalid" || fail 'workEvents was refused for the wrong reason'
+refuses "a string workEvents value" "workEvents" \
+  --set-string agents.harry.workEvents=false
 
 # `persistence.jobCheckouts` mounts the one thing on the claim a scheduled run could not
 # cheaply build for itself: the checkouts the agent Pod clones and fast-forwards. Narrowed
@@ -284,10 +288,9 @@ agents:
         budget: { wallClockMs: 600000, deadlineHeadroomMs: 300000 }
     jobSecrets: { kubernetesSecret: ida-job, csi: { secretProviderClass: "" } }
 YAML
-out=$(helm template agents "$chart" --values "$values" --values "$unmounted" 2>&1) \
-  && fail "expected a refusal: jobSecrets on an agent with no schedule"
-grep -qF "declares no schedule" <<<"$out" \
-  || fail "refused for the wrong reason: jobSecrets with no schedule"
+refuses "jobSecrets on an agent with no schedule" \
+  "ida: jobSecrets is mounted by scheduled job Pods only, and this agent declares no schedule" \
+  --values "$unmounted"
 
 # Two sources, two classes — and a name is still an object this chart creates, so both go
 # through the same collision check, including against each other.
@@ -304,11 +307,9 @@ counted 2 "kind: SecretProviderClass"
 present "name: harry-agent"
 present "name: harry-job"
 
-out=$(helm template agents "$chart" --values "$values" --values "$csi" \
-  --set agents.harry.jobSecrets.csi.secretProviderClass=harry-agent 2>&1) \
-  && fail "expected a refusal: one agent creating one class from both its sources"
-grep -qF "harry/secrets and harry/jobSecrets" <<<"$out" \
-  || fail "refused for the wrong reason: one class from two sources"
+refuses "one agent creating one class from both its sources" \
+  "harry/secrets and harry/jobSecrets would both create a SecretProviderClass named harry-agent" \
+  --values "$csi" --set agents.harry.jobSecrets.csi.secretProviderClass=harry-agent
 
 
 # External schedules are launchers: they retain admission credentials, but receive no
@@ -333,61 +334,113 @@ absent 'automountServiceAccountToken: true'
 rendered=$(helm template agents "$chart" --values "$values" \
   --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
   --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
+  --set 'agents.harry.sharedVolumes[0].name=shared-state' \
+  --set 'agents.harry.sharedVolumes[0].mountPath=/shared' \
+  --set 'agents.harry.sharedVolumes[0].claimName=shared-state' \
   --show-only templates/dispatcher.yaml)
 counted 1 'kind: Deployment'
-present 'resources: ["jobs"]'
-present 'resources: ["configmaps"]'
-present 'resources: ["secrets"]'
-present 'verbs: ["create"]'
 absent 'mountPath: /mnt/secrets-store'
 absent 'mountPath: /mnt/job-secrets-store'
+absent 'name: shared-state'
 
-if helm template agents "$chart" --values "$values" \
-  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' >"$work/invalid" 2>&1; then
-  fail 'worker without dispatcher was accepted'
+# Assert relationships on parsed resources. Independent substring checks cannot prove that
+# a Role verb belongs to the intended resource or that a container mount exists in its Pod.
+printf '%s\n' "$rendered" >"$work/dispatcher.yaml"
+if ! pnpm --filter @sageox/agent-toolkit-core exec node --input-type=module \
+  - "$work/dispatcher.yaml" <<'NODE'
+import { readFileSync } from "node:fs";
+import { parseAllDocuments } from "yaml";
+
+const resources = parseAllDocuments(readFileSync(process.argv[2], "utf8"))
+  .map((document) => document.toJS())
+  .filter(Boolean);
+const find = (kind) => resources.find((resource) => resource.kind === kind);
+const serviceAccount = find("ServiceAccount");
+const deployment = find("Deployment");
+const role = find("Role");
+
+if (!serviceAccount?.metadata?.name) throw new Error("dispatcher ServiceAccount has no name");
+if (deployment?.spec?.template?.spec?.serviceAccountName !== serviceAccount.metadata.name) {
+  throw new Error("dispatcher Deployment does not use its ServiceAccount");
+}
+
+const pod = deployment.spec.template.spec;
+const volumes = new Set((pod.volumes ?? []).map((volume) => volume.name));
+for (const container of [...(pod.initContainers ?? []), ...(pod.containers ?? [])]) {
+  for (const mount of container.volumeMounts ?? []) {
+    if (!volumes.has(mount.name)) {
+      throw new Error(`${container.name} mount ${mount.name} has no declared volume`);
+    }
+  }
+}
+
+for (const expected of [
+  { resources: ["secrets"], verbs: ["create"] },
+  { resources: ["configmaps"], verbs: ["get", "list", "create", "update", "delete"] },
+  { resources: ["jobs"], verbs: ["get", "create", "delete"] },
+  { resources: ["pods"], verbs: ["get", "list"] },
+]) {
+  const rule = role?.rules?.find((candidate) =>
+    JSON.stringify(candidate.resources) === JSON.stringify(expected.resources));
+  if (JSON.stringify(rule?.verbs) !== JSON.stringify(expected.verbs)) {
+    throw new Error(`dispatcher Role verbs for ${expected.resources[0]} are incorrect`);
+  }
+}
+NODE
+then
+  fail 'dispatcher resource relationships are invalid'
 fi
-if helm template agents "$chart" --values "$values" \
+
+refuses "worker without dispatcher" \
+  "harry/shift: external worker requires dispatcher.tokenSecret" \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'
+refuses "worker sharing the gateway identity" \
+  "harry/shift: worker must use a separate ServiceAccount from the gateway" \
   --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
-  --set 'agents.harry.jobs[0].worker.serviceAccountName=agents-harry' >"$work/invalid" 2>&1; then
-  fail 'worker sharing the gateway identity was accepted'
-fi
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=agents-harry'
 
 # Isolation covers every agent in a release, including externally managed accounts.
-if helm template agents "$chart" --values "$values" \
+refuses "worker sharing another gateway identity" \
+  "harry/shift: worker must use a separate ServiceAccount from the gateway" \
   --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
-  --set 'agents.harry.jobs[0].worker.serviceAccountName=agents-ida' >"$work/invalid" 2>&1; then
-  fail 'worker sharing another gateway identity was accepted'
-fi
-for secret in agent-ida ida-dispatcher-auth; do
-  if helm template agents "$chart" --values "$values" \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=agents-ida'
+for secret in agent-ida ida-dispatcher-auth ida-job-secrets; do
+  refuses "worker sharing another agent's $secret secret" \
+    "harry/shift: worker secret TASK_TOKEN ($secret) must be separate from gateway, dispatcher, and scheduled-job secrets" \
     --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
     --set agents.ida.dispatcher.tokenSecret=ida-dispatcher-auth \
+    --set agents.ida.jobSecrets.kubernetesSecret=ida-job-secrets \
+    --set agents.ida.jobSecrets.csi.secretProviderClass= \
     --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
     --set "agents.harry.jobs[0].worker.secrets.TASK_TOKEN.name=$secret" \
-    --set 'agents.harry.jobs[0].worker.secrets.TASK_TOKEN.key=token' >"$work/invalid" 2>&1; then
-    fail 'worker sharing another gateway or dispatcher secret was accepted'
-  fi
+    --set 'agents.harry.jobs[0].worker.secrets.TASK_TOKEN.key=token'
 done
 rendered=$(helm template agents "$chart" --values "$values" \
   --set agents.ida.dispatcher.tokenSecret=ida-dispatcher-auth --show-only templates/dispatcher.yaml)
 dispatcher_account=$(awk '/^kind: ServiceAccount$/{found=1;next} found && /^  name:/{print $2;exit}' <<<"$rendered")
-for subject in 'agents.harry.jobs[0].worker.serviceAccountName' agents.harry.serviceAccount.name; do
-  if helm template agents "$chart" --values "$values" \
-    --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
-    --set agents.ida.dispatcher.tokenSecret=ida-dispatcher-auth \
-    --set "$subject=$dispatcher_account" >"$work/invalid" 2>&1; then
-    fail 'worker or gateway sharing another dispatcher identity was accepted'
-  fi
-done
+[ -n "$dispatcher_account" ] || fail 'parsed dispatcher ServiceAccount name is empty'
+refuses "worker sharing another dispatcher identity" \
+  "harry/shift: worker must not use the dispatcher ServiceAccount" \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set agents.ida.dispatcher.tokenSecret=ida-dispatcher-auth \
+  --set "agents.harry.jobs[0].worker.serviceAccountName=$dispatcher_account"
+refuses "gateway sharing another dispatcher identity" \
+  "harry: gateway must not use the dispatcher ServiceAccount $dispatcher_account" \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set agents.ida.dispatcher.tokenSecret=ida-dispatcher-auth \
+  --set "agents.harry.serviceAccount.name=$dispatcher_account"
 
 # Fail at chart validation, before a profile can crash the dispatcher at startup.
 for resource in 'cpu=1' 'requests.cpu=1' 'limits.memory=128'; do
-  if helm template agents "$chart" --values "$values" \
+  case "$resource" in
+    cpu=1) want="additional properties 'cpu' not allowed" ;;
+    requests.cpu=1) want="at '/agents/harry/jobs/0/worker/resources/requests/cpu': got number, want string" ;;
+    limits.memory=128) want="at '/agents/harry/jobs/0/worker/resources/limits/memory': got number, want string" ;;
+  esac
+  refuses "invalid worker resources: $resource" "$want" \
     --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
     --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
-    --set "agents.harry.jobs[0].worker.resources.$resource" >"$work/invalid" 2>&1; then
-    fail "invalid worker resources passed values validation: $resource"
-  fi
+    --set "agents.harry.jobs[0].worker.resources.$resource"
 done
 rendered=$(helm template agents "$chart" --values "$values" \
   --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \

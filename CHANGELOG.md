@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Helm external workers cannot inherit invalid mounts or reuse scheduled-job
+  credentials.** Dispatcher bundle staging now excludes gateway shared volumes, and chart
+  validation rejects a worker Secret that is already used by any agent's gateway,
+  dispatcher, or scheduled jobs.
 - **A repository that authors `agent.yaml` files can check them in CI.** `sageox-agent
   validate <path…>` parses each file against the schema `run` loads at startup and exits
   non-zero if any is invalid, naming the field path and the expectation for each problem.
