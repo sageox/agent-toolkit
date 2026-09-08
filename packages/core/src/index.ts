@@ -36,3 +36,4 @@ export { type FinalJobOutput } from "./job-output.ts";
 export { JobDispatcher, JobKubeApi, WorkerProfilesSchema, serveJobDispatcher } from "./job-dispatcher.ts";
 export { JobSchema } from "./manifest.ts";
 export { type WorkerDiagnostics } from "./job-diagnostics.ts";
+export * from "./work-events.ts";

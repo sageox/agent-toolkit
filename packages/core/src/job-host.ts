@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fileFlags } from "node:fs";
-import { mkdir, open, readFile, rm } from "node:fs/promises";
+import { mkdir, open, rm } from "node:fs/promises";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { ExternalJobs, externalRun, jobDefinition, type ExternalRequest, type ExternalStatus } from "./external-jobs.ts";
+import { VerdictArtifactSchema, writeJobDiagnostic, type WorkReport, type WorkCheck, type WorkStart } from "./work-events.ts";
 import {
   admitJob,
   type JobAdmission,
@@ -86,6 +87,11 @@ export type JobOutcome =
  * that reported nothing and a job that never ran must not read the same.
  */
 export interface JobRun {
+  work?: WorkReport;
+  reportStatus?: "valid" | "missing" | "invalid" | "oversized";
+  /** Declared deadline duration, including cleanup headroom; absent for refusals. */
+  deadlineMs?: number;
+  checks?: readonly WorkCheck[];
   jobSlug: string;
   runId: string;
   /** Stamped from the entry point that started the run. Never passed in — see {@link JobHost}. */
@@ -150,7 +156,7 @@ export interface JobStart {
 /** The facts a run has before its body does. Named because four signatures below take it. */
 type RunBase = Pick<
   JobRun,
-  "jobSlug" | "runId" | "trigger" | "requestedBy" | "startedAt" | "parameters"
+  "jobSlug" | "runId" | "trigger" | "requestedBy" | "startedAt" | "parameters" | "deadlineMs" | "execution"
 >;
 
 /** {@link JobStart}, plus the record the run will end with. Never leaves this file. */
@@ -257,6 +263,10 @@ export interface JobHostOptions {
   workDir?: string;
   /** Every run record, always — denied and dropped ticks included. */
   onRun?: (run: JobRun) => void;
+  /** Admitted execution, before setup/spawn; no call for refusals or overlap. */
+  onStart?: (run: WorkStart) => void;
+  /** Wrap body output so it cannot impersonate host lifecycle records. */
+  workEvents?: boolean;
   /**
    * The environment a job body is built *from* — never the environment it gets. Defaults to
    * this process's, and either way only `passthroughEnv` and what the job declared survive
@@ -277,27 +287,8 @@ export interface JobHostOptions {
   secretOpts?: { dir?: string | readonly string[]; env?: NodeJS.ProcessEnv };
 }
 
-/**
- * One gate the job body observed. Deliberately not a verdict: the body reports what it
- * *ran*, and this host is the only thing that turns that into a PASS. A body cannot write
- * `{"status":"PASS"}` because nothing here reads a status.
- */
-const GateResultSchema = z
-  .object({
-    gate: z.string().min(1),
-    /** Did the gate process start? Nothing about how it ended — that is `exitCode`. */
-    executed: z.boolean(),
-    /** What it said on the way out. `null` when it never said anything. */
-    exitCode: z.number().int().nullable(),
-    /** The body's own sentence about this gate. Rendered by `describeVerdict`, never read to decide. */
-    detail: z.string().optional(),
-  })
-  // Strict because the field a body would add is `status`, and quietly ignoring an attempt
-  // to compose a verdict is worse than refusing the artifact: refusing reads as UNKNOWN.
-  .strict();
-
 // Validate sections independently: unusable application data must not erase valid gates.
-const JobArtifactSchema = z.object({ gates: z.unknown(), output: z.unknown().optional() }).strict();
+const JobArtifactSchema = VerdictArtifactSchema.extend({ gates: z.unknown() });
 
 /** The validated values one run was given, by declared name. */
 export type JobParams = Readonly<Record<string, string | number>>;
@@ -322,7 +313,7 @@ export const MAX_PARAM_LENGTH = 1024;
  * `envelope` calls it because the doors keep multiplying — a chat tool, an operator's CLI —
  * and a bound only some of them apply is a bound the manifest cannot be read for.
  *
- * Refuses rather than ignores an undeclared name, on `GateResultSchema`'s reasoning: quietly
+ * Refuses rather than ignores an undeclared name, on `VerdictArtifactSchema`'s reasoning: quietly
  * dropping a value somebody meant to send is how a run acts on a target nobody chose.
  */
 export function jobParams(job: JobConfig, given: Readonly<Record<string, unknown>>): JobParams {
@@ -734,6 +725,7 @@ export class JobHost {
     answer?: JobAnswer,
   ): Promise<void> {
     if (!this.claim(base.runId)) return; // its body finished first and has already spoken
+    const executed = base.execution !== undefined && !["starting", "not-started"].includes(base.execution.state);
     const run = this.record({
       ...base,
       switch: admission.switch,
@@ -743,7 +735,8 @@ export class JobHost {
       // `exitCode: null` is already the encoding for exactly that — a process that ran and
       // said nothing readable — so an abandoned run is UNKNOWN by the same arithmetic every
       // other unproven run is, rather than by a second rule written here.
-      gates: [verdictFromGate({ gate: jobGate(job), executed: true, exitCode: null })],
+      gates: [verdictFromGate({ gate: jobGate(job), executed, exitCode: null })],
+      checks: [{ gate: jobGate(job), executed, exitCode: base.execution?.exitCode ?? null }],
       reason:
         `this host was asked to stop while the ${job.slug} body was still running, ` +
         "so nothing here will read what it proved",
@@ -867,6 +860,7 @@ export class JobHost {
           switch: null,
           bypassedSwitch: false,
           gates: [didNotRun],
+          checks: [{ gate: jobGate(job), executed: false, exitCode: null }],
           reason: `${job.slug} does not arm the ${trigger} trigger, so nothing may start it that way`,
         }),
       );
@@ -882,6 +876,7 @@ export class JobHost {
           switch: null,
           bypassedSwitch: false,
           gates: [didNotRun],
+          checks: [{ gate: jobGate(job), executed: false, exitCode: null }],
           reason: `a ${job.slug} run is still in flight; this ${trigger} tick was dropped`,
         }),
       );
@@ -902,6 +897,7 @@ export class JobHost {
             switch: admission.switch,
             bypassedSwitch: false,
             gates: [didNotRun],
+            checks: [{ gate: jobGate(job), executed: false, exitCode: null }],
             reason: admission.reason,
           }),
         );
@@ -922,6 +918,7 @@ export class JobHost {
             // Never ran, and the gate says so — the same `abandoned` as a run whose body was
             // already going, told apart by the one field that knows the difference.
             gates: [didNotRun],
+            checks: [{ gate: jobGate(job), executed: false, exitCode: null }],
             reason:
               `this host was asked to stop while ${job.slug} was still being admitted, ` +
               "so the run was never started",
@@ -941,19 +938,25 @@ export class JobHost {
           throw new Error(`external dispatch uncertain for run ${runId}; retrieve its status before retrying`);
         }
         if (status.state === "finished") {
-          const run = externalRun(request, status);
+          const run = { ...externalRun(request, status),
+            ...(status.outcome === "skipped-overlap" ? {} : { deadlineMs: jobDeadlineMs(job) }) };
+          this.observeRun(run);
           return { runId, refused: run, finished: Promise.resolve(run) };
         }
+        base.startedAt = status.startedAt;
+        this.observeStart(base, jobDeadlineMs(job));
         // A gateway shutdown stops observation only. Kubernetes still owns the worker,
         // deadline and durable record, so shutdown must never mark this run abandoned.
         const finished = this.opts.external!.wait(request, this.externalWaits.signal).then(async (run) => {
-          this.opts.onRun?.(run);
+          run.deadlineMs = base.deadlineMs;
+          this.observeRun(run);
           await this.settle(job, run, detached, answer);
           return run;
         });
         return { runId, refused: null, finished };
       }
       running = true;
+      this.observeStart(base, jobDeadlineMs(job));
       if (detached) this.owed.set(runId, () => this.giveUp(job, base, admission, answer));
       return {
         runId,
@@ -997,13 +1000,14 @@ export class JobHost {
   private async execute(
     job: JobConfig,
     base: RunBase,
-  ): Promise<Pick<JobRun, "outcome" | "gates" | "reason" | "execution">> {
-    const verdictPath = join(await this.workDir(), `${job.slug}-${base.runId}.json`);
+  ): Promise<Pick<JobRun, "outcome" | "gates" | "reason" | "execution" | "work" | "checks" | "reportStatus">> {
+    let verdictPath: string;
     const unstarted = verdictFromGate({ gate: jobGate(job), executed: false, exitCode: null });
 
     let env: NodeJS.ProcessEnv;
     let channel: HostedMcp | undefined;
     try {
+      verdictPath = join(await this.workDir(), `${job.slug}-${base.runId}.json`);
       channel = await this.openChannel(job);
       env = this.envelope(job, base, verdictPath, channel);
     } catch (error) {
@@ -1029,42 +1033,47 @@ export class JobHost {
         outcome: "crashed",
         execution,
         gates: [unstarted],
+        checks: [{ gate: jobGate(job), executed: false, exitCode: null }],
         reason: `the job body could not be started: ${errorLine(error)}`,
       };
     }
     // Closed the moment the body is: this listener exists for one run, and one that
     // outlived its body would be a port on this host with a live token and nothing left
     // that legitimately holds it.
-    const execution = await this.spawnBody(job, env).finally(() => channel?.close());
+    const execution = await this.spawnBody(job, env, base).finally(() => channel?.close());
 
     if (!execution.started) {
       return {
         outcome: "crashed",
         execution: execution.info,
         gates: [unstarted],
+        checks: [{ gate: jobGate(job), executed: false, exitCode: null }],
         reason: `the job body could not be started: ${job.run.command} did not run`,
       };
     }
     const secrets = [...(this.opts.diagnosticSecrets ?? []), ...Object.keys({ ...job.run.secrets, ...job.run.jobSecrets })
       .map((name) => env[name]).filter((value): value is string => Boolean(value))];
-    const gates = await this.readGates(verdictPath, job, base.runId, secrets,
+    const report = await this.readReport(verdictPath, job, base.runId, secrets,
       execution.bowedOut || execution.interrupted || execution.exitCode === null);
-
+    const { gates, work, reportStatus } = report;
     // A body this host stopped never got to speak, whatever it managed to exit with on the
     // way out — a job told to stop has not finished its work, so a 0 from it is not a
     // statement about that work. `exitCode: null` is the one input that yields UNKNOWN for
     // a process that ran, and it is the same encoding a signal death already arrives as.
-    const processGate = verdictFromGate({
+    const processCheck = {
       gate: jobGate(job),
       executed: true,
       exitCode: execution.bowedOut || execution.interrupted ? null : execution.exitCode,
-    });
+    };
+    const processGate = verdictFromGate(processCheck);
+    const checks = [processCheck, ...report.checks];
 
     if (execution.bowedOut) {
       return {
         outcome: "budget-bowout",
         execution: execution.info,
         gates: [processGate, ...gates],
+        work, checks, reportStatus,
         reason:
           `the job body was still running after its ${job.budget.wallClockMs}ms wall clock ` +
           `and was asked to stop, with ${job.budget.deadlineHeadroomMs}ms to finish writing`,
@@ -1075,6 +1084,7 @@ export class JobHost {
         outcome: "crashed",
         execution: execution.info,
         gates: [processGate, ...gates],
+        work, checks, reportStatus,
         reason: `the job body died on ${execution.signal ?? "an unreported signal"}`,
       };
     }
@@ -1084,6 +1094,7 @@ export class JobHost {
       outcome: "completed",
       execution: execution.info,
       gates: [processGate, ...gates],
+      work, checks, reportStatus,
       reason: `the job body exited ${execution.exitCode}`,
     };
   }
@@ -1113,25 +1124,27 @@ export class JobHost {
     });
   }
 
-  private spawnBody(job: JobConfig, env: NodeJS.ProcessEnv): Promise<Execution> {
+  private spawnBody(job: JobConfig, env: NodeJS.ProcessEnv, base: RunBase): Promise<Execution> {
     return new Promise<Execution>((resolve) => {
       const knownSecrets = [...(this.opts.diagnosticSecrets ?? []), ...Object.keys({ ...job.run.secrets, ...job.run.jobSecrets })
         .map((name) => env[name]).filter((value): value is string => Boolean(value))];
-      const stdout = job.worker && diagnosticOutput(knownSecrets, (text) => {
-        if (!process.stdout.write(text)) child.stdout?.pause();
+      const capture = Boolean(job.worker || this.opts.workEvents);
+      const stdout = capture && diagnosticOutput(knownSecrets, (text) => {
+        if (!(this.opts.workEvents ? writeJobDiagnostic("stdout", text) : process.stdout.write(text))) child.stdout?.pause();
       });
-      const stderr = job.worker && diagnosticOutput(knownSecrets, (text) => {
-        if (!process.stderr.write(text)) child.stderr?.pause();
+      const stderr = capture && diagnosticOutput(knownSecrets, (text) => {
+        if (!(this.opts.workEvents ? writeJobDiagnostic("stderr", text) : process.stderr.write(text))) child.stderr?.pause();
       });
       let info: ExecutionInfo = { state: "starting", startedAt: Date.now(), exitCode: null, signal: null };
+      base.execution = info;
       const publish = (complete = false) => {
-        if (stdout && stderr) this.reportDiagnostics({ execution: info, stdout: stdout.snapshot(), stderr: stderr.snapshot(), complete });
+        if (job.worker && stdout && stderr) this.reportDiagnostics({ execution: info, stdout: stdout.snapshot(), stderr: stderr.snapshot(), complete });
       };
       // `command` + `args[]` is the whole interface: no shell, so nothing can be word-split
       // or interpolated into one. Only the bundle ever names these — never a channel
       // message, an issue body, or a webhook payload.
       const child = spawn(job.run.command, job.run.args, {
-        stdio: ["ignore", job.worker ? "pipe" : "inherit", job.worker ? "pipe" : "inherit"],
+        stdio: ["ignore", capture ? "pipe" : "inherit", capture ? "pipe" : "inherit"],
         env,
         // Its own process group, so stopping a job stops what the job started. Every
         // real job body shells out — to a coding harness, to a test run, to `gh` — and
@@ -1149,11 +1162,11 @@ export class JobHost {
       if (stdout && stderr) {
         // Keep the forwarding buffers bounded when the container's log sink is slow.
         process.stdout.on("drain", resumeOut);
-        process.stderr.on("drain", resumeErr);
+        (this.opts.workEvents ? process.stdout : process.stderr).on("drain", resumeErr);
         child.stdout!.setEncoding("utf8").on("data", (text: string) => stdout.write(text));
         child.stderr!.setEncoding("utf8").on("data", (text: string) => stderr.write(text));
-        child.once("spawn", () => { info = { ...info, state: "running" }; publish(); });
       }
+      child.once("spawn", () => { base.execution = info = { ...info, state: "running" }; publish(); });
       const checkpoint = job.worker ? setInterval(() => publish(), 1000) : undefined;
 
       /** The group, not the process. Already-gone is not a failure to stop something. */
@@ -1182,9 +1195,9 @@ export class JobHost {
         clearTimeout(bowOut);
         clearTimeout(hardStop);
         if (checkpoint) clearInterval(checkpoint);
-        if (job.worker) {
+        if (capture) {
           process.stdout.removeListener("drain", resumeOut);
-          process.stderr.removeListener("drain", resumeErr);
+          (this.opts.workEvents ? process.stdout : process.stderr).removeListener("drain", resumeErr);
           process.removeListener("SIGTERM", interrupt);
           stdout && stdout.end(); stderr && stderr.end();
           info = {
@@ -1193,6 +1206,7 @@ export class JobHost {
             state: !execution.started ? "not-started" : bowedOut ? "timed-out" : interrupted ? "interrupted"
               : execution.signal ? "signalled" : "exited",
           };
+          base.execution = info;
           execution.info = info;
           execution.interrupted = interrupted;
           publish(true);
@@ -1206,7 +1220,7 @@ export class JobHost {
         else settle({ started: false, exitCode: null, signal: null, bowedOut: false });
       });
       // Drain the pipes before sealing a worker's diagnostics; exit can precede stderr.
-      if (job.worker) child.once("close", (exitCode, signal) => settle({ started: !startFailed, exitCode, signal, bowedOut }));
+      if (capture) child.once("close", (exitCode, signal) => settle({ started: !startFailed, exitCode, signal, bowedOut }));
       child.on("exit", (exitCode, signal) => {
         // The job is over when its body is, so nothing the body started may outlive it.
         //
@@ -1222,7 +1236,7 @@ export class JobHost {
         // would have been grouped with is already gone. Nothing a host does closes that —
         // there is no group left to signal. The container boundary is what covers it.
         stop("SIGKILL");
-        if (!job.worker) settle({ started: true, exitCode, signal, bowedOut });
+        if (!capture) settle({ started: true, exitCode, signal, bowedOut });
       });
     });
   }
@@ -1276,6 +1290,7 @@ export class JobHost {
       JOB_RUN_ID: base.runId,
       JOB_TRIGGER: base.trigger,
       JOB_VERDICT_PATH: verdictPath,
+      JOB_WORK_SCHEMA_VERSION: this.opts.workEvents ? "1" : "",
       JOB_OUTPUT_SCHEMA_VERSION: job.output ? "1" : "",
       JOB_OUTPUT_MAX_BYTES: job.output ? String(JOB_OUTPUT_LIMIT_BYTES) : "",
       /** When this host will ask the body to stop. The body should bow out before it. */
@@ -1309,38 +1324,46 @@ export class JobHost {
    * handle it. A job that ran, exited 0, and reported nothing has proven nothing, and an
    * empty gate list says so in the body's own words.
    */
-  private async readGates(verdictPath: string, job: JobConfig, runId: string, secrets: readonly string[], interrupted: boolean): Promise<readonly Verdict[]> {
-    const unproven = [
-      verdictFromGate({ gate: `${jobGate(job)}:verdict`, executed: false, exitCode: null }),
-    ];
+  private async readReport(verdictPath: string, job: JobConfig, runId: string, secrets: readonly string[], interrupted: boolean): Promise<{
+    gates: readonly Verdict[]; checks: readonly WorkCheck[]; work?: WorkReport; reportStatus: JobRun["reportStatus"];
+  }> {
+    const missing = { gate: `${jobGate(job)}:verdict`, executed: false, exitCode: null };
+    const unproven = { gates: [verdictFromGate(missing)], checks: [] };
     let output: FinalJobOutput = { state: "invalid" };
     try {
       let artifact: string;
-      if (!job.worker && !job.output) artifact = await readFile(verdictPath, "utf8");
-      else {
-        const file = await open(verdictPath, fileFlags.O_RDONLY | fileFlags.O_NOFOLLOW | fileFlags.O_NONBLOCK);
-        try {
-          if (!(await file.stat()).isFile()) return unproven;
-          const buffer = Buffer.alloc(JOB_ARTIFACT_LIMIT_BYTES + 1);
-          let bytesRead = 0;
-          while (bytesRead < buffer.length) {
-            const chunk = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
-            if (!chunk.bytesRead) break;
-            bytesRead += chunk.bytesRead;
-          }
-          if (bytesRead > JOB_ARTIFACT_LIMIT_BYTES) { output = { state: "oversized" }; return unproven; }
-          artifact = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
-        } finally { await file.close(); }
-      }
+      const file = await open(verdictPath, fileFlags.O_RDONLY | fileFlags.O_NOFOLLOW | fileFlags.O_NONBLOCK);
+      try {
+        if (!(await file.stat()).isFile()) return { ...unproven, reportStatus: "invalid" };
+        const buffer = Buffer.alloc(JOB_ARTIFACT_LIMIT_BYTES + 1);
+        let bytesRead = 0;
+        while (bytesRead < buffer.length) {
+          const chunk = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+          if (!chunk.bytesRead) break;
+          bytesRead += chunk.bytesRead;
+        }
+        if (bytesRead > JOB_ARTIFACT_LIMIT_BYTES) {
+          output = { state: "oversized" };
+          return { ...unproven, reportStatus: "oversized" };
+        }
+        artifact = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
+      } finally { await file.close(); }
       const parsed = JobArtifactSchema.safeParse(JSON.parse(artifact));
-      if (!parsed.success) return unproven;
-      if (job.output) output = collectJobOutput(parsed.data.output, secrets);
-      const gates = z.array(GateResultSchema).safeParse(parsed.data.gates);
-      if (!gates.success || gates.data.length === 0) return unproven;
-      return gates.data.map(verdictFromGate);
+      if (!parsed.success) return { ...unproven, reportStatus: "invalid" };
+      const { gates: rawGates, output: rawOutput, ...work } = parsed.data;
+      if (job.output) output = collectJobOutput(rawOutput, secrets);
+      const gates = VerdictArtifactSchema.shape.gates.safeParse(rawGates);
+      if (!gates.success) return { ...unproven, reportStatus: "invalid" };
+      return {
+        gates: gates.data.length ? gates.data.map(verdictFromGate) : unproven.gates,
+        checks: gates.data.length ? gates.data.map(({ gate, executed, exitCode }) => ({ gate, executed, exitCode })) : unproven.checks,
+        work: Object.keys(work).length ? work : undefined,
+        reportStatus: "valid",
+      };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") output = { state: "missing" };
-      return unproven;
+      const reportStatus = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "invalid";
+      output = { state: reportStatus };
+      return { ...unproven, reportStatus };
     } finally {
       if (job.output) {
         try { this.opts.onOutput?.(runId, interrupted ? { state: "interrupted" } : output); }
@@ -1362,8 +1385,24 @@ export class JobHost {
 
   private record(run: Omit<JobRun, "endedAt" | "verdict">): JobRun {
     const complete = this.seal(run);
-    this.opts.onRun?.(complete);
+    this.observeRun(complete);
     return complete;
+  }
+
+  /** Record admission facts even without a listener; observer failures cannot deny a run. */
+  private observeStart(base: RunBase, deadlineMs: number): void {
+    base.deadlineMs = deadlineMs;
+    if (!this.opts.onStart) return;
+    const { jobSlug, runId, trigger, startedAt } = base;
+    try {
+      Promise.resolve(this.opts.onStart?.({ jobSlug, runId, trigger, startedAt, admittedAt: Date.now(), deadlineMs })).catch(() => {});
+    } catch { /* Observers cannot change admission. */ }
+  }
+
+  /** Publish local or dispatched settlement without letting a listener reject it. */
+  private observeRun(run: JobRun): void {
+    try { Promise.resolve(this.opts.onRun?.(run)).catch(() => {}); }
+    catch { /* Observers cannot change settlement. */ }
   }
 
   /**

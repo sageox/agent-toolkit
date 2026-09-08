@@ -112,11 +112,15 @@ describe("versioned application output", () => {
     [{ version: 1, data: { "worker-secret": "key" } }, "blocked"],
     [{ version: 1, data: { records: [0, false, null, "found"] } }, "available"],
   ].map(([output, state]) => ({ output, state })))("keeps valid gates with $state output", async ({ output, state }) => {
+    const { jobWorkEvents } = await import("../src/work-events.ts");
+    const events: string[] = [];
+    const reporting = jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" }, (line) => events.push(line));
     const collected: FinalJobOutput[] = [];
-    const onRun = vi.fn();
-    const runtime = new JobHost({ workDir, onRun, diagnosticSecrets: ["worker-secret"],
+    const onRun = vi.fn(reporting.onRun);
+    const runtime = new JobHost({ workDir, ...reporting, onRun, diagnosticSecrets: ["worker-secret"],
       onOutput: (_id, value) => { collected.push(value); } });
-    const run = await runtime.request(body(`${WRITE}${JSON.stringify(JSON.stringify({ gates, output }))})`,
+    const work = { usage: { scanned: 2 } };
+    const run = await runtime.request(body(`${WRITE}${JSON.stringify(JSON.stringify({ gates, output, ...work }))})`,
       { output: "{format: json}" }), { kind: "human", id: "owner" });
     expect(run.outcome).toBe("completed");
     expect(run.verdict.status).toBe("PASS");
@@ -125,6 +129,12 @@ describe("versioned application output", () => {
     expect(onRun.mock.calls[0]![0]).not.toHaveProperty("output");
     expect(JSON.stringify(onRun.mock.calls)).not.toContain("worker-secret");
     expect(JSON.stringify(onRun.mock.calls)).not.toContain("found");
+    expect(run.work).toEqual(work);
+    const lifecycle = events.map((line) => JSON.parse(line).sageox_work_event);
+    expect(lifecycle.map((event) => event.event)).toEqual(["run.started", "run.completed"]);
+    expect(lifecycle[1]).toMatchObject({ verdict: "PASS", report_status: "valid", ...work });
+    expect(lifecycle[1]).not.toHaveProperty("output");
+    expect(events.join("")).not.toMatch(/worker-secret|found/);
   });
 
   it.each(["{", "", " ".repeat(65537)])("rejects incomplete or oversized artifact bytes without throwing", async (artifact) => {
@@ -320,6 +330,7 @@ describe("bounding", () => {
     // it managed to say on the way out.
     expect(run.outcome).toBe("budget-bowout");
     expect(run.verdict.status).toBe("UNKNOWN");
+    expect(run.checks?.[0]).toEqual({ gate: "job:sweep", executed: true, exitCode: null });
   });
 
   it("stops what the body left behind when the body exits under its budget", async () => {
@@ -1022,4 +1033,140 @@ describe("the status post", () => {
     expect(run.verdict.status).toBe("UNKNOWN");
     expect(posts).toEqual([]);
   });
+});
+
+describe("structured work lifecycle", () => {
+  it("emits admission before completion for both scheduled and requested runs", async () => {
+    const events: string[] = [];
+    const h = new JobHost({ workDir, env: { ...process.env, MARKER: marker },
+      onStart: (r) => { events.push(`start:${r.trigger}`); expect(r.deadlineMs).toBe(jobDeadlineMs(job())); },
+      onRun: (r) => events.push(`end:${r.trigger}`), workEvents: true,
+    });
+    const report = { gates: [{ gate: "ci", executed: true, exitCode: 0 }],
+      artifacts: [{ subject: { provider: "github", scope: "example/repo", kind: "issue", id: "42" }, action: "created" }] };
+    const script = `${WRITE}JSON.stringify(${JSON.stringify(report)}));`;
+    const scheduled = await h.tick(body(script));
+    const requested = await h.request(body(script), { kind: "system", id: "cli" });
+    expect(events).toEqual(["start:schedule", "end:schedule", "start:on-request", "end:on-request"]);
+    expect(scheduled.work?.artifacts).toEqual(report.artifacts);
+    expect(requested.work?.artifacts).toEqual(report.artifacts);
+    expect(requested.checks?.some((c) => c.gate === "ci" && c.executed && c.exitCode === 0)).toBe(true);
+  });
+
+  it("denied requests have a terminal record without a start", async () => {
+    const events: string[] = [];
+    const h = new JobHost({ workDir, onStart: () => events.push("start"), onRun: () => events.push("end") });
+    const result = await h.tick(job({ trigger: '{onRequest: true}' }));
+    expect(result.outcome).toBe("denied-trigger");
+    expect(events).toEqual(["end"]);
+  });
+
+  it("observer failures cannot prevent the job or its result", async () => {
+    const h = new JobHost({ workDir, env: { ...process.env, MARKER: marker },
+      onStart: () => { throw new Error("observer"); }, onRun: () => { throw new Error("observer"); } });
+    expect((await h.tick(body(PROVES))).outcome).toBe("completed");
+    expect(spawns()).toBe(1);
+  });
+
+  it("advertises report capability only when diagnostic isolation is enabled", async () => {
+    for (const enabled of [false, true]) {
+      const h = new JobHost({ workDir, workEvents: enabled });
+      const expected = enabled ? "1" : "";
+      const result = await h.tick(body(`if(process.env.JOB_WORK_SCHEMA_VERSION!==${JSON.stringify(expected)})process.exit(1);${WRITE}JSON.stringify({gates:[{gate:"capability",executed:true,exitCode:0}]}));`));
+      expect(result.verdict.status).toBe("PASS");
+    }
+  });
+});
+
+it("reports refusal, overlap, failure and timeout without confusing admission with execution", async () => {
+  const { jobWorkEvents } = await import("../src/work-events.ts");
+  const events: Array<Record<string, any>> = [];
+  const h = new JobHost({ workDir, ...jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" },
+    (line) => events.push(JSON.parse(line).sageox_work_event)) });
+  const slow = body('setTimeout(()=>process.exit(1),150)');
+  const first = h.tick(slow);
+  const overlap = await h.tick(slow);
+  const failed = await first;
+  const timeout = await h.tick(body('setInterval(()=>{},1000)', { budget: '{wallClockMs: 150, deadlineHeadroomMs: 100}' }));
+  const refused = await h.tick(job({ suspend: "true" }));
+  for (const run of [overlap, refused]) {
+    const own = events.filter((event) => event.run_id === run.runId);
+    expect(own).toHaveLength(1);
+    expect(own[0]).toMatchObject({ event: "run.completed", checks: [{ executed: false, exit_code: null }] });
+  }
+  for (const run of [failed, timeout]) {
+    const own = events.filter((event) => event.run_id === run.runId);
+    expect(own.map((event) => event.event)).toEqual(["run.started", "run.completed"]);
+    expect(own[1]).toMatchObject({ outcome: run.outcome, verdict: run.verdict.status, deadline_ms: own[0]!.deadline_ms });
+  }
+  expect(failed.verdict.status).toBe("FAIL");
+  expect(timeout.outcome).toBe("budget-bowout");
+  expect(timeout.execution?.state).toBe("timed-out");
+});
+
+it.each([
+  ["missing", ""],
+  ["invalid", `${WRITE}'{"gates":[],"summary":"private text"}')`],
+  ["invalid", `${WRITE}'{broken')`],
+  ["oversized", `${WRITE}' '.repeat(65537))`],
+])("does not invent work from a %s report", async (status, script) => {
+  const run = await new JobHost({ workDir }).tick(body(script));
+  expect(run.outcome).toBe("completed");
+  expect(run.verdict.status).toBe("UNKNOWN");
+  expect(run.reportStatus).toBe(status);
+  expect(run.work).toBeUndefined();
+  expect(run.checks).toEqual([{ gate: "job:sweep", executed: true, exitCode: 0 }]);
+});
+
+it("retains unknown subject health, zero counters, and partial work independently of passing gates", async () => {
+  const report = { gates: [{ gate: "monitor", executed: true, exitCode: 0 }],
+    health: [{ subject: { provider: "runtime", kind: "service", id: "api" }, check: "readiness", status: "unknown", observed_at: "2026-09-07T00:00:00Z" }],
+    usage: { scanned: 0 }, partial: true };
+  const run = await new JobHost({ workDir }).tick(body(`${WRITE}JSON.stringify(${JSON.stringify(report)}))`));
+  expect(run.verdict.status).toBe("PASS");
+  expect(run.work).toEqual({ health: report.health, usage: { scanned: 0 }, partial: true });
+  expect(run.work!.usage).not.toHaveProperty("model_calls");
+});
+
+it("settles setup failures and throwing asynchronous observers", async () => {
+  const runs: JobRun[] = [];
+  const h = new JobHost({ workDir: marker, onStart: async () => { throw new Error("observer"); },
+    onRun: async (run) => { runs.push(run); throw new Error("observer"); } });
+  await writeFile(marker, "not a directory");
+  const run = await h.tick(body(""));
+  expect(run.outcome).toBe("crashed");
+  expect(run.checks?.[0]?.executed).toBe(false);
+  expect(runs).toEqual([run]);
+});
+
+it("keeps running and releases single-flight when event and diagnostic output throws", async () => {
+  const { jobWorkEvents } = await import("../src/work-events.ts");
+  const h = new JobHost({ workDir, env: { ...process.env, MARKER: marker },
+    ...jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" }) });
+  const sink = vi.spyOn(process.stdout, "write").mockImplementation(() => { throw new Error("sink unavailable"); });
+  try {
+    for (let i = 0; i < 2; i++) {
+      const run = await h.tick(body(`console.log("diagnostic");${PROVES}`));
+      expect(run.verdict.status).toBe("PASS");
+    }
+    expect(spawns()).toBe(2);
+  } finally { sink.mockRestore(); }
+});
+
+it.each([false, true])("gives the process its full budget after slow setup (events=%s)", async (enabled) => {
+  const { jobWorkEvents } = await import("../src/work-events.ts");
+  const h = new JobHost({ workDir, ...jobWorkEvents("worker", { AGENT_WORK_EVENTS: enabled ? "1" : "0" }, () => {}) });
+  vi.useFakeTimers({ toFake: ["Date"] });
+  // Advance setup time without sleeping; process timers remain real.
+  const setup = vi.spyOn(h as unknown as { workDir(): Promise<string> }, "workDir").mockImplementation(async () => {
+    vi.setSystemTime(Date.now() + 700);
+    return workDir;
+  });
+  try {
+    const run = await h.tick(body(`${WRITE}JSON.stringify({gates:[{gate:"ci",executed:true,exitCode:0}]}))`,
+      { budget: "{wallClockMs: 500, deadlineHeadroomMs: 100}" }));
+    expect(run.outcome).toBe("completed");
+    expect(run.verdict.status).toBe("PASS");
+    expect(run.deadlineMs).toBe(600);
+  } finally { setup.mockRestore(); vi.useRealTimers(); }
 });

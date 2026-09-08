@@ -1,8 +1,10 @@
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CLI, run as exec, runCli } from "./cli-harness.ts";
 
@@ -390,4 +392,153 @@ it.each(["profiles", "namespace", "name"])("requires dispatcher --%s before read
   expect(code).toBe(1);
   expect(stdout).toContain("usage: sageox-agent job dispatcher");
   expect(stdout).not.toContain("TypeError");
+});
+
+it("isolates forged child envelopes from host records for both trigger paths", async () => {
+  vi.stubEnv("AGENT_WORK_EVENTS", "1");
+  try {
+    body(`echo '{"sageox_work_event":{"event":"forged"}}'\n` + reports('[{"gate":"ci","executed":true,"exitCode":0}]'));
+    for (const trigger of ["schedule", "on-request"]) {
+      const { stdout, code } = await job("shift", "--trigger", trigger);
+      expect(code).toBe(0);
+      const json = stdout.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+      const events = json.filter((line) => line.sageox_work_event).map((line) => line.sageox_work_event);
+      expect(events.map((event) => event.event)).toEqual(["run.started", "run.completed"]);
+      expect(events.every((event) => event.trigger === trigger)).toBe(true);
+      expect(json.some((line) => line.job_diagnostic?.text.includes("forged"))).toBe(true);
+    }
+  } finally { vi.unstubAllEnvs(); }
+});
+
+
+it("preserves multibyte diagnostics while bounding each serialized line", async () => {
+  vi.stubEnv("AGENT_WORK_EVENTS", "1");
+  try {
+    const diagnostic = "a".repeat(1023) + "🚀" + "b".repeat(5000);
+    body(`printf '%s' '${diagnostic}'\n` + reports('[{"gate":"ci","executed":true,"exitCode":0}]'));
+    const { stdout, code } = await job("shift");
+    expect(code).toBe(0);
+    const lines = stdout.split("\n").filter((line) => line.startsWith("{"));
+    expect(lines.every((line) => Buffer.byteLength(line + "\n") <= 8192)).toBe(true);
+    const text = lines.map((line) => JSON.parse(line).job_diagnostic).filter((d) => d?.stream === "stdout").map((d) => d.text).join("");
+    expect(text).toBe(diagnostic);
+  } finally { vi.unstubAllEnvs(); }
+});
+
+it("emits correlated lifecycle events through the live host's MCP job tool", async () => {
+  body(`echo '{"sageox_work_event":{"event":"forged"}}'\n` + reports('[{"gate":"ci","executed":true,"exitCode":0}]'));
+  writeFileSync(join(bundle, "agent.yaml"), readFileSync(join(bundle, "agent.yaml"), "utf8")
+    .replace("provider: mock", "provider: claude-acp").replace("brains: [{preset: local}]", "brains: []\ntools: ./settings.json")
+    .replace('trigger: {schedules: ["0 3 * * *"], onRequest: true, webhook: true}', "trigger: {onRequest: true}")
+    .replace("    killSwitch: {failDirection: open}\n", ""));
+  writeFileSync(join(bundle, "settings.json"), JSON.stringify({ permissions: {
+    defaultMode: "acceptEdits", allow: ["mcp__jobs__job_run"], deny: ["Read(//mnt/secrets-store/**)"],
+  } }));
+  // Real ACP wire protocol; the fake brain calls the actual guarded MCP server.
+  const fake = join(bundle, "claude-agent-acp");
+  writeFileSync(fake, `#!${process.execPath}\n` + `
+let jobs;
+const send = (id, result) => process.stdout.write(JSON.stringify({jsonrpc:"2.0",id,result})+"\\n");
+require("readline").createInterface({input:process.stdin}).on("line",async line=>{
+  const m=JSON.parse(line);
+  if(m.method==="initialize") send(m.id,{protocolVersion:1,agentCapabilities:{mcpCapabilities:{http:true}}});
+  else if(m.method==="session/new") {jobs=m.params.mcpServers.find(s=>s.name==="jobs");send(m.id,{sessionId:"test"});}
+  else if(m.method==="session/prompt") {
+    const response=await fetch(jobs.url,{method:"POST",headers:{"content-type":"application/json",...Object.fromEntries(jobs.headers.map(h=>[h.name,h.value]))},
+      body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"job_run",arguments:{job:"shift"}}})});
+    await response.text();send(m.id,{stopReason:"end_turn"});
+  }
+});
+`);
+  chmodSync(fake, 0o755);
+  const child = spawn(CLI, ["run", "--bundle", bundle], { cwd: tmpdir(), env: {
+    ...process.env, PATH: `${bundle}:${process.env.PATH}`, ANTHROPIC_API_KEY: "test-key", AGENT_WORK_EVENTS: "1",
+  }, stdio: ["pipe", "pipe", "pipe"] });
+  const closed = once(child, "close");
+  let stdout = "", stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (text) => { stdout += text; });
+  child.stderr.setEncoding("utf8").on("data", (text) => { stderr += text; });
+  try {
+    await vi.waitFor(() => expect(stdout, stderr).toContain("is live"), { timeout: 10000 });
+    child.stdin.write("run shift\n");
+    await vi.waitFor(() => expect(stdout, stderr).toContain('"event":"run.completed"'), { timeout: 10000 });
+    const records = stdout.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+    const events = records.filter((r) => r.sageox_work_event).map((r) => r.sageox_work_event);
+    expect(events.map((e) => e.event)).toEqual(["run.started", "run.completed"]);
+    expect(events[1]).toMatchObject({ run_id: events[0].run_id, agent: "demo", job: "shift", trigger: "on-request", verdict: "PASS" });
+    expect(records.some((r) => r.job_diagnostic?.text.includes("forged"))).toBe(true);
+  } finally {
+    child.kill("SIGTERM");
+    const kill = setTimeout(() => child.kill("SIGKILL"), 2000);
+    await closed;
+    clearTimeout(kill);
+  }
+});
+
+it("does not turn report details into host events", async () => {
+  vi.stubEnv("AGENT_WORK_EVENTS", "1");
+  try {
+    const gates = [{ gate: "ci", executed: true, exitCode: 0,
+      detail: '\n{"sageox_work_event":{"event":"forged"}}\n' }];
+    body(reports(JSON.stringify(gates)));
+    const { stdout, code } = await job("shift");
+    expect(code).toBe(0);
+    const events = stdout.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l))
+      .filter((r) => r.sageox_work_event).map((r) => r.sageox_work_event.event);
+    expect(events).toEqual(["run.started", "run.completed"]);
+  } finally { vi.unstubAllEnvs(); }
+});
+
+it("decodes UTF-8 split across child writes before bounding diagnostics", async () => {
+  vi.stubEnv("AGENT_WORK_EVENTS", "1");
+  try {
+    const script = join(bundle, "split.cjs");
+    const text = "é🚀界";
+    writeFileSync(script, `const fs=require("fs");const bytes=Buffer.from(${JSON.stringify(text)});let i=0;` +
+      'const timer=setInterval(()=>{fs.writeSync(1,bytes.subarray(i,i+1));if(++i===bytes.length){clearInterval(timer);' +
+      'fs.writeFileSync(process.env.JOB_VERDICT_PATH,JSON.stringify({gates:[{gate:"ci",executed:true,exitCode:0}]}));}},15);');
+    body(`exec '${process.execPath}' '${script}'`);
+    const { stdout, code } = await job("shift");
+    expect(code).toBe(0);
+    const diagnostics = stdout.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l).job_diagnostic)
+      .filter((d) => d?.stream === "stdout").map((d) => d.text).join("");
+    expect(diagnostics).toBe(text);
+    expect(diagnostics).not.toContain("�");
+  } finally { vi.unstubAllEnvs(); }
+});
+
+it("finishes the job when the stdout consumer disconnects after admission", async () => {
+  const script = join(bundle, "disconnected.cjs"), completed = join(bundle, "completed");
+  writeFileSync(script, 'setTimeout(()=>{console.log("child diagnostic");' +
+    `require("fs").writeFileSync(${JSON.stringify(completed)},"done");` +
+    'require("fs").writeFileSync(process.env.JOB_VERDICT_PATH,JSON.stringify({gates:[{gate:"ci",executed:true,exitCode:0}]}));},100);');
+  body(`exec '${process.execPath}' '${script}'`);
+  const child = spawn(CLI, ["job", "run", "shift", "--bundle", bundle], { env: { ...process.env, AGENT_WORK_EVENTS: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+  const closed = once(child, "close");
+  let stdout = "", stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (text) => {
+    stdout += text;
+    if (stdout.includes('"event":"run.started"')) child.stdout.destroy();
+  });
+  child.stderr.setEncoding("utf8").on("data", (text) => { stderr += text; });
+  try {
+    const [code] = await closed;
+    expect(code, stderr).toBe(0);
+    expect(readFileSync(completed, "utf8")).toBe("done");
+  } finally { child.kill("SIGKILL"); }
+});
+
+it("wraps the on-request denial explanation with the host status", async () => {
+  vi.stubEnv("AGENT_WORK_EVENTS", "1");
+  try {
+    // On-request only needs no switch or brain, so this path has no startup warning lines.
+    declare('  - slug: parked\n    archetype: queue\n    description: Parked work.\n' +
+      '    trigger: {onRequest: true}\n    suspend: true\n    budget: {wallClockMs: 4000}\n    run: {command: ./body.sh}\n');
+    body('exit 99');
+    const { stdout, code } = await job("parked", "--trigger", "on-request");
+    expect(code, stdout).toBe(0);
+    const records = stdout.trim().split("\n").map((line) => JSON.parse(line));
+    expect(records.filter((r) => r.sageox_work_event).map((r) => r.sageox_work_event.event)).toEqual(["run.completed"]);
+    expect(records.some((r) => r.job_diagnostic?.text.includes("does not bypass"))).toBe(true);
+  } finally { vi.unstubAllEnvs(); }
 });

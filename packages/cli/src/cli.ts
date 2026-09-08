@@ -59,6 +59,8 @@ import {
   WorkerProfilesSchema,
   serveJobDispatcher,
   JobSchema,
+  jobWorkEvents,
+  writeJobDiagnostic,
   jobDeadlineMs,
   describeJobRun,
   serveJobs,
@@ -410,6 +412,7 @@ async function buildBrain(
     // and something has to settle it when this process is told to stop.
     jobs = new JobHost({
       external: externalJobs(),
+      ...jobWorkEvents(manifest.name),
       switchSource: await jobSwitchSource(manifest, secretsDir),
       secretOpts: { dir: secretsDir },
       // A job started from chat announces itself exactly as a scheduled one does. The
@@ -1847,6 +1850,7 @@ async function jobCmd(argv: string[]): Promise<void> {
   const host = new JobHost({
     external: externalJobs(),
     requestId: process.env.AGENT_JOB_REQUEST_ID ? `${process.env.AGENT_JOB_REQUEST_ID}:${slug}` : undefined,
+    ...jobWorkEvents(manifest.name),
     switchSource,
     post: reporter?.post,
     read: reporter?.read,
@@ -1869,11 +1873,13 @@ async function jobCmd(argv: string[]): Promise<void> {
   // Headline, then the gates beneath it — the shape a job's status post takes, and the
   // reason it takes it: the verdict is what gets read, and the gates are why it says that.
   // The same rendering the chat tool returns, so one run reads one way wherever it lands.
-  process.stdout.write(describeJobRun(run, job.report?.proven));
+  let description = describeJobRun(run, job.report?.proven);
   const denied = run.outcome === "denied-switch" || run.outcome === "denied-suspend";
   if (denied && trigger === "on-request") {
-    process.stdout.write("  a run started from this CLI is `system`, and does not bypass\n");
+    description += "  a run started from this CLI is `system`, and does not bypass\n";
   }
+  if (process.env.AGENT_WORK_EVENTS === "1") writeJobDiagnostic("host", description);
+  else process.stdout.write(description);
 
   // The exit code answers "did the run happen", not "what did it find". A job that ran its
   // gates and found a real failure is a working job, and a green job with a FAIL verdict

@@ -891,3 +891,28 @@ it.each([false, true])("reads short verdict chunks completely while preserving t
     expect(reads.mock.calls.length).toBeGreaterThan(1);
   } finally { reads.mockRestore(); await rm(dir, { recursive: true, force: true }); }
 });
+
+it.each(["pending", "finished", "skipped-overlap"] as const)("reports external %s observation with its existing run ID despite throwing observers", async (state) => {
+  const { jobWorkEvents } = await import("../src/work-events.ts");
+  const job = manifest().jobs[0]!;
+  const remote = new ExternalJobs("http://unused", "unused");
+  const terminal = (req: ExternalRequest) => ({
+    runId: req.runId, jobSlug: req.jobSlug, startedAt: req.startedAt, endedAt: req.startedAt + 50,
+    state: "finished" as const, outcome: state === "skipped-overlap" ? "skipped-overlap" as const : "completed" as const,
+    ...(state === "skipped-overlap" ? {} : { result: { outcome: "completed" as const, counts: { PASS: 1, FAIL: 0, UNKNOWN: 0 } } }),
+  });
+  vi.spyOn(remote, "dispatch").mockImplementation(async (req) => state === "pending"
+    ? { runId: req.runId, jobSlug: req.jobSlug, startedAt: req.startedAt, state: "pending" }
+    : terminal(req));
+  vi.spyOn(remote, "wait").mockImplementation(async (req) => externalRun(req, terminal(req)));
+  const events: Array<Record<string, any>> = [];
+  const observer = jobWorkEvents("demo", { AGENT_WORK_EVENTS: "1" }, (line) => events.push(JSON.parse(line).sageox_work_event));
+  const host = new JobHost({ external: remote, ...observer,
+    onStart: (run) => { observer.onStart!(run); throw new Error("observer failed"); },
+    onRun: (run) => { observer.onRun!(run); throw new Error("observer failed"); },
+  });
+  const run = await host.request(job, { kind: "human", id: "owner" });
+  expect(events.map((e) => e.event)).toEqual(state === "pending" ? ["run.started", "run.completed"] : ["run.completed"]);
+  expect(events.at(-1)).toMatchObject({ run_id: run.runId, outcome: run.outcome, partial: true });
+  expect(events.every((e) => e.run_id === run.runId)).toBe(true);
+});
