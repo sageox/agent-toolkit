@@ -307,6 +307,10 @@ answer does not prove that an operation failed or had no effects. An available a
 does not prove success: the worker host or its termination summary may still be lost.
 Do not rerun a mutation to recover an answer. The worker retries delivery of the identical
 final publication once on a transient failure, without reclaiming or executing the job.
+Each delivery attempt waits up to two seconds and does not extend the worker's existing
+deadline. A missing acknowledgement does not prove that storage failed:
+the request may still persist. The warning therefore says delivery is unconfirmed; retrieve
+run status to determine availability instead of re-executing the operation.
 
 The complete output envelope, serialized as compact UTF-8 JSON, is limited to **16 KiB**.
 The artifact file is limited to **64 KiB**, and the worker publication and status response

@@ -341,7 +341,9 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
         const verdict = counts ? (counts.FAIL > 0 ? "FAIL" : counts.UNKNOWN > 0 || counts.PASS === 0 ? "UNKNOWN" : "PASS") : "UNKNOWN";
         const response = JSON.stringify({ ...status, verdict: status.state === "finished" ? verdict : "not finished",
           ...(tool === "job_cancel" ? { note: "Cancellation does not roll back external side effects." } : {}) });
-        if (Buffer.byteLength(response) > JOB_STATUS_LIMIT_BYTES) throw new ToolRefused("job status exceeds its response byte limit; no answer was truncated");
+        if (Buffer.byteLength(response) > JOB_STATUS_LIMIT_BYTES) throw new ToolRefused(
+          "job status exceeds its response byte limit; no answer was truncated" +
+          (asked.includeOutput ? "; retry without includeOutput to read the status alone" : ""));
         return response;
       }
       if (tool !== JOB_RUN_TOOL_NAME) throw new Error(`unknown tool ${tool}`);

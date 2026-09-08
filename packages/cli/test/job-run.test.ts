@@ -65,10 +65,11 @@ it("requires explicit operator output retrieval on job status", async () => {
   declare(shift(`    worker: {image: "example/worker@sha256:${"a".repeat(64)}", directory: /work}\n    output: {format: json}\n`));
   const runId = "b".repeat(40);
   const readers: (string | null)[] = [];
+  const authorization: (string | undefined)[] = [];
   const server = createServer((req, res) => {
     const reader = new URL(req.url!, "http://dispatcher").searchParams.get("outputReader");
     readers.push(reader);
-    expect(req.headers.authorization).toBe("Bearer operator-credential");
+    authorization.push(req.headers.authorization);
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
       jobSlug: "shift", runId, startedAt: Date.now(), state: "finished", outcome: "completed",
       output: { state: "available", ...(reader === "operator" ? { value: { version: 1, data: { records: [42] } } } : {}) },
@@ -83,6 +84,7 @@ it("requires explicit operator output retrieval on job status", async () => {
       expect(JSON.parse(stdout).output).toEqual({ state: "available", ...(output ? { value: { version: 1, data: { records: [42] } } } : {}) });
     }
     expect(readers).toEqual([null, "operator"]);
+    expect(authorization).toEqual(["Bearer operator-credential", "Bearer operator-credential"]);
   } finally { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 

@@ -6,6 +6,7 @@ export const JOB_ARTIFACT_LIMIT_BYTES = 64 * 1024;
 export const JOB_STATUS_LIMIT_BYTES = JOB_OUTPUT_LIMIT_BYTES + 4096;
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+/** Validate JSON values without recursing beyond the supported output depth. */
 function isJson(value: unknown, depth = 0): value is Json {
   if (depth > 32 || depth === 32 && value !== null && typeof value === "object") return false;
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;

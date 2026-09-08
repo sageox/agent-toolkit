@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import { JobDispatcher, KubeError, serveJobDispatcher, type KubeObject } from "../src/job-dispatcher.ts";
-import { ExternalJobs, externalRun, jobDefinition, workerResult, publishJobOutput, type ExternalRequest } from "../src/external-jobs.ts";
+import { ExternalJobs, externalRun, jobDefinition, workerResult, publishJobOutput, type ExternalRequest, type ExternalStatus } from "../src/external-jobs.ts";
 import { JOB_STATUS_LIMIT_BYTES, type FinalJobOutput } from "../src/job-output.ts";
 import { JobSchema, loadManifest, type JobConfig } from "../src/manifest.ts";
 import { JobHost, describeJobRun } from "../src/job-host.ts";
@@ -282,6 +282,7 @@ describe("durable application output", () => {
   it("bounds transport bytes and rejects interrupted responses without treating them as answers", async () => {
     const server = createServer((req, res) => {
       if (req.url?.includes("output")) { res.writeHead(503).end(); return; }
+      if (req.url?.includes("job=empty")) { res.writeHead(204).end(); return; }
       if (req.url?.includes("job=interrupted")) { res.writeHead(200).write('{"runId":'); res.destroy(); return; }
       res.writeHead(200).end("界".repeat(Math.ceil(JOB_STATUS_LIMIT_BYTES / 3) + 1));
     });
@@ -289,10 +290,35 @@ describe("durable application output", () => {
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     try {
       const remote = new ExternalJobs(url, "token");
+      await expect(remote.status("empty", "a".repeat(40))).rejects.toThrow("job dispatcher returned an invalid, incomplete or oversized result");
       await expect(remote.status("oversized", "a".repeat(40))).rejects.toThrow("oversized");
       await expect(remote.status("interrupted", "a".repeat(40))).rejects.toThrow();
       expect(await publishJobOutput(url, "token", "a".repeat(40), answer)).toBe(false);
     } finally { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
+  });
+
+  it("explains how to retrieve status when the complete model response exceeds its bound", async () => {
+    const status: ExternalStatus = { runId: "a".repeat(40), jobSlug: "task", startedAt: Date.now(), state: "finished",
+      result: { outcome: "completed", counts: { PASS: 2, FAIL: 0, UNKNOWN: 0 } },
+      output: { state: "available", value: { version: 1, data: "x".repeat(16000) } } };
+    // A legal dispatcher response exactly at its limit becomes too large when MCP adds the verdict.
+    status.jobSlug += "x".repeat(JOB_STATUS_LIMIT_BYTES - Buffer.byteLength(JSON.stringify(status)));
+    const job = { ...manifest("output: {format: json}").jobs[0]!, slug: status.jobSlug };
+    const host = new JobHost();
+    vi.spyOn(host, "status").mockImplementation(async (_job, _runId, reader) =>
+      reader ? status : { ...status, output: { state: "available" } });
+    const home: InboundEvent = { id: { surface: "console", nativeId: "message" }, surface: "console",
+      channel: { surface: "console", id: "chat", isPublic: false },
+      author: { surface: "console", id: "owner", isAgent: false, isSelf: false }, text: "status", mentionsMe: true, ts: "", raw: null };
+    const handler = jobHandler({ jobs: [job], host, agentName: "demo", answering: () => home,
+      turnTimeoutMs: 120000, policy: new ToolPolicy(["mcp__jobs__job_status"], []) });
+    const call = (includeOutput: boolean) => handler({ method: "tools/call", params: { name: "job_status",
+      arguments: { job: job.slug, runId: status.runId, includeOutput } } });
+    await expect(call(true)).rejects.toThrow("retry without includeOutput to read the status alone");
+    const result = await call(false) as { content: { text: string }[] };
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({ verdict: "PASS", output: { state: "available" } });
+    expect(Buffer.byteLength(result.content[0]!.text)).toBeLessThan(JOB_STATUS_LIMIT_BYTES);
+    expect(JSON.parse(result.content[0]!.text).output).not.toHaveProperty("value");
   });
 });
 

@@ -141,6 +141,7 @@ describe("versioned application output", () => {
     const runtime = new JobHost({ workDir, onOutput });
     for (const enabled of [false, true]) {
       const script = `if(process.env.JOB_OUTPUT_SCHEMA_VERSION!==${JSON.stringify(enabled ? "1" : "")})process.exit(1);` +
+        `if(process.env.JOB_OUTPUT_MAX_BYTES!==${JSON.stringify(enabled ? "16384" : "")})process.exit(1);` +
         `${WRITE}JSON.stringify({gates:${JSON.stringify(gates)},output:{version:1,data:"private-answer"}}))`;
       const run = await runtime.request(body(script, enabled ? { output: "{format: json}" } : {}), { kind: "human", id: "owner" });
       expect(run.verdict.status).toBe("PASS");

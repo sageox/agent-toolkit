@@ -15,6 +15,7 @@ import {
 } from "./external-jobs.ts";
 
 const ObjectName = z.string().regex(/^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$/).max(253);
+const RUN_RETENTION_MS = 7 * 86400_000;
 export const WorkerProfilesSchema = z.record(z.string(), z.object({
   serviceAccountName: ObjectName,
   secrets: z.record(z.string(), z.object({ name: ObjectName, key: z.string().regex(/^[A-Za-z0-9_.-]+$/) }).strict()).default({}),
@@ -180,11 +181,12 @@ export class JobDispatcher {
     return this.status(job.slug, request.runId);
   }
 
+  /** Read retained facts and enforce the admitted output audience and retention window. */
   async status(slug: string, runId: string, outputReader?: string): Promise<ExternalStatus> {
     const cm = await this.owned(runId, slug);
     const run = this.read(cm);
     const status = run.status;
-    if (status.output && status.state === "finished" && Date.now() - status.endedAt! > 7 * 86400_000) {
+    if (status.output && status.state === "finished" && Date.now() - status.endedAt! > RUN_RETENTION_MS) {
       status.output = { state: "expired" };
     }
     if (outputReader !== undefined) {
@@ -429,12 +431,12 @@ export class JobDispatcher {
         cm = cleared;
         await this.release(run);
       }
-      if (!run.cleaned || ((run.status.result || cm.data?.diagnostics || cm.data?.outputState) && Date.now() - run.status.endedAt! > 7 * 86400_000)) {
+      if (!run.cleaned || ((run.status.result || cm.data?.diagnostics || cm.data?.outputState) && Date.now() - run.status.endedAt! > RUN_RETENTION_MS)) {
         run.cleaned = true;
         delete run.job;
         delete run.profile;
         delete run.tokenHash;
-        if (Date.now() - run.status.endedAt! > 7 * 86400_000) {
+        if (Date.now() - run.status.endedAt! > RUN_RETENTION_MS) {
           delete run.status.result;
           delete run.status.execution;
           delete run.status.diagnostics;

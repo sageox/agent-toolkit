@@ -115,8 +115,10 @@ export class ExternalJobs {
     if (!response.ok) throw new Error(`job dispatcher refused (${response.status}); no local execution fallback`);
     const chunks: Uint8Array[] = [];
     let bytes = 0;
-    const reader = response.body!.getReader();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
+      reader = response.body?.getReader();
+      if (!reader) throw new Error("missing dispatcher response body");
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -127,13 +129,14 @@ export class ExternalJobs {
       return schema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))));
     } catch {
       throw new Error("job dispatcher returned an invalid, incomplete or oversized result");
-    } finally { await reader.cancel().catch(() => {}); }
+    } finally { await reader?.cancel().catch(() => {}); }
   }
 
   dispatch(request: ExternalRequest): Promise<ExternalStatus> {
     return this.call("/runs", ExternalStatusSchema, ExternalRequestSchema.parse(request));
   }
 
+  /** Retrieve execution facts; application data requires an explicit trusted reader. */
   status(jobSlug: string, runId: string, signal?: AbortSignal, outputReader?: string): Promise<ExternalStatus> {
     const reader = outputReader === undefined ? "" : `&outputReader=${encodeURIComponent(outputReader)}`;
     return this.call(`/runs/${RunIdSchema.parse(runId)}?job=${encodeURIComponent(jobSlug)}${reader}`, ExternalStatusSchema, undefined, signal);
@@ -157,7 +160,11 @@ export class ExternalJobs {
   }
 }
 
-/** Retry only delivery of the same sealed answer, never the claim or job body. */
+/**
+ * Retry only delivery of the same sealed answer, never the claim or job body.
+ * False means no acknowledgement: a timed-out request may still persist. Keep attempts
+ * short because Kubernetes may terminate this worker at its existing job deadline.
+ */
 export async function publishJobOutput(url: string, token: string, runId: string, output: FinalJobOutput): Promise<boolean> {
   const body = JSON.stringify(FinalJobOutputSchema.parse(output));
   for (let attempt = 0; attempt < 2; attempt++) {

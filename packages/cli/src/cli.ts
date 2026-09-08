@@ -1754,7 +1754,7 @@ async function jobCmd(argv: string[]): Promise<void> {
     const run = await host.executeWorker(job, request);
     writeFileSync("/dev/termination-log", JSON.stringify(workerResult(run)));
     if (job.output && !await publishJobOutput(url, token, request.runId, output)) {
-      console.warn("worker output delivery unavailable; execution will not be retried");
+      console.warn("worker output delivery not confirmed; retrieve run status; execution will not be retried");
     }
     await uploading;
     return;
