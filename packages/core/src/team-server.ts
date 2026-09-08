@@ -13,6 +13,7 @@ import {
 } from "./mcp-http.ts";
 import { probeOk, probeUnavailable, type ProbeFailure, type ProbeResult } from "./health.ts";
 import { createLedgerSync, type LedgerRemote } from "./ledger-sync.ts";
+import { passthroughEnv } from "./brain-env.ts";
 
 const run = promisify(execFile);
 
@@ -649,7 +650,10 @@ export function oxCwd(scope: OxScope): string {
  * {@link OxScope.token}.
  */
 export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env = { ...base };
+  const env = passthroughEnv(base, [
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+    "SAGEOX_TOKEN", "SAGEOX_ENDPOINT",
+  ]);
   if (scope.configHome) env.XDG_CONFIG_HOME = scope.configHome;
   if (scope.dataHome) {
     env.XDG_DATA_HOME = scope.dataHome;
@@ -785,9 +789,8 @@ async function runOx(args: string[], scope: OxScope, cwd: string): Promise<unkno
   // no business coming back inside an error message.
   const verb = args[0];
   const env = oxEnv(scope);
-  // ox's project override outranks cwd. Never inherit the launching coding agent's
-  // project; local ledger commands bind it to the gateway-selected repository.
-  delete env.OX_PROJECT_ROOT;
+  // The allowlist drops ambient project overrides; local ledger commands bind ox to
+  // the gateway-selected repository because OX_PROJECT_ROOT outranks cwd.
   if (verb !== "query") env.OX_PROJECT_ROOT = cwd;
   // The toolkit's hosted brain runs Claude over ACP. ox 0.14.3's session list
   // ignores the inherited --json flag outside agent context; make that context

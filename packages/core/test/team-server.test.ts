@@ -91,6 +91,36 @@ const text = async (name: string, args?: Record<string, unknown>, ox?: TeamOx) =
   (await call(name, args, ox)).content[0].text;
 
 describe("team brain", () => {
+  it("gives the ox child its scoped credential without unrelated gateway credentials or overrides", async () => {
+    const excluded = [
+      "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "SLACK_BOT_TOKEN", "BUZZ_SECRET_KEY", "FUTURE_SERVICE_SECRET",
+      "OX_PROJECT_ROOT", "OX_XDG_DISABLE", "NODE_OPTIONS",
+    ];
+    try {
+      for (const key of excluded) vi.stubEnv(key, "fixture-value");
+      vi.stubEnv("SAGEOX_TOKEN", "ambient-fixture-token");
+      const { value: env } = await withFakeOx(
+        `env | cut -d= -f1 > ./seen
+printf '%s\\n' "SAGEOX_TOKEN=$SAGEOX_TOKEN" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" "SAGEOX_DAEMON=$SAGEOX_DAEMON" "OX_NO_DAEMON=$OX_NO_DAEMON" >> ./seen
+echo '{"team_context":{"results":[]}}'`,
+        async (brain, bin) => {
+          await expect(brain.search("team", 1)).resolves.toEqual([]);
+          return readFileSync(join(bin, "seen"), "utf8");
+        },
+        () => ({ token: () => "scoped-fixture-token", configHome: "/mounted-auth" }),
+      );
+      for (const key of excluded) expect(env).not.toMatch(new RegExp(`^${key}$`, "m"));
+      expect(env).toContain("SAGEOX_TOKEN=scoped-fixture-token\n");
+      expect(env).toContain("XDG_CONFIG_HOME=/mounted-auth\n");
+      expect(env).toContain("SAGEOX_DAEMON=false\n");
+      expect(env).toContain("OX_NO_DAEMON=1\n");
+      expect(process.env.SAGEOX_TOKEN).toBe("ambient-fixture-token");
+      expect(process.env.FUTURE_SERVICE_SECRET).toBe("fixture-value");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("offers the read verbs the fleet uses, and no way to write", async () => {
     const listed = (await teamBrainHandler(fakeOx())({ id: 1, method: "tools/list" })) as {
       tools: Array<{ name: string; inputSchema: unknown }>;

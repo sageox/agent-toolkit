@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity, ledger availability, and a refresh within five minutes have been verified.
   Missing or stale data is refused instead of appearing as an empty week. The gateway
   selects the cwd from `repos.conf`, isolates ox state, and exposes no raw status output
-  or credential details. Re-run `sageox-agent memory add team` to add the tools to an
+  or credential details. The ox subprocess inherits only basic process settings, ox
+  paths, and SageOx authentication settings; unrelated gateway credentials are excluded.
+  Re-run `sageox-agent memory add team` to add the tools to an
   existing policy. Malformed search responses also fail instead of becoming
   successful empty searches.
 

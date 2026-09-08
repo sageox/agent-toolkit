@@ -143,6 +143,21 @@ describe("origin checks", () => {
 });
 
 describe("ox credential handling", () => {
+  it("preserves workstation paths and endpoint while applying the configured scope", () => {
+    const base = {
+      PATH: "/usr/bin", HOME: "/workstation", LANG: "en_US.UTF-8", LC_ALL: "C", TZ: "UTC", TMPDIR: "/tmp",
+      XDG_CONFIG_HOME: "/config", XDG_DATA_HOME: "/data", XDG_CACHE_HOME: "/cache",
+      XDG_STATE_HOME: "/state", XDG_RUNTIME_DIR: "/run", SAGEOX_ENDPOINT: "https://sageox.ai",
+    };
+    expect(oxEnv({}, base)).toEqual({ ...base, SAGEOX_DAEMON: "false", OX_NO_DAEMON: "1" });
+    expect(oxEnv({ configHome: "/mounted-auth", dataHome: "/agent-data" }, base)).toMatchObject({
+      XDG_CONFIG_HOME: "/mounted-auth", XDG_DATA_HOME: "/agent-data", XDG_CACHE_HOME: "/agent-data/cache",
+      XDG_STATE_HOME: "/state", XDG_RUNTIME_DIR: "/run",
+    });
+    expect(base.XDG_CONFIG_HOME).toBe("/config");
+    expect(base.XDG_DATA_HOME).toBe("/data");
+  });
+
   it("passes a token supplied out-of-band, for containers with no interactive login", () => {
     const env = oxEnv({ token: () => "tok_abc" }, { PATH: "/usr/bin" });
     expect(env.SAGEOX_TOKEN).toBe("tok_abc");
