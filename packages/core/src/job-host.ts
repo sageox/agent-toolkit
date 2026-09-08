@@ -1306,7 +1306,12 @@ export class JobHost {
         const file = await open(verdictPath, "r");
         try {
           const buffer = Buffer.alloc(64 * 1024 + 1);
-          const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+          let bytesRead = 0;
+          while (bytesRead < buffer.length) {
+            const chunk = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+            if (!chunk.bytesRead) break;
+            bytesRead += chunk.bytesRead;
+          }
           if (bytesRead > 64 * 1024) return unproven;
           artifact = buffer.toString("utf8", 0, bytesRead);
         } finally { await file.close(); }

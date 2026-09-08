@@ -103,7 +103,18 @@
               }
             },
             "resources": {
-              "type": "object"
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "requests": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                },
+                "limits": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                }
+              }
             }
           }
         },

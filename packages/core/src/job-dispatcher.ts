@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -27,8 +27,10 @@ type WorkerProfiles = z.infer<typeof WorkerProfilesSchema>;
 export interface KubeObject {
   apiVersion?: string;
   kind?: string;
-  metadata: { name: string; resourceVersion?: string; uid?: string; labels?: Record<string, string>; deletionTimestamp?: string; continue?: string };
+  metadata: { name: string; resourceVersion?: string; uid?: string; labels?: Record<string, string>; deletionTimestamp?: string; continue?: string;
+    ownerReferences?: { apiVersion: string; kind: string; name: string; uid: string }[] };
   data?: Record<string, string>;
+  stringData?: Record<string, string>;
   spec?: Record<string, unknown>;
   items?: KubeObject[];
   status?: {
@@ -49,7 +51,7 @@ export class KubeError extends Error {
 export class JobKubeApi {
   constructor(private namespace: string) { ObjectName.parse(namespace); }
 
-  async call(method: string, resource: "configmaps" | "jobs" | "pods", suffix = "", body?: unknown): Promise<KubeObject> {
+  async call(method: string, resource: "configmaps" | "jobs" | "pods" | "secrets", suffix = "", body?: unknown): Promise<KubeObject> {
     const root = "/var/run/secrets/kubernetes.io/serviceaccount";
     const token = readFileSync(`${root}/token`, "utf8").trim(); // projected tokens rotate
     const ca = readFileSync(`${root}/ca.crt`);
@@ -87,7 +89,7 @@ interface StoredRun {
   request: ExternalRequest;
   status: ExternalStatus;
   deadline: number;
-  token?: string;
+  tokenHash?: string;
   claimed?: boolean;
   cleaned?: boolean;
   job?: JobConfig;
@@ -155,7 +157,6 @@ export class JobDispatcher {
     const name = this.name(request.runId);
     const run: StoredRun = {
       request, job, profile: this.opts.profiles[job.slug]!, deadline: request.startedAt + jobDeadlineMs(job),
-      token: randomBytes(32).toString("hex"),
       status: { runId: request.runId, jobSlug: job.slug, startedAt: request.startedAt, state: "pending", diagnostics: { ref: name, complete: false } },
     };
     try {
@@ -228,7 +229,7 @@ export class JobDispatcher {
     for (let attempt = 0; ; attempt++) {
       const cm = await this.owned(runId);
       const run = this.read(cm);
-      if (!run.token || !tokenMatches(token, run.token)) throw new KubeError(401);
+      if (!run.tokenHash || !tokenMatches(createHash("sha256").update(token).digest("hex"), run.tokenHash)) throw new KubeError(401);
       if (run.claimed || !["dispatching", "running"].includes(run.status.state) || Date.now() >= run.deadline) throw new KubeError(409);
       run.claimed = true;
       try { await this.save(cm, run); return; }
@@ -245,7 +246,7 @@ export class JobDispatcher {
     for (let attempt = 0; ; attempt++) {
       const cm = await this.owned(runId);
       const run = this.read(cm);
-      if (!run.token || !tokenMatches(token, run.token)) throw new KubeError(401);
+      if (!run.tokenHash || !tokenMatches(createHash("sha256").update(token).digest("hex"), run.tokenHash)) throw new KubeError(401);
       if (!run.claimed || run.cleaned) throw new KubeError(409);
       if (run.status.state === "finished" && !diagnostics.complete) throw new KubeError(409);
       const previous = JSON.parse(cm.data!.diagnostics!);
@@ -330,7 +331,10 @@ export class JobDispatcher {
               terminationMessagePath: "/dev/termination-log", terminationMessagePolicy: "File",
               volumeMounts: [{ name: "run", mountPath: "/run/job", readOnly: true }],
             }],
-            volumes: [{ name: "run", configMap: { name: cm.metadata.name, items: [{ key: "run", path: "run" }] } }],
+            volumes: [{ name: "run", projected: { sources: [
+              { configMap: { name: cm.metadata.name, items: [{ key: "run", path: "run" }] } },
+              { secret: { name: cm.metadata.name, items: [{ key: "token", path: "token" }] } },
+            ] } }],
           },
         },
       },
@@ -376,7 +380,7 @@ export class JobDispatcher {
         run.cleaned = true;
         delete run.job;
         delete run.profile;
-        delete run.token;
+        delete run.tokenHash;
         if (Date.now() - run.status.endedAt! > 7 * 86400_000) {
           delete run.status.result;
           delete run.status.execution;
@@ -417,8 +421,18 @@ export class JobDispatcher {
         }
       }
       run.status.state = "dispatching";
+      const token = randomBytes(32).toString("hex");
+      run.tokenHash = createHash("sha256").update(token).digest("hex");
       cm = await this.save(cm, run); // winner alone may send one create
-      await this.opts.api.call("POST", "jobs", "", this.workerJob(cm, run));
+      const created = await this.opts.api.call("POST", "jobs", "", this.workerJob(cm, run));
+      // The Pod waits for this Secret. A lost create response never authorizes a retry.
+      // Job ownership also garbage-collects a Secret created after concurrent cancellation.
+      if (!created.metadata.uid) throw new Error("worker Job identity missing");
+      await this.opts.api.call("POST", "secrets", "", {
+        apiVersion: "v1", kind: "Secret", metadata: { name, labels: this.label,
+          ownerReferences: [{ apiVersion: "batch/v1", kind: "Job", name, uid: created.metadata.uid }] },
+        stringData: { token },
+      });
       // Do not write running here: the worker may already have claimed with a new RV.
       return;
     }

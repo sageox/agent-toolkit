@@ -130,12 +130,22 @@ envelope. Do not place task credentials in `agents.<name>.secrets`, a gateway `.
 the Terraform module's gateway secret list.
 
 The chart gives **only the dispatcher** permission to create Jobs and maintain run
-ConfigMaps. It cannot read Secrets directly, but creating workloads is privileged: keep
+ConfigMaps, and create per-run claim Secrets owned by their worker Jobs. Run ConfigMaps
+contain only a token hash; the claim Secret is projected into that worker and garbage-collected
+with its Job. The dispatcher cannot read Secrets directly, but creating workloads is privileged: keep
 its identity and API capability outside the brain. Gateway and workers do not mount a
 Kubernetes API token. A worker has its own ServiceAccount; the chart rejects reuse of the
 gateway or dispatcher accounts and Kubernetes Secret objects across every agent in the
 release. Accounts and credentials provisioned outside this release still require an
 operator to check their permissions.
+
+Install the release in a **dedicated namespace** (for example, `helm install agents
+./deploy/helm --namespace agent-workloads --create-namespace ...`). This namespace is the
+trust boundary: Kubernetes RBAC cannot constrain Job or ConfigMap creation by label or
+name prefix. Dispatchers in one namespace must be mutually trusted; deploy mutually
+untrusted agents in separate releases and namespaces, with appropriately scoped cloud
+identities and admission policy. Application ownership labels prevent accidental collisions,
+but do not isolate a compromised dispatcher from other workloads in its namespace.
 
 A distinct ServiceAccount is not sufficient if cloud identities share permissions. When
 adding IRSA, EKS Pod Identity or another cloud integration, provision a separate worker
@@ -212,8 +222,9 @@ before cleanup. `truncated: true` means earlier output was discarded. Full redac
 also goes to the Pod's normal log streams for the deployment's existing log collector.
 
 The host removes known declared credential values and its run capability before forwarding
-or retaining output. Redaction spans stream chunks and precedes truncation. Encoded values,
-dynamically obtained credentials, and other sensitive business data may remain, so these
+or retaining output. Redaction spans stream chunks and precedes truncation. Credentials
+that the script encodes, abbreviates, or otherwise transforms, dynamically obtained
+credentials, and other sensitive business data may remain, so these
 logs are still private operator data. Restrict ConfigMap read access in the agent namespace;
 neither the gateway nor the brain needs that access.
 

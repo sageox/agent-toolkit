@@ -94,17 +94,18 @@ export function externalRun(request: Omit<ExternalRequest, "definition">, status
 export class ExternalJobs {
   constructor(private url: string, private token: string) {}
 
-  private async call<T>(path: string, schema: z.ZodType<T>, body?: unknown): Promise<T> {
+  private async call<T>(path: string, schema: z.ZodType<T>, body?: unknown, signal?: AbortSignal): Promise<T> {
     let response: Response;
     try {
       response = await fetch(new URL(path, this.url), {
         method: body === undefined ? "GET" : "POST",
         headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.any([AbortSignal.timeout(10_000), ...(signal ? [signal] : [])]),
         redirect: "error",
       });
     } catch {
+      signal?.throwIfAborted();
       throw new Error("job dispatcher unavailable; execution state is unknown, retrieve the run ID before retrying");
     }
     if (!response.ok) throw new Error(`job dispatcher refused (${response.status}); no local execution fallback`);
@@ -117,8 +118,8 @@ export class ExternalJobs {
     return this.call("/runs", ExternalStatusSchema, ExternalRequestSchema.parse(request));
   }
 
-  status(jobSlug: string, runId: string): Promise<ExternalStatus> {
-    return this.call(`/runs/${RunIdSchema.parse(runId)}?job=${encodeURIComponent(jobSlug)}`, ExternalStatusSchema);
+  status(jobSlug: string, runId: string, signal?: AbortSignal): Promise<ExternalStatus> {
+    return this.call(`/runs/${RunIdSchema.parse(runId)}?job=${encodeURIComponent(jobSlug)}`, ExternalStatusSchema, undefined, signal);
   }
 
   cancel(jobSlug: string, runId: string): Promise<ExternalStatus> {
@@ -132,7 +133,7 @@ export class ExternalJobs {
 
   async wait(request: ExternalRequest, signal?: AbortSignal): Promise<JobRun> {
     for (;;) {
-      const status = await this.status(request.jobSlug, request.runId);
+      const status = await this.status(request.jobSlug, request.runId, signal);
       if (status.state === "finished") return externalRun(request, status);
       await delay(1000, undefined, { signal });
     }

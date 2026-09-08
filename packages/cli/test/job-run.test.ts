@@ -355,3 +355,11 @@ describe("doctor and the job arming path", () => {
     expect(stdout).toContain("killSwitch declared by shift but this agent has no private brain");
   });
 });
+
+it.each(["profiles", "namespace", "name"])("requires dispatcher --%s before reading the bundle or environment", async (missing) => {
+  const flags = ["profiles", "namespace", "name"].filter((name) => name !== missing).flatMap((name) => [`--${name}`, "unused"]);
+  const { stdout, code } = await cli("job", "dispatcher", ...flags);
+  expect(code).toBe(1);
+  expect(stdout).toContain("usage: sageox-agent job dispatcher");
+  expect(stdout).not.toContain("TypeError");
+});

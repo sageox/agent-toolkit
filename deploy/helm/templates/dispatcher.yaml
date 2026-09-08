@@ -21,6 +21,9 @@ metadata:
   namespace: {{ $.Release.Namespace }}
 rules:
   - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "create", "update", "delete"]
   - apiGroups: ["batch"]

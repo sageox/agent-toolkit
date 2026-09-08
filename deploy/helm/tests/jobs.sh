@@ -314,7 +314,8 @@ rendered=$(helm template agents "$chart" --values "$values" \
 counted 1 'kind: Deployment'
 present 'resources: ["jobs"]'
 present 'resources: ["configmaps"]'
-absent 'resources: ["secrets"]'
+present 'resources: ["secrets"]'
+present 'verbs: ["create"]'
 absent 'mountPath: /mnt/secrets-store'
 absent 'mountPath: /mnt/job-secrets-store'
 
@@ -355,5 +356,22 @@ for subject in 'agents.harry.jobs[0].worker.serviceAccountName' agents.harry.ser
     fail 'worker or gateway sharing another dispatcher identity was accepted'
   fi
 done
+
+# Fail at chart validation, before a profile can crash the dispatcher at startup.
+for resource in 'cpu=1' 'requests.cpu=1' 'limits.memory=128'; do
+  if helm template agents "$chart" --values "$values" \
+    --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+    --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
+    --set "agents.harry.jobs[0].worker.resources.$resource" >"$work/invalid" 2>&1; then
+    fail "invalid worker resources passed values validation: $resource"
+  fi
+done
+rendered=$(helm template agents "$chart" --values "$values" \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
+  --set-string 'agents.harry.jobs[0].worker.resources.requests.cpu=1' \
+  --set-string 'agents.harry.jobs[0].worker.resources.limits.memory=128Mi' \
+  --show-only templates/dispatcher.yaml)
+present '\"resources\":{\"limits\":{\"memory\":\"128Mi\"},\"requests\":{\"cpu\":\"1\"}}'
 
 printf 'jobs.sh: ok\n'

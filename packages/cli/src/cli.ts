@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { resolve, join } from "node:path";
+import { dirname, resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   Gateway,
@@ -1712,13 +1712,15 @@ async function jobCmd(argv: string[]): Promise<void> {
     return;
   }
   if (sub === "worker") {
-    const raw = JSON.parse(readFileSync(argv[1] ?? "/run/job/run", "utf8"));
+    const runFile = argv[1] ?? "/run/job/run";
+    const raw = JSON.parse(readFileSync(runFile, "utf8"));
+    const token = readFileSync(join(dirname(runFile), "token"), "utf8");
     const request = ExternalRequestSchema.parse(raw.request);
     const job = JobSchema.parse(raw.job);
     const url = process.env.AGENT_JOB_DISPATCHER_URL;
-    if (!url || typeof raw.token !== "string") throw new Error("worker dispatch capability missing");
+    if (!url || !token) throw new Error("worker dispatch capability missing");
     const claim = await fetch(new URL(`/runs/${request.runId}/claim`, url), {
-      method: "POST", headers: { authorization: `Bearer ${raw.token}` },
+      method: "POST", headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(10_000), redirect: "error",
     });
     if (!claim.ok) throw new Error("worker claim refused; this body will not execute");
@@ -1735,7 +1737,7 @@ async function jobCmd(argv: string[]): Promise<void> {
           pending = undefined;
           try {
             const response = await fetch(new URL(`/runs/${request.runId}/diagnostics`, url), {
-              method: "POST", headers: { authorization: `Bearer ${raw.token}`, "content-type": "application/json" },
+              method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
               body: JSON.stringify(next), signal: AbortSignal.timeout(2000), redirect: "error",
             });
             if (!response.ok) throw new Error("diagnostic checkpoint refused");
@@ -1744,21 +1746,25 @@ async function jobCmd(argv: string[]): Promise<void> {
         }
       })().finally(() => { uploading = undefined; });
     };
-    const host = new JobHost({ onDiagnostics: publish, diagnosticSecrets: [raw.token] });
+    const host = new JobHost({ onDiagnostics: publish, diagnosticSecrets: [token] });
     const run = await host.executeWorker(job, request);
     writeFileSync("/dev/termination-log", JSON.stringify(workerResult(run)));
     await uploading;
     return;
   }
   if (sub === "dispatcher") {
+    const profilesFile = optionValue(argv, "profiles", "a worker profiles file");
+    const namespace = optionValue(argv, "namespace", "a Kubernetes namespace");
+    const name = optionValue(argv, "name", "a dispatcher name");
+    if (!profilesFile || !namespace || !name) throw new Error("usage: sageox-agent job dispatcher --profiles <file> --namespace <namespace> --name <name> [--agent <name>]");
     const agent = await agentFromFlag(argv);
     const manifest = readManifest(agent.config);
-    const profiles = WorkerProfilesSchema.parse(JSON.parse(readFileSync(flag(argv, "profiles")!, "utf8")));
+    const profiles = WorkerProfilesSchema.parse(JSON.parse(readFileSync(profilesFile, "utf8")));
     const url = process.env.AGENT_JOB_DISPATCHER_URL;
     const token = process.env.AGENT_JOB_DISPATCHER_TOKEN;
     if (!url || !token) throw new Error("dispatcher URL and token required");
     const dispatcher = new JobDispatcher({
-      api: new JobKubeApi(flag(argv, "namespace")!), name: flag(argv, "name")!,
+      api: new JobKubeApi(namespace), name,
       jobs: manifest.jobs, profiles, url,
     });
     const server = await serveJobDispatcher(dispatcher, token);

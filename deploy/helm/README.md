@@ -464,9 +464,14 @@ note on the stdout of a Pod nobody reads. Mounting both means the agent's creden
 one place, rotated once, and splitting a job's credential out can never cost a job its switch
 or its report.
 
-Two consequences worth knowing before you split a credential out:
+These gateway/scheduled-Pod mount rules apply to local jobs. An external `worker` job
+instead maps each `run.jobSecrets` ref through `agents.<agent>.jobs[].worker.secrets`.
+That worker-only credential path supports both requested and scheduled runs, without
+mounting the credential in the gateway. See [external jobs](../../docs/external-jobs.md).
 
-- **It reaches scheduled runs only.** A run started on request — from chat, or by hand —
+Two consequences worth knowing before you split a local job credential out:
+
+- **For local jobs, it reaches scheduled runs only.** A local run started on request — from chat, or by hand —
   executes inside the gateway's own process, in the Deployment Pod, which is passed no second
   directory. That is the boundary working, not a gap in it: it is also what stops a
   prompt-injected turn reaching a write credential through a job it may ask for. So the

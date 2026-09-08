@@ -352,6 +352,7 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
         // forgotten which message it was answering. The verdict goes back as the same text
         // a waited-for call returns, so the two shapes read alike where they arrive.
         const home = answering?.() ?? null;
+        if (job.worker && !home) throw new Error("external job requests require an unambiguous originating message; ask from a chat conversation");
         const answer =
           home && reply ? (run: JobRun, failureReport?: string) =>
             reply(home, describeRun(run, job) + (failureReport ? `\n${failureReport}\n` : "")) : undefined;

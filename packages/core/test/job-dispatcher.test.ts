@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import { JobDispatcher, KubeError, serveJobDispatcher, type KubeObject } from "../src/job-dispatcher.ts";
 import { ExternalJobs, externalRun, jobDefinition, workerResult, type ExternalRequest } from "../src/external-jobs.ts";
@@ -20,11 +21,13 @@ class Cluster {
   version = 0;
   loseCreate = false;
   holdDeletion = false;
-  async call(method: string, resource: "configmaps" | "jobs" | "pods", suffix = "", body?: unknown): Promise<KubeObject> {
+  loseSecretCreate = false;
+  async call(method: string, resource: "configmaps" | "jobs" | "pods" | "secrets", suffix = "", body?: unknown): Promise<KubeObject> {
     const value = structuredClone(body) as KubeObject;
     const name = suffix.startsWith("/") ? suffix.slice(1) : value?.metadata?.name;
     const key = `${resource}/${name}`;
     const old = this.objects.get(key);
+    if (resource === "secrets" && method !== "POST") throw new KubeError(403);
     if (method === "GET" && (!suffix || suffix.startsWith("?"))) {
       const selector = new URLSearchParams(suffix.slice(1)).get("labelSelector");
       const items = [...this.objects.entries()].filter(([key, obj]) => key.startsWith(`${resource}/`) &&
@@ -42,6 +45,7 @@ class Cluster {
       if (resource === "jobs" && this.holdDeletion) return old;
       this.objects.delete(key);
       if (resource === "jobs") {
+        for (const [key, secret] of this.objects) if (key.startsWith("secrets/") && secret.metadata.ownerReferences?.some((owner) => owner.uid === old.metadata.uid)) this.objects.delete(key);
         for (const [key, pod] of this.objects) if (key.startsWith("pods/") && pod.metadata.labels?.["batch.kubernetes.io/job-name"] === name) this.objects.delete(key);
       }
       return old;
@@ -53,11 +57,13 @@ class Cluster {
       this.created++;
       if (this.loseCreate) throw new Error("connection lost after persisted creation");
     }
+    if (resource === "secrets" && this.loseSecretCreate) throw new Error("connection lost after persisted Secret creation");
     return structuredClone(value);
   }
 }
 
 const runName = (id: string) => `run-${jobDefinition(["demo-dispatcher", id]).slice(0, 40)}`;
+const runToken = (api: Cluster, id: string) => api.objects.get(`secrets/${runName(id)}`)!.stringData!.token!;
 const image = `example/worker@sha256:${"a".repeat(64)}`;
 const manifest = (extra = "") => loadManifest(`
 name: demo
@@ -89,7 +95,7 @@ const dispatcher = (api: Cluster, jobs = manifest().jobs) => new JobDispatcher({
 async function completed(api: Cluster, dispatch: JobDispatcher, req: ExternalRequest, message?: string, reconcile = true) {
   const name = runName(req.runId);
   const raw = JSON.parse(api.objects.get(`configmaps/${name}`)!.data!.run!);
-  if (!raw.claimed) await dispatch.claim(req.runId, raw.token);
+  if (!raw.claimed) await dispatch.claim(req.runId, runToken(api, req.runId));
   api.objects.get(`jobs/${name}`)!.status = { conditions: [{ type: "Complete", status: "True" }] };
   api.objects.set("pods/worker", {
     metadata: { name: "worker", labels: { "batch.kubernetes.io/job-name": name, "agent-toolkit/run-id": req.runId } },
@@ -144,16 +150,40 @@ describe("durable Kubernetes job lifecycle", () => {
     expect(api.created).toBe(1);
   });
 
-  it("does not replay after a lost create response or a second worker claim", async () => {
+  it("does not replay after a lost Job creation response", async () => {
     const api = new Cluster(); api.loseCreate = true;
     const a = dispatcher(api), req = request(manifest().jobs[0]!);
     await a.dispatch(req); await a.reconcile();
-    const b = dispatcher(api); await b.reconcile();
-    const raw = JSON.parse(api.objects.get(`configmaps/${runName(req.runId)}`)!.data!.run!);
-    const claims = await Promise.allSettled([a.claim(req.runId, raw.token), b.claim(req.runId, raw.token)]);
-    expect(claims.filter((c) => c.status === "fulfilled")).toHaveLength(1);
-    await b.reconcile();
+    await dispatcher(api).reconcile();
     expect(api.created).toBe(1);
+    expect(api.objects.has(`secrets/${runName(req.runId)}`)).toBe(false);
+    vi.spyOn(Date, "now").mockReturnValue(req.startedAt + 12000);
+    await a.reconcile(); await a.reconcile();
+    expect((await a.status("task", req.runId)).outcome).toBe("budget-bowout");
+  });
+
+  it("keeps claim tokens out of ConfigMaps and prevents duplicate claims after a lost Secret response", async () => {
+    const api = new Cluster(); api.loseSecretCreate = true;
+    const a = dispatcher(api), req = request(manifest().jobs[0]!);
+    await a.dispatch(req); await a.reconcile();
+    const token = runToken(api, req.runId);
+    const cm = api.objects.get(`configmaps/${runName(req.runId)}`)!;
+    const raw = JSON.parse(cm.data!.run!);
+    expect(JSON.stringify(cm)).not.toContain(token);
+    await expect(a.claim(req.runId, raw.tokenHash)).rejects.toThrow();
+    const job = api.objects.get(`jobs/${cm.metadata.name}`)!;
+    expect(api.objects.get(`secrets/${cm.metadata.name}`)!.metadata.ownerReferences).toEqual([
+      { apiVersion: "batch/v1", kind: "Job", name: cm.metadata.name, uid: job.metadata.uid },
+    ]);
+    expect(JSON.stringify(job.spec)).toContain('"secret":{"name":"' + cm.metadata.name);
+    const b = dispatcher(api); await b.reconcile();
+    const claims = await Promise.allSettled([a.claim(req.runId, token), b.claim(req.runId, token)]);
+    expect(claims.filter((c) => c.status === "fulfilled")).toHaveLength(1);
+    expect(api.created).toBe(1);
+    await a.cancel("task", req.runId);
+    await a.reconcile(); await a.reconcile(); await a.reconcile();
+    expect(api.objects.has(`secrets/${cm.metadata.name}`)).toBe(false);
+    await expect(a.claim(req.runId, token)).rejects.toThrow();
   });
 
   it("recovers a completed result when the dispatcher returns after the deadline", async () => {
@@ -206,8 +236,8 @@ describe("durable Kubernetes job lifecycle", () => {
       return original(method, resource, suffix, body);
     });
     if (action === "claim") {
-      await a.claim(req.runId, JSON.parse(cm.data!.run!).token);
-      await expect(a.claim(req.runId, JSON.parse(cm.data!.run!).token)).rejects.toThrow();
+      await a.claim(req.runId, runToken(api, req.runId));
+      await expect(a.claim(req.runId, runToken(api, req.runId))).rejects.toThrow();
     } else expect((await a.cancel("task", req.runId)).state).toBe("cancelling");
   });
 
@@ -272,18 +302,18 @@ describe("durable Kubernetes job lifecycle", () => {
   it("retains partial diagnostics through cancellation, rejects other tokens, and ignores stale checkpoints", async () => {
     const api = new Cluster(), a = dispatcher(api), job = manifest().jobs[0]!, req = request(job);
     await a.dispatch(req); await a.reconcile();
-    const raw = JSON.parse(api.objects.get(`configmaps/${runName(req.runId)}`)!.data!.run!);
+    const claimToken = runToken(api, req.runId);
     const snapshot: WorkerDiagnostics = { sequence: 2, complete: false,
       execution: { state: "running", startedAt: req.startedAt, exitCode: null, signal: null },
       stdout: { text: "last successful step", truncated: false }, stderr: { text: "upstream is slow", truncated: false },
     };
-    await expect(a.recordDiagnostics(req.runId, raw.token, snapshot)).rejects.toThrow(); // unclaimed
-    await a.claim(req.runId, raw.token);
+    await expect(a.recordDiagnostics(req.runId, claimToken, snapshot)).rejects.toThrow(); // unclaimed
+    await a.claim(req.runId, claimToken);
     await expect(a.recordDiagnostics(req.runId, "gateway-token", snapshot)).rejects.toThrow();
     await a.dispatch(request(job, "b"));
-    await expect(a.recordDiagnostics("b".repeat(40), raw.token, snapshot)).rejects.toThrow();
-    await a.recordDiagnostics(req.runId, raw.token, snapshot);
-    await a.recordDiagnostics(req.runId, raw.token, { ...snapshot, sequence: 1, stdout: { text: "stale", truncated: false } });
+    await expect(a.recordDiagnostics("b".repeat(40), claimToken, snapshot)).rejects.toThrow();
+    await a.recordDiagnostics(req.runId, claimToken, snapshot);
+    await a.recordDiagnostics(req.runId, claimToken, { ...snapshot, sequence: 1, stdout: { text: "stale", truncated: false } });
     await a.cancel(job.slug, req.runId);
     await a.reconcile(); await a.reconcile(); await a.reconcile();
     const status = await dispatcher(api).status(job.slug, req.runId);
@@ -292,7 +322,7 @@ describe("durable Kubernetes job lifecycle", () => {
     expect(saved.stdout.text).toBe("last successful step");
     expect(saved.complete).toBe(false);
     expect(JSON.stringify(status)).not.toContain("upstream");
-    await expect(a.recordDiagnostics(req.runId, raw.token, { ...snapshot, sequence: 3 })).rejects.toThrow();
+    await expect(a.recordDiagnostics(req.runId, claimToken, { ...snapshot, sequence: 3 })).rejects.toThrow();
   });
 });
 
@@ -377,13 +407,14 @@ it.each(["buzz", "slack"])("automatically explains an uncaught script error in t
     await dispatch.reconcile();
     const cm = api.objects.get(`configmaps/${runName(start.runId)}`)!;
     const raw = JSON.parse(cm.data!.run!);
-    await dispatch.claim(start.runId, raw.token);
+    const claimToken = runToken(api, start.runId);
+    await dispatch.claim(start.runId, claimToken);
     const snapshots: WorkerDiagnostics[] = [];
     const worker = new JobHost({ workDir: dir, secretOpts: { dir, env: { TASK_TOKEN: "worker-secret" } }, onDiagnostics: (snapshot) => snapshots.push(snapshot) });
     const run = await worker.executeWorker(JobSchema.parse(raw.job), raw.request);
     expect(run.verdict.status).toBe("FAIL");
     const upload = await fetch(`http://127.0.0.1:${server.port}/runs/${start.runId}/diagnostics`, {
-      method: "POST", headers: { authorization: `Bearer ${raw.token}`, "content-type": "application/json" }, body: JSON.stringify(snapshots.at(-1)),
+      method: "POST", headers: { authorization: `Bearer ${claimToken}`, "content-type": "application/json" }, body: JSON.stringify(snapshots.at(-1)),
     });
     expect(upload.status).toBe(204);
     await completed(api, dispatch, raw.request, JSON.stringify(workerResult(run)));
@@ -402,7 +433,7 @@ it.each(["buzz", "slack"])("automatically explains an uncaught script error in t
     const modelStatus = JSON.stringify(await handler({ method: "tools/call", params: { name: "job_status", arguments: { job: job.slug, runId: start.runId } } }));
     expect(modelStatus).not.toContain("synthetic worker exception");
     await expect(new ExternalJobs(`http://127.0.0.1:${server.port}`, "brain-mcp-token").failureReport(job.slug, start.runId)).rejects.toThrow();
-    await expect(new ExternalJobs(`http://127.0.0.1:${server.port}`, raw.token).failureReport(job.slug, start.runId)).rejects.toThrow();
+    await expect(new ExternalJobs(`http://127.0.0.1:${server.port}`, claimToken).failureReport(job.slug, start.runId)).rejects.toThrow();
     await expect(remote.failureReport("other", start.runId)).rejects.toThrow();
     await dispatch.reconcile(); await dispatch.reconcile();
     const retained = await new ExternalJobs(`http://127.0.0.1:${server.port}`, token).status(job.slug, start.runId);
@@ -427,9 +458,8 @@ it.each(["buzz", "slack"])("automatically explains an uncaught script error in t
 it("bounds automatic excerpts, uses stdout when stderr is empty, and labels partial output", async () => {
   const api = new Cluster(), a = dispatcher(api), job = manifest().jobs[0]!, req = request(job);
   await a.dispatch(req); await a.reconcile();
-  const raw = JSON.parse(api.objects.get(`configmaps/${runName(req.runId)}`)!.data!.run!);
-  await a.claim(req.runId, raw.token);
-  await a.recordDiagnostics(req.runId, raw.token, {
+  await a.claim(req.runId, runToken(api, req.runId));
+  await a.recordDiagnostics(req.runId, runToken(api, req.runId), {
     sequence: 0, complete: false, execution: { state: "running", startedAt: req.startedAt, exitCode: null, signal: null },
     stdout: { text: "old output\n".repeat(500) + "upstream refused request\n```\nlast error", truncated: true },
     stderr: { text: "", truncated: false },
@@ -489,4 +519,59 @@ it.each(["FAIL", "PASS"])("keeps automatic %s notifications independent of diagn
 
 it("refuses unsupported external execution without spawning locally", async () => {
   await expect(new JobHost().startRequest(manifest().jobs[0]!, { kind: "human", id: "owner" })).rejects.toThrow("no local execution fallback");
+});
+
+it("aborts an in-flight status request when observation is abandoned", async () => {
+  let received!: () => void;
+  const pending = new Promise<void>((resolve) => { received = resolve; });
+  const server = createServer(() => received()); // intentionally never sends headers
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const controller = new AbortController();
+  const reason = new Error("observer stopped");
+  const remote = new ExternalJobs(`http://127.0.0.1:${(server.address() as { port: number }).port}`, "token");
+  try {
+    const waiting = remote.wait(request(manifest().jobs[0]!), controller.signal);
+    const rejected = expect(waiting).rejects.toBe(reason);
+    await pending;
+    controller.abort(reason);
+    await rejected;
+  } finally {
+    controller.abort();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+it("refuses unbound external tool requests before admission, including retries", async () => {
+  const api = new Cluster(), dispatch = dispatcher(api), job = manifest().jobs[0]!;
+  const remote = { dispatch: vi.fn((req: ExternalRequest) => dispatch.dispatch(req)) } as unknown as ExternalJobs;
+  const host = new JobHost({ external: remote });
+  const handler = jobHandler({ jobs: [job], host, agentName: "demo", answering: () => null,
+    turnTimeoutMs: 120000, policy: new ToolPolicy(["mcp__jobs__*"], []) });
+  for (let i = 0; i < 2; i++) {
+    await expect(handler({ method: "tools/call", params: { name: "job_run", arguments: { job: job.slug } } }))
+      .rejects.toThrow("unambiguous originating message");
+  }
+  expect(remote.dispatch).not.toHaveBeenCalled();
+  expect(api.objects.size).toBe(0);
+});
+
+it.each([false, true])("reads short verdict chunks completely while preserving the size bound (oversized=%s)", async (oversized) => {
+  const dir = await mkdtemp(join(tmpdir(), "short-verdict-"));
+  const probe = await open(join(dir, "probe"), "w+");
+  const prototype: { read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number }> } = Object.getPrototypeOf(probe);
+  const read = prototype.read;
+  await probe.close();
+  const reads = vi.spyOn(prototype, "read").mockImplementation(function (this: typeof prototype, buffer, offset, length, position) {
+    return read.call(this, buffer, offset, Math.min(length, 7), position);
+  });
+  try {
+    const original = manifest().jobs[0]!;
+    const artifact = JSON.stringify({ gates: [{ gate: "task", executed: true, exitCode: 0 }] }) + (oversized ? " ".repeat(64 * 1024) : "");
+    const job = JobSchema.parse({ ...original, run: { command: process.execPath,
+      args: ["-e", `require('fs').writeFileSync(process.env.JOB_VERDICT_PATH, ${JSON.stringify(artifact)})`] } });
+    const run = await new JobHost({ workDir: dir }).executeWorker(job, request(job));
+    expect(run.verdict.status).toBe(oversized ? "UNKNOWN" : "PASS");
+    expect(reads.mock.calls.length).toBeGreaterThan(1);
+  } finally { reads.mockRestore(); await rm(dir, { recursive: true, force: true }); }
 });

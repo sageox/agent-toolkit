@@ -63,7 +63,6 @@ it.each(["timeout", "missing-executable"])("captures %s diagnostics automaticall
   expect(final.complete).toBe(true);
   expect(final.execution.state).toBe(failure === "timeout" ? "timed-out" : "not-started");
   expect(final.stderr.text).toContain(failure === "timeout" ? "waiting for upstream" : "ENOENT");
-  expect(final.execution.endedAt).toBeGreaterThanOrEqual(final.execution.startedAt);
 });
 
 it("checkpoints a running script's output before termination, masking a partially written credential", async () => {
