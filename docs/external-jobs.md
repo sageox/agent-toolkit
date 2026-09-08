@@ -167,9 +167,12 @@ checks in the body remain its responsibility. No new approval workflow is introd
 
 Run IDs are backed by ConfigMaps, independent of gateway/dispatcher restarts. Repeating the
 same job and inputs within the same inbound message reuses an ID; use a new message for a
-new intentional execution. Scheduled launcher replacements use the scheduling Job's UID.
-Atomic ConfigMap creation and resource-version updates serialize workers across processes
-and across triggers. Overlap is refused, not queued.
+new intentional execution. The chart refuses external workers when rendered for Kubernetes
+older than 1.34. Scheduled launchers use the owning Job's
+`batch.kubernetes.io/controller-uid` label as their request ID, so replacement Pods for one
+Job keep one dispatcher request identity; a new scheduled Job gets a new identity. Atomic
+ConfigMap creation and resource-version updates serialize workers across processes and
+across triggers. Overlap is refused, not queued.
 
 Each admission stores the reviewed job and its worker identity, secret references and
 resource limits. A dispatcher restart or profile update cannot change an admitted run's

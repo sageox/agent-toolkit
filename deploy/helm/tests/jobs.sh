@@ -40,9 +40,34 @@ refuses() {
     && fail "expected a refusal: $why"
   grep -qF "$want" <<<"$out" || fail "refused for the wrong reason: $why"
 }
+dispatcher_account_from() {
+  local yaml="$1" account
+  account=$(awk '/^kind: ServiceAccount$/{found=1;next} found && /^  name:/{print $2;exit}' <<<"$yaml")
+  [ -n "$account" ] || fail 'rendered dispatcher has no ServiceAccount name'
+  printf '%s\n' "$account"
+}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+
+# A chart is commonly copied into a consumer's infra tree without this repository's docs.
+# Every job-contract/external-jobs link must therefore stay absolute and version-pinned.
+copied_chart="$work/copied-chart"
+cp -R "$chart" "$copied_chart"
+readme="$copied_chart/README.md"
+if grep -Eq '\.\./\.\./docs/(job-contract|external-jobs)\.md' "$readme"; then
+  fail 'copied chart README contains a repository-relative job documentation link'
+fi
+contract_link_count=$(grep -oE 'https://github\.com/sageox/agent-toolkit/blob/v0\.4\.1/docs/(job-contract|external-jobs)\.md(#[^)[:space:]]+)?' "$readme" | wc -l | tr -d ' ')
+[ "$contract_link_count" = 5 ] || fail "expected 5 pinned job documentation links, found $contract_link_count"
+for link in \
+  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/job-contract.md#structured-work-events-schema-1' \
+  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/external-jobs.md#structured-answers' \
+  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/job-contract.md#what-a-body-finds-on-disk' \
+  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/external-jobs.md'
+do
+  grep -qF "$link" "$readme" || fail "copied chart README is missing pinned link: $link"
+done
 
 # Three declared jobs across two agents: one scheduled, one on-request, one parked.
 render
@@ -314,7 +339,16 @@ refuses "one agent creating one class from both its sources" \
 
 # External schedules are launchers: they retain admission credentials, but receive no
 # task credentials, mutable checkout, or Kubernetes token. One dispatcher serves all jobs.
-render --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+refuses "external worker below the supported Kubernetes floor" \
+  "harry/shift: external worker requires Kubernetes 1.34 or newer" \
+  --kube-version 1.33.0 \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'
+render --kube-version 1.33.0
+counted 2 'kind: CronJob'
+
+render --kube-version 1.34.0 \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
   --set agents.harry.workEvents=true \
   --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker' \
   --set 'agents.harry.jobs[0].worker.secrets.TASK_TOKEN.name=task-credentials' \
@@ -330,6 +364,36 @@ absent 'task-credentials'
 absent 'old-job-secrets'
 absent 'mountPath: /agents/harry/workspace/repos'
 absent 'automountServiceAccountToken: true'
+
+# The value comes from the Job controller's UID label, not the launcher's Pod UID. Every
+# replacement Pod for one Job therefore presents the same dispatcher request identity.
+printf '%s\n' "$rendered" >"$work/external-cronjob.yaml"
+if ! pnpm --filter @sageox/agent-toolkit-core exec node --input-type=module \
+  - "$work/external-cronjob.yaml" <<'NODE'
+import { readFileSync } from "node:fs";
+import { parseAllDocuments } from "yaml";
+
+const cronJobs = parseAllDocuments(readFileSync(process.argv[2], "utf8"))
+  .map((document) => document.toJS())
+  .filter((resource) => resource?.kind === "CronJob");
+const launchers = cronJobs.flatMap((resource) => {
+  const pod = resource.spec.jobTemplate.spec.template.spec;
+  const requestId = pod.containers.flatMap((container) => container.env ?? [])
+    .find((entry) => entry.name === "AGENT_JOB_REQUEST_ID");
+  return requestId ? [{ pod, requestId }] : [];
+});
+if (launchers.length !== 1) throw new Error("expected one external scheduled launcher");
+if (launchers[0].requestId?.valueFrom?.fieldRef?.fieldPath
+  !== "metadata.labels['batch.kubernetes.io/controller-uid']") {
+  throw new Error("scheduled launcher request identity is not the owning Job UID");
+}
+if (launchers[0].pod.automountServiceAccountToken !== false) {
+  throw new Error("external scheduled launcher must not mount a Kubernetes token");
+}
+NODE
+then
+  fail 'external scheduled launcher identity is invalid'
+fi
 
 rendered=$(helm template agents "$chart" --values "$values" \
   --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
@@ -422,8 +486,13 @@ for secret in agent-ida ida-dispatcher-auth ida-job-secrets; do
 done
 rendered=$(helm template agents "$chart" --values "$values" \
   --set agents.ida.dispatcher.tokenSecret=ida-dispatcher-auth --show-only templates/dispatcher.yaml)
-dispatcher_account=$(awk '/^kind: ServiceAccount$/{found=1;next} found && /^  name:/{print $2;exit}' <<<"$rendered")
-[ -n "$dispatcher_account" ] || fail 'parsed dispatcher ServiceAccount name is empty'
+broken_dispatcher=${rendered/kind: ServiceAccount/kind: MissingServiceAccount}
+if diagnostic=$(dispatcher_account_from "$broken_dispatcher" 2>&1); then
+  fail 'dispatcher account extraction accepted a render without a ServiceAccount'
+fi
+[ "$diagnostic" = 'jobs.sh: rendered dispatcher has no ServiceAccount name' ] \
+  || fail 'dispatcher account extraction failed without its specific diagnostic'
+dispatcher_account=$(dispatcher_account_from "$rendered")
 refuses "worker sharing another dispatcher identity" \
   "harry/shift: worker must not use the dispatcher ServiceAccount" \
   --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
