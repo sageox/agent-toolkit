@@ -722,7 +722,7 @@ const JobParameterSchema = z.discriminatedUnion("type", [
  * second configuration model" — and jobs in Helm values would be exactly that second
  * model, which is how a fleet arrives at twelve jobs described in six different charts.
  */
-const JobSchema = z
+export const JobSchema = z
   .object({
     /**
      * Stable identity. Names the job, the kill switch, and the run record — renaming one
@@ -770,6 +770,11 @@ const JobSchema = z
      * process, not a turn on the agent's brain.
      */
     model: z.string().min(1).optional(),
+    /** A toolkit-compatible image with the task source baked in. Never a chat checkout. */
+    worker: z.object({
+      image: z.string().regex(/^\S+@sha256:[a-f0-9]{64}$/, "worker image must be pinned by sha256 digest"),
+      directory: z.string().regex(/^\//, "worker directory must be absolute"),
+    }).strict().optional(),
     /**
      * The job body: a process, an exit code, and a verdict artifact. TypeScript, a shell
      * script, or a compiled binary — the toolkit spawns it and reads what it wrote.
@@ -806,7 +811,7 @@ const JobSchema = z
          * The same map, for a credential the gateway's own process must not hold. Resolved
          * exactly as `secrets` is — the split is a claim about where the value is mounted,
          * not a second resolver, and a one-directory deployment satisfies both from it.
-         * Declaring one refuses `trigger.onRequest` on the same job.
+         * On local jobs, declaring one refuses `trigger.onRequest` on the same job.
          */
         jobSecrets: z.record(EnvVarName, SecretRef).default({}),
         /**
@@ -1122,7 +1127,7 @@ const ManifestSchema = z
   .superRefine((m, ctx) => {
     for (const job of m.jobs) {
       const moved = Object.values(job.run.jobSecrets);
-      if (!moved.length || !job.trigger.onRequest) continue;
+      if (!moved.length || !job.trigger.onRequest || job.worker) continue;
       ctx.addIssue({
         code: "custom",
         message:
@@ -1134,6 +1139,10 @@ const ManifestSchema = z
         path: ["jobs"],
       });
     }
+  })
+  .refine((m) => m.jobs.every((job) => !job.worker || !job.report?.probe), {
+    message: "external workers do not support report.probe; channel credentials stay in the gateway",
+    path: ["jobs"],
   })
   // `envelope` merges the two maps, so a name in both would silently take whichever landed
   // last — and which map a ref is in is what the rule above reads.

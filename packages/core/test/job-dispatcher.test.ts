@@ -1,0 +1,492 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { JobDispatcher, KubeError, serveJobDispatcher, type KubeObject } from "../src/job-dispatcher.ts";
+import { ExternalJobs, externalRun, jobDefinition, workerResult, type ExternalRequest } from "../src/external-jobs.ts";
+import { JobSchema, loadManifest, type JobConfig } from "../src/manifest.ts";
+import { JobHost, describeJobRun } from "../src/job-host.ts";
+import { jobHandler } from "../src/job-server.ts";
+import { ToolPolicy } from "../src/tool-policy.ts";
+import type { EventRef, InboundEvent } from "../src/events.ts";
+import { type WorkerDiagnostics } from "../src/job-diagnostics.ts";
+
+// An API model, not an in-memory dispatcher: enforce resource versions and independent
+// objects so two dispatcher instances contend on the same authoritative state.
+class Cluster {
+  objects = new Map<string, KubeObject>();
+  created = 0;
+  version = 0;
+  loseCreate = false;
+  holdDeletion = false;
+  async call(method: string, resource: "configmaps" | "jobs" | "pods", suffix = "", body?: unknown): Promise<KubeObject> {
+    const value = structuredClone(body) as KubeObject;
+    const name = suffix.startsWith("/") ? suffix.slice(1) : value?.metadata?.name;
+    const key = `${resource}/${name}`;
+    const old = this.objects.get(key);
+    if (method === "GET" && (!suffix || suffix.startsWith("?"))) {
+      const selector = new URLSearchParams(suffix.slice(1)).get("labelSelector");
+      const items = [...this.objects.entries()].filter(([key, obj]) => key.startsWith(`${resource}/`) &&
+        (!selector || selector.split(",").every((pair) => { const [k, v] = pair.split("="); return obj.metadata.labels?.[k!] === v; })))
+        .map(([, value]) => structuredClone(value));
+      return { metadata: { name: "" }, items };
+    }
+    if (method === "GET") { if (!old) throw new KubeError(404); return structuredClone(old); }
+    if (method === "POST" && old) throw new KubeError(409);
+    if (method === "PUT" && (!old || value.metadata.resourceVersion !== old.metadata.resourceVersion)) throw new KubeError(409);
+    if (method === "DELETE") {
+      if (!old) throw new KubeError(404);
+      const { preconditions } = body as { preconditions?: { uid?: string; resourceVersion?: string } };
+      if (preconditions && (preconditions.uid !== old.metadata.uid || preconditions.resourceVersion !== old.metadata.resourceVersion)) throw new KubeError(409);
+      if (resource === "jobs" && this.holdDeletion) return old;
+      this.objects.delete(key);
+      if (resource === "jobs") {
+        for (const [key, pod] of this.objects) if (key.startsWith("pods/") && pod.metadata.labels?.["batch.kubernetes.io/job-name"] === name) this.objects.delete(key);
+      }
+      return old;
+    }
+    value.metadata.resourceVersion = String(++this.version);
+    value.metadata.uid ??= `uid-${this.version}`;
+    this.objects.set(key, value);
+    if (resource === "jobs" && method === "POST") {
+      this.created++;
+      if (this.loseCreate) throw new Error("connection lost after persisted creation");
+    }
+    return structuredClone(value);
+  }
+}
+
+const runName = (id: string) => `run-${jobDefinition(["demo-dispatcher", id]).slice(0, 40)}`;
+const image = `example/worker@sha256:${"a".repeat(64)}`;
+const manifest = (extra = "") => loadManifest(`
+name: demo
+brain: {provider: mock}
+surfaces: [{kind: console}]
+respondTo: anyone
+brains: [{preset: local}]
+killSwitchParkBy: []
+jobs:
+  - slug: task
+    archetype: queue
+    description: Bounded task
+    trigger: {onRequest: true, schedules: ["0 * * * *"]}
+    killSwitch: {failDirection: closed}
+    budget: {wallClockMs: 10000, deadlineHeadroomMs: 1000}
+    worker: {image: "${image}", directory: /work}
+    run: {command: python3, args: [task.py], jobSecrets: {API_TOKEN: TASK_TOKEN}}
+    ${extra}
+`);
+const request = (job: JobConfig, id = "a"): ExternalRequest => ({
+  jobSlug: job.slug, runId: id.repeat(40), definition: jobDefinition(job),
+  trigger: "on-request", requestedBy: { kind: "human", id: "owner" },
+  startedAt: Date.now(), parameters: {}, switch: { origin: "set", state: "off" }, bypassedSwitch: true,
+});
+const dispatcher = (api: Cluster, jobs = manifest().jobs) => new JobDispatcher({
+  api, name: "demo-dispatcher", jobs, url: "http://dispatcher:8090",
+  profiles: { task: { serviceAccountName: "task-worker", secrets: { TASK_TOKEN: { name: "task-secret", key: "token" } }, resources: {} } },
+});
+async function completed(api: Cluster, dispatch: JobDispatcher, req: ExternalRequest, message?: string, reconcile = true) {
+  const name = runName(req.runId);
+  const raw = JSON.parse(api.objects.get(`configmaps/${name}`)!.data!.run!);
+  if (!raw.claimed) await dispatch.claim(req.runId, raw.token);
+  api.objects.get(`jobs/${name}`)!.status = { conditions: [{ type: "Complete", status: "True" }] };
+  api.objects.set("pods/worker", {
+    metadata: { name: "worker", labels: { "batch.kubernetes.io/job-name": name, "agent-toolkit/run-id": req.runId } },
+    status: { phase: "Succeeded", containerStatuses: [{ name: "worker", state: { terminated: { exitCode: 0, message } } }] },
+  });
+  if (reconcile) await dispatch.reconcile();
+}
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("durable Kubernetes job lifecycle", () => {
+  it("deduplicates admission and serializes two dispatchers, requested and scheduled", async () => {
+    const api = new Cluster();
+    const a = dispatcher(api), b = dispatcher(api);
+    const job = manifest().jobs[0]!;
+    const req = request(job);
+    await Promise.all([a.dispatch(req), b.dispatch(req)]);
+    await Promise.all([a.reconcile(), b.reconcile()]);
+    expect(api.created).toBe(1);
+    const clock = { ...request(job, "b"), trigger: "schedule" as const, requestedBy: null, switch: { origin: "set" as const, state: "on" as const }, bypassedSwitch: false };
+    await b.dispatch(clock);
+    await b.reconcile();
+    expect((await a.status(job.slug, clock.runId)).outcome).toBe("skipped-overlap");
+    expect(api.created).toBe(1);
+    const pod = api.objects.get(`jobs/${runName(req.runId)}`)!.spec!.template as { spec: { containers: { image: string; command: string[]; env: unknown[] }[]; serviceAccountName: string; automountServiceAccountToken: boolean } };
+    expect(pod.spec.containers[0]!.image).toBe(image);
+    expect(pod.spec.containers[0]!.command).toEqual(["/app/bin/sageox-agent"]);
+    expect(pod.spec.serviceAccountName).toBe("task-worker");
+    expect(pod.spec.automountServiceAccountToken).toBe(false);
+    expect(pod.spec.containers[0]!.env).toContainEqual({ name: "TASK_TOKEN", valueFrom: { secretKeyRef: { name: "task-secret", key: "token" } } });
+  });
+
+  it("retains the result after worker cleanup and dispatcher restart, then expires it without replay", async () => {
+    const api = new Cluster(), a = dispatcher(api);
+    const req = request(manifest().jobs[0]!);
+    await a.dispatch(req); await a.reconcile();
+    await completed(api, a, req, JSON.stringify({ outcome: "completed", counts: { PASS: 2, FAIL: 0, UNKNOWN: 0 } }));
+    await a.reconcile(); await a.reconcile();
+    expect(api.objects.has(`jobs/${runName(req.runId)}`)).toBe(false);
+    const b = dispatcher(api);
+    const status = await b.status("task", req.runId);
+    expect(externalRun(req, status).verdict.status).toBe("PASS");
+    const retried = externalRun({ ...req, startedAt: Date.now() + 60000 }, status);
+    expect(retried.startedAt).toBe(req.startedAt);
+    expect(describeJobRun(retried)).toContain("2 worker gates PASS");
+    await b.dispatch(req); await b.reconcile();
+    expect(api.created).toBe(1);
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 8 * 86400_000);
+    await b.reconcile();
+    expect((await b.status("task", req.runId)).result).toBeUndefined();
+    await b.dispatch(req); await b.reconcile();
+    expect(api.created).toBe(1);
+  });
+
+  it("does not replay after a lost create response or a second worker claim", async () => {
+    const api = new Cluster(); api.loseCreate = true;
+    const a = dispatcher(api), req = request(manifest().jobs[0]!);
+    await a.dispatch(req); await a.reconcile();
+    const b = dispatcher(api); await b.reconcile();
+    const raw = JSON.parse(api.objects.get(`configmaps/${runName(req.runId)}`)!.data!.run!);
+    const claims = await Promise.allSettled([a.claim(req.runId, raw.token), b.claim(req.runId, raw.token)]);
+    expect(claims.filter((c) => c.status === "fulfilled")).toHaveLength(1);
+    await b.reconcile();
+    expect(api.created).toBe(1);
+  });
+
+  it("recovers a completed result when the dispatcher returns after the deadline", async () => {
+    const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+    await a.dispatch(req); await a.reconcile();
+    await completed(api, a, req, JSON.stringify({ outcome: "completed", counts: { PASS: 2, FAIL: 0, UNKNOWN: 0 } }), false);
+    vi.spyOn(Date, "now").mockReturnValue(req.startedAt + 12000);
+    const b = dispatcher(api);
+    await b.reconcile();
+    expect(await b.status("task", req.runId)).toMatchObject({ state: "finished", outcome: "completed", result: { counts: { PASS: 2 } } });
+  });
+
+  it("recovers a lock left by a stale reconciler after a cancelled run was cleaned", async () => {
+    const api = new Cluster(), a = dispatcher(api), b = dispatcher(api), req = request(manifest().jobs[0]!);
+    await a.dispatch(req);
+    const original = api.call.bind(api);
+    let pause!: () => void, proceed!: () => void;
+    const paused = new Promise<void>((resolve) => { pause = resolve; });
+    const resume = new Promise<void>((resolve) => { proceed = resolve; });
+    vi.spyOn(api, "call").mockImplementation(async (method, resource, suffix, body) => {
+      if (method === "POST" && (body as KubeObject)?.metadata.name.startsWith("lock-")) {
+        pause(); await resume;
+      }
+      return original(method, resource, suffix, body);
+    });
+    const stale = a.reconcile();
+    await paused;
+    await b.cancel("task", req.runId);
+    await b.reconcile(); await b.reconcile();
+    proceed(); await stale;
+    await b.reconcile();
+    expect([...api.objects.keys()].some((key) => key.startsWith("configmaps/lock-"))).toBe(false);
+    await b.dispatch(request(manifest().jobs[0]!, "b")); await b.reconcile();
+    expect(api.created).toBe(1);
+  });
+
+  it.each(["claim", "cancel"])("retries a %s CAS when reconciliation updates the running state", async (action) => {
+    const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+    await a.dispatch(req); await a.reconcile();
+    const cm = api.objects.get(`configmaps/${runName(req.runId)}`)!;
+    const original = api.call.bind(api);
+    let raced = false;
+    vi.spyOn(api, "call").mockImplementation(async (method, resource, suffix, body) => {
+      if (method === "PUT" && !raced) {
+        raced = true;
+        const run = JSON.parse(cm.data!.run!);
+        run.status.state = "running";
+        await original("PUT", "configmaps", `/${cm.metadata.name}`, { ...cm, data: { run: JSON.stringify(run) } });
+      }
+      return original(method, resource, suffix, body);
+    });
+    if (action === "claim") {
+      await a.claim(req.runId, JSON.parse(cm.data!.run!).token);
+      await expect(a.claim(req.runId, JSON.parse(cm.data!.run!).token)).rejects.toThrow();
+    } else expect((await a.cancel("task", req.runId)).state).toBe("cancelling");
+  });
+
+  it("pins the worker identity and credential mapping at admission across deployment changes", async () => {
+    const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+    await a.dispatch(req);
+    const b = new JobDispatcher({ api, name: "demo-dispatcher", jobs: manifest().jobs, url: "http://dispatcher:8090",
+      profiles: { task: { serviceAccountName: "different-worker", secrets: { TASK_TOKEN: { name: "different-secret", key: "token" } }, resources: {} } } });
+    await b.reconcile();
+    const spec = api.objects.get(`jobs/${runName(req.runId)}`)!.spec!.template as { spec: { serviceAccountName: string; containers: { env: unknown[] }[] } };
+    expect(spec.spec.serviceAccountName).toBe("task-worker");
+    expect(spec.spec.containers[0]!.env).toContainEqual({ name: "TASK_TOKEN", valueFrom: { secretKeyRef: { name: "task-secret", key: "token" } } });
+  });
+
+  it("scopes run IDs to the dispatcher so agents sharing a namespace cannot collide", async () => {
+    const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+    const b = new JobDispatcher({ api, name: "another-dispatcher", jobs: manifest().jobs, url: "http://another-dispatcher:8090",
+      profiles: { task: { serviceAccountName: "task-worker", secrets: { TASK_TOKEN: { name: "task-secret", key: "token" } }, resources: {} } } });
+    await a.dispatch(req); await b.dispatch(req);
+    await a.reconcile(); await b.reconcile(); await b.reconcile();
+    expect(api.created).toBe(2);
+    await a.cancel("task", req.runId);
+    await a.reconcile(); await a.reconcile();
+    expect((await b.status("task", req.runId)).state).toBe("running");
+  });
+
+  it.each([undefined, "not json", JSON.stringify({ outcome: "completed", counts: { PASS: 1, FAIL: 0, UNKNOWN: 0 }, logs: "secret" })])("marks lost or untrusted results unknown (%s)", async (message) => {
+    const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+    await a.dispatch(req); await a.reconcile(); await completed(api, a, req, message);
+    const status = await a.status("task", req.runId);
+    expect(status.outcome).toBe("unknown");
+    expect(externalRun(req, status).verdict.status).toBe("UNKNOWN");
+    await a.reconcile(); expect(api.created).toBe(1);
+  });
+
+  it.each(["cancel", "deadline"])("%s stops the actual worker and keeps its lock until deletion", async (mode) => {
+    const api = new Cluster(), a = dispatcher(api), job = manifest().jobs[0]!, req = request(job);
+    await a.dispatch(req); await a.reconcile();
+    api.holdDeletion = true;
+    if (mode === "cancel") await a.cancel("task", req.runId);
+    else vi.spyOn(Date, "now").mockReturnValue(req.startedAt + 11001);
+    await a.reconcile();
+    expect((await a.status("task", req.runId)).state).toBe("cancelling");
+    expect([...api.objects.keys()].some((k) => k.startsWith("configmaps/lock-"))).toBe(true);
+    api.holdDeletion = false;
+    await a.reconcile(); await a.reconcile(); await a.reconcile();
+    const status = await a.status("task", req.runId);
+    expect(status.outcome).toBe(mode === "cancel" ? "cancelled" : "budget-bowout");
+    expect(externalRun(req, status).verdict.status).toBe("UNKNOWN");
+    expect([...api.objects.keys()].some((k) => k.startsWith("configmaps/lock-"))).toBe(false);
+  });
+
+  it("applies automation gates and rejects changed definitions and undeclared inputs", async () => {
+    const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+    await expect(a.dispatch({ ...req, trigger: "schedule", requestedBy: null, bypassedSwitch: false })).rejects.toThrow();
+    await expect(a.dispatch({ ...req, definition: "b".repeat(64) })).rejects.toThrow();
+    await expect(a.dispatch({ ...req, parameters: { approved: 1 } })).rejects.toThrow();
+    await expect(a.dispatch({ ...req, image: "evil" })).rejects.toThrow();
+    expect(api.created).toBe(0);
+  });
+
+  it("retains partial diagnostics through cancellation, rejects other tokens, and ignores stale checkpoints", async () => {
+    const api = new Cluster(), a = dispatcher(api), job = manifest().jobs[0]!, req = request(job);
+    await a.dispatch(req); await a.reconcile();
+    const raw = JSON.parse(api.objects.get(`configmaps/${runName(req.runId)}`)!.data!.run!);
+    const snapshot: WorkerDiagnostics = { sequence: 2, complete: false,
+      execution: { state: "running", startedAt: req.startedAt, exitCode: null, signal: null },
+      stdout: { text: "last successful step", truncated: false }, stderr: { text: "upstream is slow", truncated: false },
+    };
+    await expect(a.recordDiagnostics(req.runId, raw.token, snapshot)).rejects.toThrow(); // unclaimed
+    await a.claim(req.runId, raw.token);
+    await expect(a.recordDiagnostics(req.runId, "gateway-token", snapshot)).rejects.toThrow();
+    await a.dispatch(request(job, "b"));
+    await expect(a.recordDiagnostics("b".repeat(40), raw.token, snapshot)).rejects.toThrow();
+    await a.recordDiagnostics(req.runId, raw.token, snapshot);
+    await a.recordDiagnostics(req.runId, raw.token, { ...snapshot, sequence: 1, stdout: { text: "stale", truncated: false } });
+    await a.cancel(job.slug, req.runId);
+    await a.reconcile(); await a.reconcile(); await a.reconcile();
+    const status = await dispatcher(api).status(job.slug, req.runId);
+    expect(status).toMatchObject({ state: "finished", outcome: "cancelled", diagnostics: { complete: false } });
+    const saved = JSON.parse(api.objects.get(`configmaps/${status.diagnostics!.ref}`)!.data!.diagnostics!);
+    expect(saved.stdout.text).toBe("last successful step");
+    expect(saved.complete).toBe(false);
+    expect(JSON.stringify(status)).not.toContain("upstream");
+    await expect(a.recordDiagnostics(req.runId, raw.token, { ...snapshot, sequence: 3 })).rejects.toThrow();
+  });
+});
+
+it("reports actual worker gate counts without counting summary groups as gates", () => {
+  const req = request(manifest().jobs[0]!);
+  const run = externalRun(req, { runId: req.runId, jobSlug: req.jobSlug, startedAt: req.startedAt,
+    state: "finished", outcome: "completed", result: { outcome: "completed", counts: { PASS: 9, FAIL: 3, UNKNOWN: 1 } } });
+  expect(run.verdict.status).toBe("FAIL");
+  expect(describeJobRun(run)).toContain("9 worker gates PASS; 3 FAIL; 1 UNKNOWN");
+  expect(describeJobRun(run)).not.toContain("2 of 3 gates");
+});
+
+it("uses the same host contract for Python and a compiled executable, returning no worker prose or credentials", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "worker-contract-"));
+  try {
+    await writeFile(join(dir, "task.py"), 'import os,json\nassert os.environ["JOB_TRIGGER"] == "on-request"\nassert os.environ["API_TOKEN"] == "worker-secret"\njson.dump({"gates":[{"gate":"worker-secret", "detail":"worker-secret", "executed":True,"exitCode":0}]},open(os.environ["JOB_VERDICT_PATH"],"w"))\n');
+    await writeFile(join(dir, "task.c"), '#include <stdlib.h>\n#include <stdio.h>\nint main(void){FILE *f=fopen(getenv("JOB_VERDICT_PATH"),"w");fputs("{\\"gates\\":[{\\"gate\\":\\"compiled\\",\\"executed\\":true,\\"exitCode\\":0}]}",f);return fclose(f);}\n');
+    execFileSync("cc", [join(dir, "task.c"), "-o", join(dir, "task")]);
+    for (const [command, args] of [["python3", [join(dir, "task.py")]], [join(dir, "task"), []]] as const) {
+      const original = manifest().jobs[0]!;
+      const job = { ...original, run: { ...original.run, command, args: [...args] } };
+      const host = new JobHost({ workDir: dir, secretOpts: { dir, env: { TASK_TOKEN: "worker-secret" } } });
+      const run = await host.executeWorker(JobSchema.parse(job), request(job));
+      expect(run.verdict.status).toBe("PASS");
+      expect(workerResult(run)).toMatchObject({ outcome: "completed", counts: { PASS: 2, FAIL: 0, UNKNOWN: 0 }, execution: { state: "exited", exitCode: 0 } });
+      expect(JSON.stringify(workerResult(run))).not.toContain("worker-secret");
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+it("returns a durable run ID through the real HTTP client and guarded tool; rejects fabricated authority", async () => {
+  const api = new Cluster(), dispatch = dispatcher(api), job = manifest().jobs[0]!;
+  const token = "private-gateway-token".repeat(3);
+  const server = await serveJobDispatcher(dispatch, token, { host: "127.0.0.1", port: 0 });
+  const remote = new ExternalJobs(`http://127.0.0.1:${server.port}`, token);
+  const host = new JobHost({ external: remote, switchSource: async () => ({ origin: "set", state: "off" }) });
+  const event: InboundEvent = { id: { surface: "console", nativeId: "message" }, surface: "console", channel: { surface: "console", id: "chat", isPublic: false }, author: { surface: "console", id: "owner", isAgent: false, isSelf: false }, text: "run task", mentionsMe: true, ts: "", raw: null };
+  const handler = jobHandler({ jobs: [job], host, agentName: "demo", owner: ["owner"], answering: () => event, turnTimeoutMs: 120000, policy: new ToolPolicy(["mcp__jobs__*"], []) });
+  try {
+    const call = (args: Record<string, unknown>) => handler({ method: "tools/call", params: { name: "job_run", arguments: args } });
+    for (const override of ["human", "approved", "command", "image", "credentials"]) {
+      await expect(call({ job: "task", [override]: true })).rejects.toThrow("Unrecognized key");
+    }
+    const first = JSON.stringify(await call({ job: "task" }));
+    const id = /run id ([a-f0-9]{40})/.exec(first)![1]!;
+    expect(JSON.stringify(await call({ job: "task" }))).toContain(id);
+    expect((await new ExternalJobs(`http://127.0.0.1:${server.port}`, token).status("task", id)).state).toBe("pending");
+    await expect(remote.status("other", id)).rejects.toThrow();
+    await expect(new ExternalJobs(`http://127.0.0.1:${server.port}`, "brain-mcp-token").status("task", id)).rejects.toThrow();
+    await host.abandon();
+    expect((await remote.status("task", id)).state).toBe("pending");
+  } finally { await host.abandon(); await server.close(); }
+});
+
+it.each(["buzz", "slack"])("automatically explains an uncaught script error in the %s report and original conversation", async (surface) => {
+  const dir = await mkdtemp(join(tmpdir(), "worker-failure-"));
+  const original = manifest().jobs[0]!;
+  const job: JobConfig = { ...original,
+    run: { ...original.run, command: process.execPath, args: ["-e", 'console.log("step: connecting"); throw new Error("synthetic worker exception: " + process.env.API_TOKEN)'] },
+    report: { surface, channel: "operations", announce: "unproven", proven: "labelled", probe: false },
+  };
+  const api = new Cluster(), dispatch = dispatcher(api, [job]);
+  const token = "private-gateway-token".repeat(3);
+  const server = await serveJobDispatcher(dispatch, token, { host: "127.0.0.1", port: 0 });
+  const remote = new ExternalJobs(`http://127.0.0.1:${server.port}`, token);
+  const posts: { surface: string; channel: string; text: string; threadRoot?: EventRef }[] = [];
+  const onRun = vi.fn();
+  const reply = vi.fn(async (_home: InboundEvent, _text: string) => {});
+  const host = new JobHost({ external: remote, switchSource: async () => ({ origin: "set", state: "off" }),
+    onRun,
+    post: async (destination, text, threadRoot) => {
+      posts.push({ surface: destination.surface, channel: destination.channel, text, threadRoot });
+      return { surface, nativeId: "headline" };
+    },
+  });
+  const home: InboundEvent = { id: { surface, nativeId: "request" }, surface, channel: { surface, id: "requests", isPublic: false }, author: { surface, id: "owner", isAgent: false, isSelf: false }, text: "run task", mentionsMe: true, ts: "", raw: null };
+  const handler = jobHandler({ jobs: [job], host, agentName: "demo", owner: ["owner"], answering: () => home, reply,
+    turnTimeoutMs: 120000, policy: new ToolPolicy(["mcp__jobs__*"], []) });
+  try {
+    const started = JSON.stringify(await handler({ method: "tools/call", params: { name: "job_run", arguments: { job: job.slug } } }));
+    const start = { runId: /run id ([a-f0-9]{40})/.exec(started)![1]! };
+    await dispatch.reconcile();
+    const cm = api.objects.get(`configmaps/${runName(start.runId)}`)!;
+    const raw = JSON.parse(cm.data!.run!);
+    await dispatch.claim(start.runId, raw.token);
+    const snapshots: WorkerDiagnostics[] = [];
+    const worker = new JobHost({ workDir: dir, secretOpts: { dir, env: { TASK_TOKEN: "worker-secret" } }, onDiagnostics: (snapshot) => snapshots.push(snapshot) });
+    const run = await worker.executeWorker(JobSchema.parse(raw.job), raw.request);
+    expect(run.verdict.status).toBe("FAIL");
+    const upload = await fetch(`http://127.0.0.1:${server.port}/runs/${start.runId}/diagnostics`, {
+      method: "POST", headers: { authorization: `Bearer ${raw.token}`, "content-type": "application/json" }, body: JSON.stringify(snapshots.at(-1)),
+    });
+    expect(upload.status).toBe(204);
+    await completed(api, dispatch, raw.request, JSON.stringify(workerResult(run)));
+    await vi.waitFor(() => expect(posts).toHaveLength(2), { timeout: 3000 });
+    expect(posts[0]).toMatchObject({ surface, channel: "operations" });
+    expect(posts[0]!.text).toContain("FAILED:");
+    expect(posts[0]!.text).toContain("process exited with code 1");
+    expect(posts[1]).toMatchObject({ surface, channel: "operations", threadRoot: { surface, nativeId: "headline" } });
+    expect(posts[1]!.text).toContain("Error: synthetic worker exception: [REDACTED]");
+    expect(JSON.stringify(posts)).not.toContain("worker-secret");
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(reply.mock.calls[0]![0]).toBe(home);
+    expect(reply.mock.calls[0]![1]).toContain("Error: synthetic worker exception: [REDACTED]");
+    expect(reply.mock.calls[0]![1]).not.toContain("worker-secret");
+    expect(JSON.stringify(onRun.mock.calls)).not.toContain("synthetic worker exception");
+    const modelStatus = JSON.stringify(await handler({ method: "tools/call", params: { name: "job_status", arguments: { job: job.slug, runId: start.runId } } }));
+    expect(modelStatus).not.toContain("synthetic worker exception");
+    await expect(new ExternalJobs(`http://127.0.0.1:${server.port}`, "brain-mcp-token").failureReport(job.slug, start.runId)).rejects.toThrow();
+    await expect(new ExternalJobs(`http://127.0.0.1:${server.port}`, raw.token).failureReport(job.slug, start.runId)).rejects.toThrow();
+    await expect(remote.failureReport("other", start.runId)).rejects.toThrow();
+    await dispatch.reconcile(); await dispatch.reconcile();
+    const retained = await new ExternalJobs(`http://127.0.0.1:${server.port}`, token).status(job.slug, start.runId);
+    expect(retained.state).toBe("finished");
+    expect(retained.result?.counts.FAIL).toBe(1);
+    const saved = JSON.parse(api.objects.get(`configmaps/${retained.diagnostics!.ref}`)!.data!.diagnostics!);
+    expect(saved).toMatchObject({ runId: start.runId, image, complete: true, execution: { exitCode: 1 } });
+    expect(saved.stderr.text).toContain("Error: synthetic worker exception: [REDACTED]");
+    expect(saved.stderr.text).toContain("at ");
+    expect(saved.stdout.text).toContain("step: connecting");
+    expect(JSON.stringify(saved)).not.toContain("worker-secret");
+    expect(JSON.stringify(retained)).not.toContain("synthetic worker exception");
+    const forbidden = await fetch(`http://127.0.0.1:${server.port}/runs/${start.runId}/diagnostics`, { headers: { authorization: `Bearer ${token}` } });
+    expect(forbidden.status).toBe(404);
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 8 * 86400_000);
+    await dispatcher(api, [job]).reconcile();
+    expect(api.objects.get(`configmaps/${retained.diagnostics!.ref}`)!.data!.diagnostics).toBeUndefined();
+    expect((await remote.status(job.slug, start.runId)).diagnostics).toBeUndefined();
+  } finally { await host.abandon(); await server.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+it("bounds automatic excerpts, uses stdout when stderr is empty, and labels partial output", async () => {
+  const api = new Cluster(), a = dispatcher(api), job = manifest().jobs[0]!, req = request(job);
+  await a.dispatch(req); await a.reconcile();
+  const raw = JSON.parse(api.objects.get(`configmaps/${runName(req.runId)}`)!.data!.run!);
+  await a.claim(req.runId, raw.token);
+  await a.recordDiagnostics(req.runId, raw.token, {
+    sequence: 0, complete: false, execution: { state: "running", startedAt: req.startedAt, exitCode: null, signal: null },
+    stdout: { text: "old output\n".repeat(500) + "upstream refused request\n```\nlast error", truncated: true },
+    stderr: { text: "", truncated: false },
+  });
+  await expect(a.failureReport(job.slug, req.runId)).rejects.toThrow(); // still running
+  await completed(api, a, req, JSON.stringify({ outcome: "completed", counts: { PASS: 0, FAIL: 1, UNKNOWN: 0 } }));
+  const report = await a.failureReport(job.slug, req.runId);
+  expect(report.length).toBeLessThanOrEqual(2000);
+  expect(report).toContain("Last stdout");
+  expect(report).toContain("partial checkpoint");
+  expect(report).toContain("earlier output omitted");
+  expect(report).toContain("upstream refused request");
+  expect(report.match(/```/g)).toHaveLength(2); // only the host's code fence
+  await a.reconcile(); await a.reconcile();
+  expect(await dispatcher(api).failureReport(job.slug, req.runId)).toBe(report);
+});
+
+it("automatically identifies an OOM-killed worker even when no script output survived", async () => {
+  const api = new Cluster(), a = dispatcher(api), req = request(manifest().jobs[0]!);
+  await a.dispatch(req); await a.reconcile();
+  await completed(api, a, req, undefined, false);
+  api.objects.get("pods/worker")!.status = { phase: "Failed", containerStatuses: [
+    { name: "worker", state: { terminated: { exitCode: 137, reason: "OOMKilled" } } },
+  ] };
+  await a.reconcile();
+  expect(await a.failureReport("task", req.runId)).toContain("Worker state: OOMKilled");
+  await a.reconcile(); await a.reconcile();
+  expect(await a.failureReport("task", req.runId)).toContain("Worker state: OOMKilled");
+});
+
+it.each(["FAIL", "PASS"])("keeps automatic %s notifications independent of diagnostic retrieval", async (verdict) => {
+  const job = manifest("report: {surface: console, channel: operations, announce: always}").jobs[0]!;
+  const api = new Cluster(), a = dispatcher(api, [job]);
+  const server = await serveJobDispatcher(a, "gateway-token".repeat(3), { host: "127.0.0.1", port: 0 });
+  const remote = new ExternalJobs(`http://127.0.0.1:${server.port}`, "gateway-token".repeat(3));
+  const lookup = vi.spyOn(remote, "failureReport").mockRejectedValue(new Error("private backend failure"));
+  const post = vi.fn(async () => undefined);
+  const host = new JobHost({ external: remote, post, switchSource: async () => ({ origin: "set", state: "off" }) });
+  try {
+    const start = await host.startRequest(job, { kind: "human", id: "owner" });
+    await a.reconcile();
+    const raw = JSON.parse(api.objects.get(`configmaps/${runName(start.runId)}`)!.data!.run!);
+    const counts = { PASS: verdict === "PASS" ? 1 : 0, FAIL: verdict === "FAIL" ? 1 : 0, UNKNOWN: 0 };
+    await completed(api, a, raw.request, JSON.stringify({ outcome: "completed", counts }));
+    await vi.waitFor(() => expect(post).toHaveBeenCalledTimes(verdict === "FAIL" ? 2 : 1), { timeout: 3000 });
+    if (verdict === "FAIL") {
+      expect(JSON.stringify(post.mock.calls)).toContain("FAILED:");
+      expect(JSON.stringify(post.mock.calls)).toContain("Additional error output could not be retrieved");
+      expect(lookup).toHaveBeenCalledTimes(1);
+    } else {
+      expect(lookup).not.toHaveBeenCalled();
+      await expect(a.failureReport(job.slug, start.runId)).rejects.toThrow();
+    }
+    expect(JSON.stringify(post.mock.calls)).not.toContain("private backend failure");
+  } finally { await host.abandon(); await server.close(); }
+});
+
+it("refuses unsupported external execution without spawning locally", async () => {
+  await expect(new JobHost().startRequest(manifest().jobs[0]!, { kind: "human", id: "owner" })).rejects.toThrow("no local execution fallback");
+});

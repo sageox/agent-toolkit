@@ -72,6 +72,41 @@
       "additionalProperties": false,
       "required": ["slug", "suspend", "trigger", "budget"],
       "properties": {
+        "worker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "serviceAccountName"
+          ],
+          "properties": {
+            "serviceAccountName": {
+              "$ref": "#/$defs/objectName"
+            },
+            "secrets": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "key"
+                ],
+                "properties": {
+                  "name": {
+                    "$ref": "#/$defs/objectName"
+                  },
+                  "key": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.-]+$"
+                  }
+                }
+              }
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
+        },
         "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
         "suspend": { "type": "boolean" },
         "trigger": {
@@ -106,6 +141,18 @@
         "terminationGracePeriodSeconds", "resources", "sharedVolumes"
       ],
       "properties": {
+        "dispatcher": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tokenSecret"
+          ],
+          "properties": {
+            "tokenSecret": {
+              "$ref": "#/$defs/objectName"
+            }
+          }
+        },
         "fullnameOverride": { "$ref": "#/$defs/optionalObjectName" },
         "bundle": {
           "type": "object",

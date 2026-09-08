@@ -67,7 +67,7 @@ spec:
           # runs an LLM over untrusted text. The knob is named for the job rather than the
           # agent so no single value can put a token in the LLM container. What the token may
           # then read is the Role and RoleBinding the consumer wrote — never this chart's.
-          automountServiceAccountToken: {{ $agent.serviceAccount.automountJobToken | default false }}
+          automountServiceAccountToken: {{ and (not $job.worker) ($agent.serviceAccount.automountJobToken | default false) }}
           {{- with $.Values.priorityClassName }}
           priorityClassName: {{ . | quote }}
           {{- end }}
@@ -79,7 +79,7 @@ spec:
           tolerations:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if $agent.persistence.jobCheckouts }}
+          {{- if and (not $job.worker) $agent.persistence.jobCheckouts }}
           # The checkouts mount is the agent's own `ReadWriteOnce` claim, and one node at a
           # time can attach it. Required and not preferred: a Pod the scheduler placed
           # anywhere else would wait behind a `Multi-Attach` event with empty logs, while an
@@ -134,10 +134,18 @@ Searched before `--secrets`, and passed here and nowhere else. A ref that lives 
 mount is resolvable by a scheduled body and by nothing in the Deployment Pod, which is the
 whole of what the second mount buys.
 */}}
-                {{- if include "agent.hasJobSecrets" $agent }}
+                {{- if and (not $job.worker) (include "agent.hasJobSecrets" $agent) }}
                 - --job-secrets
                 - {{ include "agent.jobSecretsMountPath" $context }}
                 {{- end }}
+              {{- if $job.worker }}
+              env:
+                {{- include "agent.dispatcherEnv" $context | nindent 16 }}
+                - name: AGENT_JOB_REQUEST_ID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['batch.kubernetes.io/controller-uid']
+              {{- end }}
               resources:
                 {{- toYaml $agent.resources | nindent 16 }}
               securityContext:

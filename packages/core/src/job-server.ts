@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { RunIdSchema } from "./external-jobs.ts";
 import { z } from "zod";
 import type { InboundEvent } from "./events.ts";
 import type { JobRequester } from "./kill-switch.ts";
@@ -145,7 +147,7 @@ const JobArgs = z.object({
       error: "params is an object of the values the job you named declares",
     })
     .optional(),
-});
+}).strict();
 
 /**
  * The declared parameters, as one JSON Schema object for the tool's `params` field.
@@ -227,7 +229,8 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
         "and report the result when it lands. A parked job runs when the message you are " +
         "answering came from one of this agent's owners, because they are waiting on the " +
         "result; it refuses for anyone else, and nothing in this call lets you claim " +
-        "otherwise. " +
+        "otherwise. Some jobs return a durable run ID immediately; use job_status with " +
+        "that ID to retrieve their result. " +
         "A job listed below with params takes a target — which issue, which document, " +
         "which environment — under `params`. No parameter changes what a job does: if the ask " +
         "is for different behaviour, it is a different job and a different slug.\n" +
@@ -238,7 +241,7 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
                   (job) =>
                     `${job.slug} (${job.archetype}) — ${job.description}` +
                     describeParams(job) +
-                    (jobDeadlineMs(job) > turnTimeoutMs ? " [started, not waited for]" : ""),
+                    (job.worker || jobDeadlineMs(job) > turnTimeoutMs ? " [started, not waited for]" : ""),
                 )
                 .join("; ")
             : "none"
@@ -268,9 +271,21 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
             : {}),
         },
         required: ["job"],
+        additionalProperties: false,
       },
     },
-  ];
+    ...(["job_status", "job_cancel"] as const).filter(() => jobs.some((job) => job.worker)).map((name) => ({
+      name,
+      description: name === "job_status"
+        ? "Retrieve durable status and the bounded verdict for a declared job run, including after a gateway restart."
+        : "Cancel a declared job's worker. Cancellation does not roll back external side effects; poll status until finished.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: { job: { type: "string" }, runId: { type: "string", pattern: "^[a-f0-9]{40}$" } },
+        required: ["job", "runId"],
+      },
+    })),
+  ].filter((tool) => tool.name !== JOB_RUN_TOOL_NAME || requestable.length > 0);
 }
 
 /**
@@ -296,6 +311,18 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
     // carries the validated values instead, which is the durable place to look anyway.
     audit: { [JOB_RUN_TOOL_NAME]: ["job"] },
     call: async (tool, args) => {
+      if (tool === "job_status" || tool === "job_cancel") {
+        const allowed = policy.allowsTool(`mcp__jobs__${tool}`);
+        if (!allowed.ok) throw new ToolRefused(`${tool} refused: ${allowed.reason}`);
+        const asked = z.object({ job: z.string(), runId: RunIdSchema }).strict().parse(args);
+        const job = jobs.find((job) => job.slug === asked.job && job.worker);
+        if (!job) throw new Error("no external job with that name is declared");
+        const status = await (tool === "job_cancel" ? host.cancel(job, asked.runId) : host.status(job, asked.runId));
+        const counts = status.result?.counts;
+        const verdict = counts ? (counts.FAIL > 0 ? "FAIL" : counts.UNKNOWN > 0 || counts.PASS === 0 ? "UNKNOWN" : "PASS") : "UNKNOWN";
+        return JSON.stringify({ ...status, verdict: status.state === "finished" ? verdict : "not finished",
+          ...(tool === "job_cancel" ? { note: "Cancellation does not roll back external side effects." } : {}) });
+      }
       if (tool !== JOB_RUN_TOOL_NAME) throw new Error(`unknown tool ${tool}`);
       const allowed = policy.allowsTool(JOB_RUN_TOOL);
       if (!allowed.ok) throw new ToolRefused(`${JOB_RUN_TOOL_NAME} refused: ${allowed.reason}`);
@@ -320,18 +347,23 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
       // picks between them — not a field in this call, and not a field in the manifest that
       // could disagree with either number. A job that fits inside a turn is waited for and
       // quoted; one that cannot is started, and answers where it declared it would.
-      if (jobDeadlineMs(job) > turnTimeoutMs) {
+      if (job.worker || jobDeadlineMs(job) > turnTimeoutMs) {
         // Read now, not when the run lands: by then the turn is over and the gateway has
         // forgotten which message it was answering. The verdict goes back as the same text
         // a waited-for call returns, so the two shapes read alike where they arrive.
         const home = answering?.() ?? null;
         const answer =
-          home && reply ? (run: JobRun) => reply(home, describeRun(run, job)) : undefined;
+          home && reply ? (run: JobRun, failureReport?: string) =>
+            reply(home, describeRun(run, job) + (failureReport ? `\n${failureReport}\n` : "")) : undefined;
         const start = await host.startRequest(
           job,
           requester(agentName, answering, owner),
           params,
           answer,
+          job.worker && home ? createHash("sha256").update(JSON.stringify([
+            agentName, home.surface, home.channel.id, home.id.nativeId, job.slug,
+            Object.entries(params).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0),
+          ])).digest("hex") : undefined,
         );
         return start.refused
           ? describeRun(start.refused, job)
@@ -375,6 +407,10 @@ function describeRun(run: JobRun, job: JobConfig): string {
  * a deploy; this is the honest thing to say when one is running anyway.
  */
 function describeStart(job: JobConfig, start: JobStart, answered: boolean): string {
+  if (job.worker) return `job ${job.slug} accepted — run id ${start.runId}; no verdict yet. ` +
+    "Use job_status with this job and runId to retrieve the result, including after a restart. " +
+    "job_cancel stops the worker but does not roll back external side effects.";
+
   const lands = job.report
     ? `the result will post to ${job.report.channel} on the ${job.report.surface} surface ` +
       "when the run lands"

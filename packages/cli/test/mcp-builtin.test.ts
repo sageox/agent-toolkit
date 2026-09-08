@@ -81,6 +81,14 @@ describe("built-in MCP setup", () => {
       expect(stdout).toContain("mcp__jobs__job_run");
     });
 
+    it("supports status and cancellation for external jobs with only a schedule", async () => {
+      declare('{schedules: ["0 3 * * *"]}', "    killSwitch: {failDirection: open}\n" +
+        `    worker: {image: "example/worker@sha256:${"a".repeat(64)}", directory: /work}\n`);
+      const { stdout } = await runCli(["mcp", "add", "jobs", "--agent", "demo"], { AGENT_TOOLKIT_HOME: home });
+      expect(stdout).toContain("mcp__jobs__job_status");
+      expect(stdout).toContain("mcp__jobs__job_cancel");
+    });
+
     // The gateway serves this tool only for jobs that armed the door, so allowing it for an
     // agent with none is a permission for a tool that will never exist.
     it("refuses to allow a tool nothing would serve, and leaves the policy alone", async () => {

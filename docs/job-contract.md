@@ -5,7 +5,8 @@ to import and no base class to extend** — the whole interface is an argv, some
 an exit code, and a file. A job body can be a shell script as easily as TypeScript.
 
 `sageox-agent job run <slug>` is what a CronJob execs. For how jobs are declared, triggered,
-parked, and bounded, see [the jobs RFC](design/2026-08-19-jobs-rfc.md).
+parked, and bounded, see [the jobs RFC](design/2026-08-19-jobs-rfc.md). For temporary workers
+with their own runtime image, durable status and cancellation, see [external jobs](external-jobs.md).
 
 ## What the host passes in
 
@@ -37,7 +38,8 @@ jobs:
       secrets: { GH_TOKEN: GH_TOKEN, ANTHROPIC_API_KEY: ANTHROPIC_API_KEY }
       # The same, for a credential the gateway's own process must not hold. Resolved
       # identically, but left out of the startup check — that is what lets the gateway
-      # start without it. Declaring one here refuses `trigger.onRequest` on this job.
+      # start without it. For a local job, this refuses `trigger.onRequest`.
+      # External workers may use both.
       jobSecrets: { GH_APP_PEM: GH_APP_PEM }
       # Ambient variables this body inherits, by name. For values the platform injects at
       # runtime — EKS IRSA below; GKE and Azure workload identity present the same way.
@@ -48,9 +50,9 @@ jobs:
 resolve from the same directory list, and a deployment with one directory satisfies both.
 A target may hand `job run` a second one it does not give the gateway (`--job-secrets`; the
 Helm chart spells the mount `agents.<name>.jobSecrets`), and a ref living only there cannot
-resolve on the on-request path, which is the one that runs inside the gateway. Saying which
-refs moved is what lets that pairing be refused at load, by name, rather than on the run
-that meets it.
+resolve on the local on-request path, which runs inside the gateway. Saying which
+refs moved is what lets that local pairing be refused at load, by name, rather than on the run
+that meets it. An external job instead resolves these refs only inside its worker.
 
 A secret of the same name beats `env`, so a credential can never be silently downgraded to
 a hardcoded value; the `JOB_*` variables above beat everything, because a body that could

@@ -1,0 +1,140 @@
+{{- range $name, $agent := .Values.agents }}
+{{- if $agent.dispatcher }}
+{{- $context := dict "root" $ "name" $name "agent" $agent -}}
+{{- $full := include "agent.dispatcherName" $context -}}
+{{- $profiles := dict -}}
+{{- range $job := $agent.jobs -}}
+{{- if $job.worker -}}{{- $_ := set $profiles $job.slug $job.worker -}}{{- end -}}
+{{- end -}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $full }}
+  namespace: {{ $.Release.Namespace }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $full }}
+  namespace: {{ $.Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $full }}
+  namespace: {{ $.Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $full }}
+    namespace: {{ $.Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $full }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $full }}
+  namespace: {{ $.Release.Namespace }}
+data:
+  profiles.json: {{ $profiles | toJson | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  selector:
+    agent-toolkit/dispatcher: {{ $full }}
+    agent-toolkit/role: dispatcher
+  ports:
+    - port: 8090
+      targetPort: 8090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      agent-toolkit/dispatcher: {{ $full }}
+      agent-toolkit/role: dispatcher
+  template:
+    metadata:
+      labels:
+        agent-toolkit/dispatcher: {{ $full }}
+        agent-toolkit/role: dispatcher
+      annotations:
+        agent-toolkit/config-sha256: {{ printf "%s%s" (toJson $agent.bundle) (toJson $profiles) | sha256sum | quote }}
+    spec:
+      serviceAccountName: {{ $full }}
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        {{- /* Reuse bundle staging without mounting any gateway or task credential. */}}
+        {{- include "agent.stageConfig" (dict "root" $ "name" $name "agent" (merge (dict "sharedVolumes" list) (deepCopy $agent))) | nindent 8 }}
+      containers:
+        - name: dispatcher
+          image: {{ $.Values.imageRef | quote }}
+          args:
+            - job
+            - dispatcher
+            - --bundle
+            - /agents/{{ $name }}
+            - --profiles
+            - /etc/dispatcher/profiles.json
+            - --namespace
+            - {{ $.Release.Namespace | quote }}
+            - --name
+            - {{ $full }}
+          env:
+            {{- include "agent.dispatcherEnv" $context | nindent 12 }}
+          ports:
+            - containerPort: 8090
+          readinessProbe:
+            tcpSocket: { port: 8090 }
+          resources:
+            {{- toYaml $agent.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: agent-data
+              mountPath: /agents
+            - name: profiles
+              mountPath: /etc/dispatcher
+              readOnly: true
+      volumes:
+        - name: agent-data
+          emptyDir: {}
+        - name: profiles
+          configMap:
+            name: {{ $full }}
+        {{- with $agent.bundle.volume }}
+        - name: config
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+{{ end }}
+{{ end }}

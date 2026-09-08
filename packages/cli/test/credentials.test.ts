@@ -440,6 +440,24 @@ jobs:
     expect(message).not.toContain("jobs[0].run.jobSecrets");
   });
 
+  it("does not require external worker credentials in the gateway", () => {
+    const manifest = loadManifest(`
+name: worker-demo
+brain: {provider: mock}
+respondTo: anyone
+surfaces: [{kind: console}]
+jobs:
+  - slug: task
+    archetype: queue
+    description: Isolated task
+    trigger: {onRequest: true}
+    budget: {wallClockMs: 60000}
+    worker: {image: "example/task@sha256:${"a".repeat(64)}", directory: /work}
+    run: {command: python3, secrets: {API_TOKEN: TASK_TOKEN}, jobSecrets: {PRIVATE: TASK_PRIVATE}}
+`);
+    expect(declaredSecrets(manifest, [])).toEqual([]);
+  });
+
   it("names every missing ref at once, with where it is declared and how to get one", () => {
     const declared = declaredSecrets(loadManifest(FLEET), parseReposConf(PRIVATE_REPO));
     let message = "";

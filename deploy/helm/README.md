@@ -487,3 +487,7 @@ There is deliberately no `Read(//mnt/job-secrets-store/**)` deny rule to add. Th
 does not exist in the Pod the brain runs in, and a deny rule covering nothing is the kind of
 rule that reads as a control and is not.
 
+
+## External job workers
+
+For on-demand jobs with their own runtime image, use [the external jobs guide](../../docs/external-jobs.md). It covers the worker image, per-job ServiceAccount and Secret mappings, the shared dispatcher, scheduled triggers, durable results and cancellation. The gateway image does not need the task runtime.

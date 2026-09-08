@@ -118,13 +118,57 @@ SecretProviderClass, and renders a single object rather than two.
 {{- $jobNames := dict -}}
 {{- $serviceAccountNames := dict -}}
 {{- $secretClassNames := dict -}}
+{{/* Workers must be separate from every gateway and dispatcher in this release. */}}
+{{- $gatewayAccounts := dict -}}
+{{- $dispatcherAccounts := dict -}}
+{{- $gatewaySecrets := dict -}}
 {{- range $name, $agent := .Values.agents -}}
 {{- $context := dict "root" $ "name" $name "agent" $agent -}}
+{{- $_ := set $gatewayAccounts (include "agent.serviceAccountName" $context) $name -}}
+{{- if $agent.secrets.kubernetesSecret -}}{{- $_ := set $gatewaySecrets $agent.secrets.kubernetesSecret $name -}}{{- end -}}
+{{- if $agent.dispatcher -}}
+{{- $_ := set $dispatcherAccounts (include "agent.dispatcherName" $context) $name -}}
+{{- $_ := set $gatewaySecrets $agent.dispatcher.tokenSecret $name -}}
+{{- end -}}
+{{- end -}}
+{{- range $account, $name := $dispatcherAccounts -}}
+{{- if hasKey $gatewayAccounts $account -}}
+{{- fail (printf "%s: gateway must not use the dispatcher ServiceAccount %s" (get $gatewayAccounts $account) $account) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $agent := .Values.agents -}}
+{{- $context := dict "root" $ "name" $name "agent" $agent -}}
+{{- range $job := $agent.jobs -}}
+{{- if $job.worker -}}
+{{- if not $agent.dispatcher -}}
+{{- fail (printf "%s/%s: external worker requires dispatcher.tokenSecret" $name $job.slug) -}}
+{{- end -}}
+{{- if hasKey $gatewayAccounts $job.worker.serviceAccountName -}}
+{{- fail (printf "%s/%s: worker must use a separate ServiceAccount from the gateway" $name $job.slug) -}}
+{{- end -}}
+{{- if hasKey $dispatcherAccounts $job.worker.serviceAccountName -}}
+{{- fail (printf "%s/%s: worker must not use the dispatcher ServiceAccount" $name $job.slug) -}}
+{{- end -}}
+{{- range $ref, $secret := $job.worker.secrets -}}
+{{- if hasKey $gatewaySecrets $secret.name -}}
+{{- fail (printf "%s/%s: worker secret must be separate from gateway and dispatcher secrets" $name $job.slug) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- $full := include "agent.agentFullname" $context -}}
 {{- if hasKey $agentNames $full -}}
 {{- fail (printf "%s and %s would both render objects named %s: every agent of a release must resolve to its own name" (get $agentNames $full) $name $full) -}}
 {{- end -}}
 {{- $_ := set $agentNames $full $name -}}
+{{- if $agent.dispatcher -}}
+{{- $dispatcher := include "agent.dispatcherName" $context -}}
+{{- if hasKey $agentNames $dispatcher -}}
+{{- fail (printf "%s: dispatcher name %s collides with another agent" $name $dispatcher) -}}
+{{- end -}}
+{{- $_ := set $agentNames $dispatcher $name -}}
+{{- end -}}
 {{- if $agent.serviceAccount.create -}}
 {{- $account := include "agent.serviceAccountName" $context -}}
 {{- if hasKey $serviceAccountNames $account -}}
