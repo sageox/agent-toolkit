@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Opt-in `AGENT_WORK_EVENTS=1` emits bounded, versioned job start/completion records
+  from both scheduled and chat hosts. Job reports may include typed artifact,
+  subject state, usage and health facts when `JOB_WORK_SCHEMA_VERSION=1` is present.
+  Child diagnostics are isolated from host event envelopes; raw gate details,
+  requester information and parameters are excluded. These are runtime reports,
+  not independent provider confirmation.
+
 ## [0.4.0] - 2026-09-07
 
 Everything below shipped after `v0.3.1`.

@@ -14,6 +14,7 @@ with their own runtime image, durable status and cancellation, see [external job
 |---|---|
 | `JOB_SLUG` · `JOB_RUN_ID` · `JOB_TRIGGER` | Who this run is. The trigger is stamped from the entry point that started it, never passed in, so a job cannot claim a human asked for what a clock started. |
 | `JOB_VERDICT_PATH` | Where to write what you ran. |
+| `JOB_WORK_SCHEMA_VERSION` | `1` when structured reporting is enabled, otherwise empty. Gate optional work fields on this capability; see [schema 1](#structured-work-events-schema-1). |
 | `JOB_DEADLINE_AT` | Epoch ms at which the host stops you. Bow out before it. |
 | `JOB_HARNESS_TIMEOUT_MS` · `JOB_MAX_ITERATIONS` · `JOB_MAX_ATTEMPTS` · `JOB_MAX_SPEND_USD` · `JOB_MODEL` | The declared bounds the runtime cannot enforce for you. It can hold a job to a clock without knowing what it does; it cannot count an iteration or a dollar. |
 | `JOB_PARAM_<NAME>` | One per parameter this run was given, uppercased. Already validated against the declaration — see below. Absent when the run was given none. |
@@ -337,3 +338,127 @@ the status word in front of them is still minted by the host from what it ran. R
 channel is how a probe finds its evidence, never how it grades it — which is the point: the
 timing and the tally are deterministic code, and the brain only relays a result it did not
 invent.
+
+## Structured work events (schema 1)
+
+Set `AGENT_WORK_EVENTS=1` on `sageox-agent job run` or `sageox-agent run` to emit
+JSON Lines on **stdout**. The latter includes jobs requested through its MCP tool,
+including detached runs. With reporting disabled, child stdout/stderr and human
+status rendering retain their existing behavior. No collector or external service
+is required. Deployments must wait for a versioned toolkit release containing this
+contract before enabling it, and pin that release's image digest.
+
+A top-level `sageox_work_event` key is reserved for host lifecycle records. Read
+only stdout, accept `schema_version: 1`, and deduplicate by `(agent, run_id, event)`.
+`run_id` is the host's existing opaque ID: do not derive another one from timestamps
+or artifact IDs. Scope the agent name by deployment when combining independently
+named fleets. Consumers must ignore unsupported schema versions.
+
+```jsonl
+{"sageox_work_event":{"schema_version":1,"agent":"reviewer","job":"triage","run_id":"opaque-run-id","trigger":"schedule","started_at":"2026-09-07T03:00:00.000Z","deadline_at":"2026-09-07T03:05:00.000Z","event":"run.started","occurred_at":"2026-09-07T03:00:00.010Z"}}
+{"sageox_work_event":{"schema_version":1,"agent":"reviewer","job":"triage","run_id":"opaque-run-id","trigger":"schedule","started_at":"2026-09-07T03:00:00.000Z","deadline_at":"2026-09-07T03:05:00.000Z","event":"run.completed","occurred_at":"2026-09-07T03:00:12.000Z","outcome":"completed","verdict":"PASS","checks":[{"gate":"job:triage","executed":true,"exit_code":0,"source":"host"},{"gate":"ci","executed":true,"exit_code":0,"source":"producer"}],"report_status":"valid","partial":false}}
+```
+
+`started_at` records the attempt; the start event's `occurred_at` records admission.
+A start means admission succeeded, before setup and process spawn. It is not proof
+that the process started: a later `crashed` result can report `executed: false`.
+`deadline_at` is the declared hard deadline including cleanup headroom;
+`JOB_DEADLINE_AT` is earlier by that headroom. Refusals and overlap skips emit only
+a terminal record, with no admitted deadline. `run.completed` names a terminal
+**event**, whose `outcome` can still be denied, skipped, crashed, abandoned, or
+`budget-bowout`. Its `occurred_at` is the host's settlement time.
+
+`checks` retains execution and exit facts; `source` distinguishes the host process
+check from producer-reported checks. Optional `execution` holds process state,
+epoch-millisecond timestamps, actual exit code and signal number. A timeout may
+have an actual exit code of zero after cleanup while its combined `verdict` remains
+`UNKNOWN`. Neither process exit zero nor a passing gate confirms an artifact was
+created or an external subject is healthy. `verdict` retains the existing gate
+combination rules. A caller or chat transport timing out does not change the job's
+observed outcome.
+
+External-dispatch jobs use the dispatcher's existing run ID and settlement. The
+gateway emits a start after dispatch admission, which can precede worker startup;
+a cached terminal result or dispatcher refusal emits only a terminal record.
+Current dispatcher results carry aggregate verdicts and optional execution facts,
+not individual checks or work metadata: these events are marked `partial`. This
+contract does not expand the worker's termination-log protocol or cloud policies.
+
+A killed host can leave a start with **no terminal record**. Absence is not proof
+of success or failure. Observer/output failures are best-effort losses and never
+change job admission or settlement. There is no durable event queue or replay.
+
+### Optional facts in the existing verdict file
+
+When reporting is enabled for a local job, the host sets
+`JOB_WORK_SCHEMA_VERSION=1`; otherwise it sets an empty value. Producers must test
+for the supported value before adding fields. The host owns this variable and
+replaces any value declared by the child. Schema 1 extends the same strict
+`JOB_VERDICT_PATH` JSON object. Existing gates-only files remain valid; optional
+work fields never change how gates mint verdicts. The exported
+`VerdictArtifactSchema` and `WorkReportSchema` in core are the shared validators.
+
+```json
+{
+  "gates": [{ "gate": "ci", "executed": true, "exitCode": 0 }],
+  "artifacts": [{
+    "subject": { "provider": "github", "kind": "pull_request", "scope": "acme/service", "id": "42" },
+    "action": "created",
+    "observed_at": "2026-09-07T03:00:10Z",
+    "related_to": { "provider": "github", "kind": "issue", "scope": "acme/service", "id": "53" },
+    "next_actor": "reviewer"
+  }],
+  "work_observations": [{
+    "subject": { "provider": "github", "kind": "issue", "scope": "acme/service", "id": "53" },
+    "state": "waiting", "next_actor": "reviewer"
+  }],
+  "usage": { "scanned": 0, "outputs": 1, "model_calls": 2 },
+  "health": [{
+    "subject": { "provider": "runtime", "kind": "service", "id": "api" },
+    "check": "readiness", "status": "unknown", "observed_at": "2026-09-07T03:00:10Z"
+  }],
+  "partial": true
+}
+```
+
+| Field | Schema 1 vocabulary |
+|---|---|
+| Subject | `provider`, `kind`, `id`, optional `scope`. Kinds: `issue`, `pull_request`, `document`, `artifact`, `agent`, `service`, `job`. IDs/scopes are bounded identifiers, not URLs or prose. |
+| Artifact action | `created`, `updated`, `commented`, `completed`. |
+| Work observation state | `open`, `in_progress`, `waiting`, `blocked`, `completed`, `closed`, `unknown`. Provider-specific states map to these in the producer. |
+| Artifact/observation context | Optional `observed_at` (ISO timestamp with timezone), `related_to` (one subject), `next_actor` (identifier, not personal/requester information). |
+| Usage | Optional `model_calls`, `input_tokens`, `output_tokens`, `scanned`, `candidates`, `recommendations`, `findings`, `outputs` (nonnegative safe integers), and `cost_usd` (nonnegative finite number). Only measured values; zero means measured zero, absence means unreported. |
+| Health | Subject, `check` identifier, required observation timestamp, `status`: `healthy`, `degraded`, `unhealthy`, `unknown`. Producers define checks and health policy; runtime does not interpret cluster or fleet state. |
+| Partial | Optional boolean. True means bounded or incomplete producer knowledge, even when every gate passes. |
+
+Providers, checks, and next actors use lowercase letter/digit/hyphen identifiers
+of at most 64 characters, beginning with a letter. IDs/scopes use up to 256 ASCII
+letters/digits or `_.:/-`, beginning with a letter or digit. Arrays allow at most
+100 items. Unknown fields, invalid values, malformed JSON, missing files, and files
+over 64 KiB never become invented work. Terminal `report_status` distinguishes
+`valid`, `missing`, `invalid`, and `oversized`; invalid/absent reports retain the
+existing unproven verdict and expose no work facts. Empty gates also stay unproven.
+A future incompatible vocabulary requires a new advertised version; producers
+must not send fields simply because they hope a host will ignore them.
+
+### Log boundaries and trust
+
+Every structured record is at most **8,192 UTF-8 bytes**, including its wrapper
+and trailing newline. If optional facts do not fit, whole items are omitted and
+`partial` becomes true. The run identity, timestamps, outcome and combined verdict
+are preserved. An identity that cannot itself fit is an emission failure; execution
+still proceeds. Identifier-unsafe historical gate names are omitted and also mark
+the event partial. Gate details, requester identity, parameters, reasons/raw errors,
+model output, transcripts, and credentials are not structured work fields.
+
+With reporting enabled, child stdout/stderr are decoded across UTF-8 chunks and
+wrapped as `{"job_diagnostic":{"stream":"stdout","text":"..."}}` (or `stderr`).
+The one-shot human status rendering uses the same wrapper with `stream: "host"`.
+Diagnostic text follows the existing diagnostic logging policy and can contain
+untrusted output. **Never recursively parse diagnostic text as lifecycle events.**
+A child printing event-shaped JSON remains text inside a diagnostic envelope.
+
+These are host-observed execution facts and validated producer-reported work
+facts. They are neither cryptographic proof nor independently verified provider
+state. Consumers may reconcile artifacts with external systems separately; they
+must not label producer claims as confirmed outcomes or infer tokens/cost from prose.

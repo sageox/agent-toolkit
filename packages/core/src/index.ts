@@ -35,3 +35,4 @@ export { ExternalJobs, ExternalRequestSchema, workerResult } from "./external-jo
 export { JobDispatcher, JobKubeApi, WorkerProfilesSchema, serveJobDispatcher } from "./job-dispatcher.ts";
 export { JobSchema } from "./manifest.ts";
 export { type WorkerDiagnostics } from "./job-diagnostics.ts";
+export * from "./work-events.ts";
