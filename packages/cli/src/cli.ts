@@ -2148,11 +2148,11 @@ function manifestRespondToLabel(respondTo: string): string {
 /**
  * `validate <path…>` — will the runtime load this file?
  *
- * `doctor` already answers that, through the same `loadManifest` the gateway calls at
- * startup, but it asks more beside it: it reads `.env`, resolves every declared `secretRef`,
- * and reads the agent's directory record off the relay. So it needs an agent home and a
- * credential, and a repository that only *authors* `agent.yaml` files has neither. This
- * takes paths, touches nothing else, and exits non-zero — the shape a CI step can hold.
+ * `doctor` already answers that, through the same `readManifest` `run` calls at startup, but
+ * it asks more beside it: it reads `.env`, resolves every declared `secretRef`, and reads the
+ * agent's directory record off the relay. So it needs an agent home and a credential, and a
+ * repository that only *authors* `agent.yaml` files has neither. This takes paths, touches
+ * nothing else, and exits non-zero — the shape a CI step can hold.
  *
  * The schema is authored here, so the only alternative was a hand-kept copy downstream,
  * which reports green on exactly the manifest this one refuses one release later.
@@ -2171,10 +2171,16 @@ function validateCmd(argv: string[]): boolean {
   for (const path of argv) {
     try {
       // Named apart from a parse failure, because a glob that matched nothing and a manifest
-      // that does not load are different things to go fix, and `readFileSync` reports the
-      // second one's shape for both.
+      // that does not load are different things to go fix. This is also why `readManifest`'s
+      // own absent-file message never fires here: it tells the reader to run `init`, which
+      // is not what a CI step pointed at the wrong path should do.
       if (!existsSync(path)) throw new Error("no such file");
-      const manifest = loadManifest(readFileSync(path, "utf8"));
+      // `readManifest`, not `loadManifest`: `run` normalizes `owner`, `allowlist` and
+      // `killSwitchParkBy` after the schema passes, and `toHexPubkey` throws on a mistyped
+      // npub or an nsec written where a public key belongs. The schema admits both as
+      // strings, so validating one rung below the runtime would pass a file the runtime
+      // refuses at startup — this command's own failure mode.
+      const manifest = readManifest(path);
       process.stdout.write(
         `  ok    ${path} — ${manifest.name}, ${manifest.surfaces.length} surface(s), ` +
           `${manifest.jobs.length} job(s)\n`,
@@ -2847,8 +2853,10 @@ const commands: Record<string, (argv: string[]) => Promise<void> | void> = {
   probe: probeCmd,
   repos: reposCmd,
   mcp: mcpAddCmd,
+  // `exitCode`, not `exit`: a report of any size reaches a pipe whole. `process.exit`
+  // discards pending stdout writes, and a piped stdout is where every CI run reads this.
   validate: (argv) => {
-    if (!validateCmd(argv)) process.exit(1);
+    if (!validateCmd(argv)) process.exitCode = 1;
   },
   doctor: async (argv) => {
     if (!await doctorCmd(argv)) process.exit(1);

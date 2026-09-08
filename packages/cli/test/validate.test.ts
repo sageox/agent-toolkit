@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -98,6 +98,43 @@ describe("sageox-agent validate", () => {
     expect(code).not.toBe(0);
     expect(stdout).toContain("FAIL  ");
     expect(stdout).not.toContain("ok    ");
+  });
+
+  it("fails a path that exists but is not a file", async () => {
+    const bundle = join(dir, "bundle");
+    mkdirSync(bundle);
+
+    const { code, stdout } = await validate([bundle]);
+
+    expect(code).not.toBe(0);
+    expect(stdout).toContain(`FAIL  ${bundle}`);
+    expect(stdout).not.toContain("ok    ");
+  });
+
+  /**
+   * The gap that would make this command worse than nothing: the schema takes these as
+   * plain strings, and `run` converts them afterwards — so validating one rung below the
+   * runtime would report green on a file the runtime refuses at startup.
+   */
+  it("refuses an owner the runtime could not resolve to a key", async () => {
+    const path = write("agent.yaml", AGENT_YAML("demo") + "owner:\n  - npub1nothing\n");
+
+    const { code, stdout } = await validate([path]);
+
+    expect(code).not.toBe(0);
+    expect(stdout).toContain(`FAIL  ${path}`);
+  });
+
+  it("refuses a secret key written where a public one belongs", async () => {
+    const path = write(
+      "agent.yaml",
+      `${AGENT_YAML("demo")}owner:\n  - ${"nsec1" + "q".repeat(58)}\n`,
+    );
+
+    const { code, stdout } = await validate([path]);
+
+    expect(code).not.toBe(0);
+    expect(stdout).toContain("secret key");
   });
 
   it("asks for a path instead of validating nothing", async () => {
