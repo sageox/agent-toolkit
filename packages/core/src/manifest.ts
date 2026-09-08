@@ -324,6 +324,20 @@ export const BrainSchema = z.discriminatedUnion("preset", [
      * through `docker inspect`, `/proc/<pid>/environ`, and crash dumps (§7.3).
      */
     configHome: z.string().optional(),
+    /** Optional gateway-owned, pull-only ledgers; token refs may be reused elsewhere. */
+    ledgerSync: z.array(z.strictObject({
+      repo: z.string().min(1).max(200),
+      url: z.url().refine((value) => {
+        const url = new URL(value);
+        return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash;
+      }, "ledger URL must be HTTPS without credentials, query, or fragment"),
+      username: z.string().min(1).regex(/^[^:\r\n]+$/).optional(),
+      token: z.string().regex(SECRET_REF, "token must be a logical secretRef").optional(),
+    }).refine((remote) => Boolean(remote.username) === Boolean(remote.token),
+      "ledger username and token must be supplied together"))
+      .refine((remotes) => new Set(remotes.map((remote) => remote.repo)).size === remotes.length,
+        "ledgerSync repository names must be unique")
+      .optional(),
   }),
 ]);
 
@@ -1045,7 +1059,7 @@ const ManifestSchema = z
   )
   // Refused rather than tolerated because a second one is not addressable: every team
   // brain wires to the `team-brain` MCP server, so two collide on that name and on the
-  // single `mcp__team-brain__team_search` the policy admits. Accepting the config would
+  // same team tool names the policy admits. Accepting the config would
   // mean one team's knowledge silently shadowing the other's — and a `doctor` that
   // reported on a credential no search would ever use.
   .refine(

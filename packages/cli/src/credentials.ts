@@ -307,6 +307,13 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
       });
     }
     if (brain.preset === "team") {
+      brain.ledgerSync?.forEach((remote, remoteIndex) => {
+        if (remote.token) declared.push({
+          ...spawnedSecretSpec(remote.token, "Git HTTP authentication", "ledger sync"),
+          where: `brains[${index}].ledgerSync[${remoteIndex}].token`,
+          degraded: "this repository's ledger sync is unavailable until its Git credential is mounted",
+        });
+      });
       const ref = brain.token ?? DEFAULT_OX_TOKEN_SECRET;
       declared.push({
         ...SAGEOX_TOKEN_SPEC,

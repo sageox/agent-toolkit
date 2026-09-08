@@ -53,6 +53,8 @@ const PROBE_FAILURES = [
   // `ox_failed` line are one word to grep for rather than two.
   "not-installed",
   "not-authenticated",
+  "ledger-unavailable",
+  "ledger-stale",
 ] as const;
 export type ProbeFailure = (typeof PROBE_FAILURES)[number];
 
