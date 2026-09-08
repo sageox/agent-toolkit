@@ -465,7 +465,8 @@ one place, rotated once, and splitting a job's credential out can never cost a j
 or its report.
 
 These gateway/scheduled-Pod mount rules apply to local jobs. An external `worker` job
-instead maps each `run.jobSecrets` ref through `agents.<agent>.jobs[].worker.secrets`.
+instead maps each `run.secrets` and `run.jobSecrets` ref through
+`agents.<agent>.jobs[].worker.secrets`.
 That worker-only credential path supports both requested and scheduled runs, without
 mounting the credential in the gateway. See [external jobs](../../docs/external-jobs.md).
 
