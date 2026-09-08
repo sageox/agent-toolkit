@@ -76,10 +76,11 @@ requirements. Existing local jobs need no worker configuration.
 - **An agent with `repos.conf` can be asked what has been moving lately.** `code_insights`
   joins `code_search` and `code_status` on the code server: the most-changed files, recent
   commits, and open pull requests and issues, from the same one-shot index and the same
-  read-only checkout. It takes `days` and `limit`, both capped by the gateway, and each row
-  is bounded — a commit body has no length `ox` limits, and ten of them would be the turn
-  rather than an answer. Run `sageox-agent repos add <url>` again on an existing agent to
-  allow `mcp__code__code_insights`; `doctor` names it until you do.
+  read-only checkout. It takes `days` and `limit`, both capped by the gateway. Each displayed
+  text field, including commit messages, is limited to 200 characters after whitespace is
+  collapsed, so long commit messages cannot fill a turn. Run `sageox-agent repos add <url>`
+  again on an existing agent to allow `mcp__code__code_insights`; `doctor` names it until
+  you do.
 
   Insights responses are validated before rendering. Query diagnostics and error/status
   responses report unavailable data rather than no activity, even when `ox` exits
@@ -99,9 +100,9 @@ requirements. Existing local jobs need no worker configuration.
   stop a lane by asking the agent that owns it. Usually that self-corrects, because a human
   notices a stopped lane and restarts it; for a lane whose own job is noticing, nothing
   downstream reports it missing. The gateway is the only thing that ever saw who sent the
-  message, so it now hands the author to the write: a park is refused when the turn being
-  answered is from a recognized agent the manifest does not name. Arming and the tombstone
-  are unchanged and still refused for everyone.
+  message, so it now passes the turn's author to the write operation: a park is refused
+  when the turn being answered is from a recognized agent the manifest does not name.
+  Arming and the tombstone are unchanged and still refused for everyone.
 
   It narrows, and it is not a boundary. The test is positive evidence of an agent, so a
   surface that cannot identify one admits the park — on Buzz that is a pubkey with no
