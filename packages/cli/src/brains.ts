@@ -104,6 +104,7 @@ export type HostedBrainConfig =
       team: string;
       repo?: string;
       configHome?: string;
+      ledgerSync?: Extract<BrainConfig, { preset: "team" }>["ledgerSync"];
       /** secretRef, not the token: the gateway resolves it, the brain never sees it. */
       token: string;
     };
@@ -176,6 +177,7 @@ export function wireBrains(
           team: brain.team,
           repo: brain.repo,
           configHome: brain.configHome,
+          ledgerSync: brain.ledgerSync,
           // Defaulted here rather than at the call site, so the runtime, `doctor` and
           // `memory add` all ask for the same secret rather than each guessing.
           token: brain.token ?? DEFAULT_OX_TOKEN_SECRET,

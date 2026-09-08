@@ -14,6 +14,9 @@ const search: TeamSearch = async (query) => [{ score: 0.9, text: `about ${query}
 /** The hosting is what is under test here, so the ox side is a stub. */
 const ox = (over: Partial<TeamOx> = {}): TeamOx => ({
   search,
+  ledgerStatus: async () => [],
+  sessions: async () => { throw new Error("no ledger configured"); },
+  recent: async () => { throw new Error("no ledger configured"); },
   ...over,
 });
 
@@ -44,6 +47,20 @@ describe("gateway-hosted team brain", () => {
     expect(res.status).toBe(401);
   });
 
+  it("answers status over the guarded endpoint without returning search passages", async () => {
+    hosted = await serveTeamBrain(ox());
+    const request = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "team_status", arguments: {} } };
+    expect((await post(hosted.url, request)).status).toBe(401);
+    const res = await post(hosted.url, request, { authorization: `Bearer ${hosted.token}` });
+    const body = (await res.json()) as { result: { content: Array<{ text: string }> } };
+    const output = body.result.content[0].text;
+    expect(JSON.parse(output)).toMatchObject({
+      team_search: { status: "available" },
+      ledger_sync: { status: "not_configured" },
+    });
+    expect(output).not.toContain("about team");
+  });
+
   it("refuses a wrong token", async () => {
     hosted = await serveTeamBrain(ox());
     const res = await post(hosted.url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, { authorization: "Bearer nope" });
@@ -59,7 +76,7 @@ describe("gateway-hosted team brain", () => {
     hosted = await serveTeamBrain(ox());
     const res = await post(hosted.url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, { authorization: `Bearer ${hosted.token}` });
     const body = (await res.json()) as { result: { tools: Array<{ name: string }> } };
-    expect(body.result.tools.map((t) => t.name)).toEqual(["team_search"]);
+    expect(body.result.tools.map((t) => t.name)).toEqual(["team_search", "team_status", "team_sessions", "team_recent"]);
   });
 
   it("turns a search failure into an error the brain can read, not a dead socket", async () => {
@@ -126,6 +143,21 @@ describe("origin checks", () => {
 });
 
 describe("ox credential handling", () => {
+  it("preserves workstation paths and endpoint while applying the configured scope", () => {
+    const base = {
+      PATH: "/usr/bin", HOME: "/workstation", LANG: "en_US.UTF-8", LC_ALL: "C", TZ: "UTC", TMPDIR: "/tmp",
+      XDG_CONFIG_HOME: "/config", XDG_DATA_HOME: "/data", XDG_CACHE_HOME: "/cache",
+      XDG_STATE_HOME: "/state", XDG_RUNTIME_DIR: "/run", SAGEOX_ENDPOINT: "https://sageox.ai",
+    };
+    expect(oxEnv({}, base)).toEqual({ ...base, SAGEOX_DAEMON: "false", OX_NO_DAEMON: "1" });
+    expect(oxEnv({ configHome: "/mounted-auth", dataHome: "/agent-data" }, base)).toMatchObject({
+      XDG_CONFIG_HOME: "/mounted-auth", XDG_DATA_HOME: "/agent-data", XDG_CACHE_HOME: "/agent-data/cache",
+      XDG_STATE_HOME: "/state", XDG_RUNTIME_DIR: "/run",
+    });
+    expect(base.XDG_CONFIG_HOME).toBe("/config");
+    expect(base.XDG_DATA_HOME).toBe("/data");
+  });
+
   it("passes a token supplied out-of-band, for containers with no interactive login", () => {
     const env = oxEnv({ token: () => "tok_abc" }, { PATH: "/usr/bin" });
     expect(env.SAGEOX_TOKEN).toBe("tok_abc");

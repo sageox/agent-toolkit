@@ -414,6 +414,29 @@ describe("brains", () => {
     ).toMatchObject({ token: "OX_TOKEN_ASHBY" });
   });
 
+  it("accepts optional ledger sync with a reusable secret ref or anonymous access", () => {
+    const ledgerSync = [
+      { repo: "service", url: "https://git.example.test/team/ledger.git", username: "oauth2", token: "SHARED_GIT_TOKEN" },
+      { repo: "public", url: "https://git.example.test/public/ledger.git" },
+    ];
+    const manifest = loadManifest(`${base}brains:\n  - preset: team\n    team: team_x\n    ledgerSync: ${JSON.stringify(ledgerSync)}`);
+    expect(manifest.brains[0]).toMatchObject({ ledgerSync });
+  });
+
+  it.each([
+    [{ repo: "service", url: "file:///tmp/ledger" }],
+    [{ repo: "service", url: "https://user:password@git.example.test/ledger" }],
+    [{ repo: "service", url: "https://git.example.test/ledger?token=secret" }],
+    [{ repo: "service", url: "https://git.example.test/ledger#fragment" }],
+    [{ repo: "service", url: "https://git.example.test/ledger", token: "TOKEN" }],
+    [{ repo: "service", url: "https://git.example.test/ledger", username: "user" }],
+    [{ repo: "service", url: "https://git.example.test/ledger", username: "user", token: "../secret" }],
+    [{ repo: "service", url: "https://git.example.test/ledger", command: "git push" }],
+    [{ repo: "service", url: "https://git.example.test/one" }, { repo: "service", url: "https://git.example.test/two" }],
+  ].map((ledgerSync) => ({ ledgerSync })))("rejects unsafe or ambiguous ledger configuration (%j)", ({ ledgerSync }) => {
+    expect(() => loadManifest(`${base}brains:\n  - preset: team\n    team: team_x\n    ledgerSync: ${JSON.stringify(ledgerSync)}`)).toThrow();
+  });
+
   it("refuses a pasted access token, which would commit the credential to the bundle", () => {
     expect(() =>
       loadManifest(`${base}brains:\n  - preset: team\n    team: team_x\n    token: oxp_abc123`),

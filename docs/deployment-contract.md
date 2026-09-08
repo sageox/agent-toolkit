@@ -180,11 +180,10 @@ never contains external credentials. See the [ground-up AWS guide](aws-eks-deplo
 
 To rotate a credential, put the new value in the external store and restart the
 Deployment — the new pod mounts current values, and the runtime resolves credentials at
-process startup. The team brain's SageOx token is the one exception: it is read from the
-mount for every `ox` child, so a file the CSI driver refreshes in place is what the next
-lookup carries, and the capability recovers with nobody involved. Nothing else here can
-work that way — the surface tokens, the Buzz identity and the model key are each held at
-startup by a connection or a subprocess that a rotation would have to re-establish
+process startup. The team brain rereads its SageOx token for every `ox` child and its
+optional ledger Git token for every refresh, so a file the CSI driver refreshes in place
+is what the next operation carries. The surface tokens, the Buzz identity and the model
+key are held at startup by a connection or a subprocess that a rotation would have to re-establish
 regardless. Refreshing the mount is opt-in: the bootstrap module leaves the CSI driver's
 rotation reconciler at its default of off, and without it a restart is the rotation step
 for this credential too.
@@ -196,6 +195,69 @@ future hardened tier must isolate those processes.
 The runtime runs `ox index code` and verifies `ox code status`; it does not run `ox daemon`.
 The daemon synchronizes SageOx ledger state and is not the repository-index readiness
 mechanism.
+
+`team_status` checks team-search access and each configured repository's local ledger.
+`team_sessions` reads the selected repository's last seven days of sessions, bounded to
+20 entries. `team_recent` reads work updates and session activity over an explicit window
+of 1–168 hours (default 72), with up to 20 records and an explicit truncation flag.
+All use the gateway's credential and the existing `repos.conf` allowlist.
+The repository must retain its declared Git origin and match the team brain's SageOx
+team/repo binding. The reader compares the ledger selected by `ox status` with the
+gateway's successful refresh receipt, or `ox daemon status`'s project ledger when sync is
+external, and requires that ledger's own `last_sync` to be less than five minutes old.
+Global daemon health and code-index readiness do not establish ledger freshness. Credential rejection and malformed output produce fixed refusals;
+status never forwards credential paths, identity details, or raw diagnostics.
+
+**Sync ownership is optional configuration.** Team brains can declare
+[`ledgerSync`](guide/reference.md#optional-ledger-sync) with repository aliases, HTTPS
+ledger URLs, and optional Git username/token secret references. An existing mounted key
+can be reused across consumers; no new Kubernetes Secret is required. The credential must
+be accepted by the ledger Git host. The existing SageOx API team token does not itself
+bootstrap Git credentials: discovery returns ledger URLs but no Git credential for it.
+Git access can be provisioned in the same Secret as API access.
+
+The gateway owns a pull-only sparse checkout of sessions and murmurs, with one refresh
+cycle at a time and a shared queue for refreshes and readers. It does not start ox's daemon,
+push local files, or run ledger indexing. It uses a lock per data home, refuses to adopt
+unmarked checkouts, publishes cold clones atomically, and refreshes before establishing
+freshness after restart. Git commands are bounded to two minutes; shutdown kills their
+process groups. Crashed owners leave a lock that must be removed only after verifying the
+previous owner has stopped. One gateway must own each managed data directory, including
+across pods. The source-code index remains owned by repository warmup.
+
+Omitting `ledgerSync` preserves external ownership: arrange an operator-supervised ox
+checkout and its refresh receipt using the same project paths and
+`XDG_DATA_HOME=workspace/ox-data`. The toolkit does not start or repair that daemon. Do not
+run it against gateway-managed ledgers: the pinned daemon also has publishing and indexing
+paths. The gateway binds `OX_PROJECT_ROOT` per read and isolates its session cache.
+Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existing policy.
+
+**Acceptance for [#24](https://github.com/sageox/agent-toolkit/issues/24):**
+
+| Case | Reader coverage / remaining work |
+|---|---|
+| Fresh populated session ledger | Tested: bounded entries, selected repository and window, successful refresh timestamp. |
+| Fresh empty session ledger | Tested: `ledger_available: true`, `sessions: []`, `total: 0` remains a genuine empty result. |
+| Missing or malformed source | Tested: an exit-zero `ledger_available: false`, malformed payload, missing checkout, or unreadable session directory is refused; unrelated search remains usable. |
+| Stale ledger with a healthy daemon | Tested: missing, invalid, future, and old receipts fail; capability freshness also expires between tool calls. |
+| Two configured repositories | Tested: cwd and cache isolation, matching ledger paths, returned repo ID, origin and team binding, and rejection of arbitrary paths/flags. |
+| Credential rejection and rotation | Tested with synthetic API and Git credentials: cached reads fail after rejection; Git requests pause until a changed mounted value is read; sharing one secretRef is deduplicated. Live read-scoped deployment behavior remains pending. |
+| Sync lifecycle and deployment | Tested locally: cold clone, periodic refresh, failure recovery, graceful restart/shutdown, process-group cancellation, ownership lock, and exclusion of reads during refresh. Resource measurements and live expired/revoked/rotated credential acceptance remain pending. |
+| Recent activity | Tested: populated and empty windows, unavailable/stale/mismatched ledgers, bounded inputs and text, ordering and truncation, repeatable reads, malformed responses, and credential rejection/recovery. |
+
+The pinned ox 0.14.3 session-list output was also checked against isolated synthetic
+populated and empty ledgers, without credentials or a running daemon. Its session command
+ignores the inherited `--json` flag outside agent context, so the gateway explicitly sets
+`AGENT_ENV=claude-code` for that command, matching the hosted Claude/ACP brain. This checks
+CLI output compatibility, not live sync or migration parity. #24 remains open.
+
+The pinned CLI's `ox glance` output was also checked against isolated synthetic populated
+and empty ledgers. `team_recent` passes absolute `--since`/`--until` bounds and validates
+the returned repository, window, timestamps, and counts. It projects work updates and
+session activity without forwarding generated collision advice or prompt guidance. ox may
+write its local glance checkpoint under the gateway's config home; explicit bounds make
+subsequent tool reads independent of that checkpoint. The gateway-managed path is also
+checked with synthetic Git repositories. Live credential and deployment acceptance above remain pending; these checks do not certify a rollout.
 
 Shared brains require a volume that is genuinely shared between agent deployments. Add the
 same existing ReadWriteMany claim to each participant's native `sharedVolumes` values at the
