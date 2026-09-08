@@ -196,9 +196,10 @@ termination before releasing overlap protection. `cancelling` is not a completed
 cancellation. Cancellation cannot undo side effects, and a chat timeout cannot decide the
 worker's outcome.
 
-Model-facing results contain host-minted outcome, process execution facts, and PASS/FAIL/UNKNOWN
-gate counts. Raw logs, gate names, artifact prose, exception text and credentials are **never
-returned through jobs MCP**. The gateway separately attaches the bounded redacted error
+Ordinary model-facing status contains host-minted outcome, process execution facts, and
+PASS/FAIL/UNKNOWN gate counts. Declared structured answers require the explicit read below.
+Raw logs, gate names, gate details and exception text are **never returned through jobs MCP**.
+The gateway separately attaches the bounded redacted error
 excerpt to automatic chat reports. The artifact read is capped at 64 KiB; the worker's summary fits Kubernetes'
 4 KiB termination message. A missing/corrupt result, interrupted execution or lost worker
 is UNKNOWN, even if a container exited zero. A process that exits nonzero with a readable
@@ -209,7 +210,7 @@ script never writes an artifact. The lifecycle outcome can still be `completed`:
 the process finished, while the verdict says whether it succeeded. A zero exit without a
 valid, nonempty verdict artifact is UNKNOWN.
 
-This model-facing result is a verdict summary, with no general data payload. Script-written
+The default model-facing result is a verdict summary. Script-written
 `detail` fields are stripped at the worker boundary. Automatic error reports use captured
 stderr/stdout; the larger diagnostic archive is retained separately for deeper debugging.
 
@@ -219,6 +220,135 @@ tombstone and cannot be replayed under that ID. Tombstones remain until an opera
 them; deleting them also removes duplicate protection for those historical requests.
 Back up run ConfigMaps if recovering across loss of the cluster is required. A gateway
 restart may lose its in-flight chat reply callback; status retrieval remains authoritative.
+
+## Structured answers
+
+An external job can return a lookup, report or proposed change by declaring:
+
+```yaml
+output: {format: json}  # alongside worker, run, trigger and budget in the job declaration
+```
+
+Omitting this field preserves verdict-only exposure. The host sets
+`JOB_OUTPUT_SCHEMA_VERSION=1` and `JOB_OUTPUT_MAX_BYTES=16384` for opted-in jobs;
+both are empty otherwise. An older host may omit them entirely. Check for the exact
+supported version **before** writing an output section: older strict artifact readers
+reject unknown fields. Use the same toolkit release in the worker and dispatcher.
+
+The existing `JOB_VERDICT_PATH` file gains one optional, versioned section:
+
+```json
+{
+  "gates": [{"gate": "lookup", "executed": true, "exitCode": 0}],
+  "output": {"version": 1, "data": {"records": [{"id": 42, "title": "Found record"}]}}
+}
+```
+
+`data` is any JSON value, including `null`, with at most 32 nested container levels.
+The toolkit validates the envelope and bounds; the consumer validates domain fields and
+interprets the answer. Unknown envelope fields, unsupported versions, non-finite numbers
+and invalid UTF-8 are rejected. Output and gates are validated independently. A malformed
+output section preserves valid gates; an unreadable or malformed whole file cannot prove
+either section. Host fields such as `outcome`, `counts` and `approved` have no authority
+inside `data`, and cannot be added to the artifact envelope.
+
+A Python producer needs only the standard library:
+
+```python
+import json
+import os
+
+artifact = {"gates": [{"gate": "lookup", "executed": True, "exitCode": 0}]}
+if os.environ.get("JOB_OUTPUT_SCHEMA_VERSION") == "1":
+    # Explicitly select fields intended for the caller, rather than returning a raw API response.
+    artifact["output"] = {"version": 1, "data": {"records": [{"id": 42}]}}
+path = os.environ["JOB_VERDICT_PATH"]
+with open(path + ".tmp", "w", encoding="utf-8") as stream:
+    json.dump(artifact, stream, ensure_ascii=False, allow_nan=False)
+os.replace(path + ".tmp", path)
+```
+
+A compiled executable uses `getenv("JOB_OUTPUT_SCHEMA_VERSION")`, writes the same JSON
+bytes to `getenv("JOB_VERDICT_PATH")`, closes the file and exits. No toolkit SDK or
+stdout convention is required. Write a temporary file and rename it when complete.
+The host reads after process termination; a signalled, interrupted or timed-out process
+cannot publish its artifact as a complete answer, even if it left syntactically valid JSON.
+A normal nonzero exit may return an answer while its process gate remains FAIL.
+
+For chat retrieval, call the existing tool with:
+
+```json
+{"job": "positive-number", "runId": "<run ID>", "includeOutput": true}
+```
+
+`job_status` returns `output: {state: "available", value: {version: 1, data: ...}}` when
+authorized. Without `includeOutput`, it returns availability alone. `job_cancel`,
+automatic reports/replies, termination messages and lifecycle observers never carry
+the application payload. Operators can explicitly retrieve it using
+`sageox-agent job status <slug> --run-id <id> --output` with the gateway's dispatcher
+credential. Scheduled runs and runs launched by the operator CLI have no chat reader;
+their output is available through this operator path.
+
+| Output state | Meaning |
+| --- | --- |
+| No `output` field | This run did not declare an answer, or predates this capability. |
+| `pending` | Execution has not settled; no complete answer is exposed. |
+| `available` | The finalized answer was stored durably. The value requires an authorized read. |
+| `missing` | The process finished without an output section or artifact. |
+| `invalid` | The envelope, JSON or artifact is unusable. |
+| `oversized` | The answer or artifact exceeded its byte bound. Nothing was truncated. |
+| `interrupted` | The process was stopped; its artifact cannot establish a complete answer. |
+| `blocked` | A known credential was found; the entire answer was withheld. |
+| `unavailable` | No final publication arrived, or the stored answer cannot be read. |
+| `expired` | Seven days have elapsed since settlement. |
+
+Execution outcome, gate verdict and output availability are independent. An unavailable
+answer does not prove that an operation failed or had no effects. An available answer
+does not prove success: the worker host or its termination summary may still be lost.
+Do not rerun a mutation to recover an answer. The worker retries delivery of the identical
+final publication once on a transient failure, without reclaiming or executing the job.
+Each delivery attempt waits up to two seconds and does not extend the worker's existing
+deadline. A missing acknowledgement does not prove that storage failed:
+the request may still persist. The warning therefore says delivery is unconfirmed; retrieve
+run status to determine availability instead of re-executing the operation.
+
+The complete output envelope, serialized as compact UTF-8 JSON, is limited to **16 KiB**.
+The artifact file is limited to **64 KiB**, and the worker publication and status response
+each have a **20 KiB** transport bound. The model-facing status text is also capped at
+20 KiB; JSON quoting in the MCP wrapper can use up to twice that plus its small protocol
+envelope. These limits count bytes, not characters. No layer silently truncates an answer.
+
+The worker sends the final publication through its authenticated, run-scoped dispatcher
+connection. The dispatcher stores it in a separate `output` key in the existing run
+ConfigMap, with an immutable publication digest, before advertising availability at
+settlement. Identical publications are idempotent while the worker capability remains
+valid; a different publication conflicts. Workers cannot publish for other admitted runs.
+Cleanup removes the worker capability, not the answer. Answers survive gateway and
+dispatcher restarts, expire with diagnostics after seven days, and leave an expiration
+tombstone. Reads enforce expiration even before the reconciler removes the retained bytes.
+
+The existing `mcp__jobs__job_status` policy must allow the tool. For payload reads, the
+gateway additionally requires one attributable live turn matching the requesting author,
+surface, channel and original thread, within this agent. It saves that audience at admission
+and rechecks it before returning data. A run ID alone grants no access, and the model
+cannot supply an audience, operator override or approval flag. Continue retrieval in the
+original message thread; a new top-level conversation is a different audience. Status
+and cancellation permissions do not automatically include the payload in their responses.
+
+The host rejects output containing known declared credential values or its worker
+capability, checking decoded keys and string values too. It withholds the answer whole
+instead of editing a potentially actionable plan. This cannot detect every disclosure:
+transformed or dynamically acquired credentials and sensitive business data may remain.
+Producers own field selection and consumer authorization. Restrict ConfigMap access as
+for private diagnostics. This boundary controls retrieval; it does not isolate a shared
+brain's memory or certify future uses of data it has already read. Normal outbound messages
+still pass the existing channel and leak guards. JSON data never supplies human approval.
+
+Local jobs continue to use the same artifact parser and gate semantics. An embedded
+`JobHost` can collect opted-in local output through `onOutput(runId, output)`, separate
+from `onRun`; durable `job_status` retrieval in this release requires an external worker.
+This extends the existing file contract without introducing another producer file or
+implementing the separate lifecycle/work-reporting capability proposed in #53.
 
 ## Retained diagnostics
 

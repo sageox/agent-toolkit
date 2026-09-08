@@ -14,6 +14,8 @@ with their own runtime image, durable status and cancellation, see [external job
 |---|---|
 | `JOB_SLUG` · `JOB_RUN_ID` · `JOB_TRIGGER` | Who this run is. The trigger is stamped from the entry point that started it, never passed in, so a job cannot claim a human asked for what a clock started. |
 | `JOB_VERDICT_PATH` | Where to write what you ran. |
+| `JOB_OUTPUT_SCHEMA_VERSION` | `1` when the job declares `output: {format: json}`; empty otherwise. Older hosts may omit it. |
+| `JOB_OUTPUT_MAX_BYTES` | `16384` for opted-in JSON output, including its versioned envelope; empty otherwise. |
 | `JOB_DEADLINE_AT` | Epoch ms at which the host stops you. Bow out before it. |
 | `JOB_HARNESS_TIMEOUT_MS` · `JOB_MAX_ITERATIONS` · `JOB_MAX_ATTEMPTS` · `JOB_MAX_SPEND_USD` · `JOB_MODEL` | The declared bounds the runtime cannot enforce for you. It can hold a job to a clock without knowing what it does; it cannot count an iteration or a dollar. |
 | `JOB_PARAM_<NAME>` | One per parameter this run was given, uppercased. Already validated against the declaration — see below. Absent when the run was given none. |

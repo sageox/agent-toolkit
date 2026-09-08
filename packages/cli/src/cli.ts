@@ -51,6 +51,8 @@ import {
   ExternalJobs,
   ExternalRequestSchema,
   workerResult,
+  publishJobOutput,
+  type FinalJobOutput,
   type WorkerDiagnostics,
   JobDispatcher,
   JobKubeApi,
@@ -1665,6 +1667,15 @@ function jobParamFlags(argv: string[], job: JobConfig, trigger: string): JobPara
   return given;
 }
 
+/** Build the gateway dispatcher capability from its deployment credentials. */
+function externalJobs(): ExternalJobs | undefined {
+  const url = process.env.AGENT_JOB_DISPATCHER_URL;
+  if (!url) return undefined;
+  const token = process.env.AGENT_JOB_DISPATCHER_TOKEN;
+  if (!token) throw new Error("AGENT_JOB_DISPATCHER_TOKEN is required with AGENT_JOB_DISPATCHER_URL");
+  return new ExternalJobs(url, token);
+}
+
 /**
  * Runs one declared job, once, and exits. This is what a CronJob, a launchd job, or an
  * operator execs. `arm` and `park` are the other two doors, and they are
@@ -1680,14 +1691,6 @@ function jobParamFlags(argv: string[], job: JobConfig, trigger: string): JobPara
  * the two apart, neither bypasses a parked job, which is the safe direction and mildly
  * annoying for the operator. Ask through a chat surface to bypass.
  */
-function externalJobs(): ExternalJobs | undefined {
-  const url = process.env.AGENT_JOB_DISPATCHER_URL;
-  if (!url) return undefined;
-  const token = process.env.AGENT_JOB_DISPATCHER_TOKEN;
-  if (!token) throw new Error("AGENT_JOB_DISPATCHER_TOKEN is required with AGENT_JOB_DISPATCHER_URL");
-  return new ExternalJobs(url, token);
-}
-
 async function jobCmd(argv: string[]): Promise<void> {
   const sub = argv[0];
   if (sub === "diagnostics") {
@@ -1746,9 +1749,14 @@ async function jobCmd(argv: string[]): Promise<void> {
         }
       })().finally(() => { uploading = undefined; });
     };
-    const host = new JobHost({ onDiagnostics: publish, diagnosticSecrets: [token] });
+    let output: FinalJobOutput = { state: "unavailable" };
+    const host = new JobHost({ onDiagnostics: publish, diagnosticSecrets: [token],
+      onOutput: (_runId, value) => { output = value; } });
     const run = await host.executeWorker(job, request);
     writeFileSync("/dev/termination-log", JSON.stringify(workerResult(run)));
+    if (job.output && !await publishJobOutput(url, token, request.runId, output)) {
+      console.warn("worker output delivery not confirmed; retrieve run status; execution will not be retried");
+    }
     await uploading;
     return;
   }
@@ -1805,7 +1813,8 @@ async function jobCmd(argv: string[]): Promise<void> {
     if (!job.worker || !external) throw new Error("external execution is unavailable for this job");
     const runId = optionValue(argv, "run-id", "a run ID");
     if (!runId) throw new Error("--run-id is required");
-    const status = await (sub === "cancel" ? external.cancel(slug, runId) : external.status(slug, runId));
+    const status = await (sub === "cancel" ? external.cancel(slug, runId)
+      : external.status(slug, runId, undefined, argv.includes("--output") ? "operator" : undefined));
     process.stdout.write(JSON.stringify(status) + "\n");
     return;
   }
@@ -2738,6 +2747,7 @@ running it:
                                \`system\`, so it does not bypass a parked job
   job status | cancel <slug> --run-id <id>
                                retrieve a durable external result or cancel its worker
+                               status --output includes the declared JSON answer (operator access)
   job diagnostics <ref> --namespace <namespace> [--context <context>]
                                retrieve retained logs using operator Kubernetes credentials
   job arm | park <slug>       flip one job's kill switch. Only a human may arm one — so
