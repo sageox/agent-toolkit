@@ -22,6 +22,17 @@
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=codex ox agent hook SessionEnd 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "",

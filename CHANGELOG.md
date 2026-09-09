@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Repository Codex hooks now notify SageOx on `SessionEnd`, allowing active recordings
+  to finalize when the session ends.
 - **Helm external workers cannot inherit invalid mounts or reuse scheduled-job
   credentials.** Dispatcher bundle staging now excludes gateway shared volumes, and chart
   validation rejects a worker Secret that is already used by any agent's gateway,
