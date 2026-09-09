@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,9 +33,19 @@ describe("run reconciles the directory record", () => {
   let relay: FakeRelay;
   let home: string;
   let agent: ChildProcess | undefined;
+  let agentClosed: Promise<unknown> | undefined;
 
   afterEach(async () => {
-    agent?.kill("SIGKILL");
+    if (agent?.pid) {
+      // tsx runs the daemon in a child; SIGKILL cannot be relayed by the wrapper.
+      try {
+        process.kill(-agent.pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+    // Wait for inherited stdio to close too, before removing the daemon's state.
+    await agentClosed;
     await relay?.stop();
     rmSync(home, { recursive: true, force: true });
   });
@@ -52,8 +63,10 @@ describe("run reconciles the directory record", () => {
 
     let output = "";
     agent = spawn(CLI, ["run", "--agent", "demo", "--secrets", secrets], {
+      detached: true,
       env: { ...process.env, AGENT_TOOLKIT_HOME: agentHome },
     });
+    agentClosed = once(agent, "close");
     agent.stdout?.on("data", (chunk) => (output += String(chunk)));
     agent.stderr?.on("data", (chunk) => (output += String(chunk)));
     return () => output;
