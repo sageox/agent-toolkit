@@ -510,8 +510,8 @@ must not send fields simply because they hope a host will ignore them.
 
 Every structured record is at most **8,192 UTF-8 bytes**, including its wrapper
 and trailing newline. If optional facts do not fit, whole items are omitted and
-`partial` becomes true. The run identity, timestamps, outcome and combined verdict
-are preserved. An identity that cannot itself fit is an emission failure; execution
+`partial` becomes true. The run identity, timestamps, outcome, combined verdict and
+`admission` are preserved. An identity that cannot itself fit is an emission failure; execution
 still proceeds. Identifier-unsafe historical gate names are omitted and also mark
 the event partial. Gate details, requester identity, parameters, reasons/raw errors,
 model output, transcripts, and credentials are not structured work fields.
