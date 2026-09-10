@@ -91,17 +91,17 @@ jobs:
     run: {command: node, args: [body.cjs]}
 `;
 
-/** The real command, and its output either way — a failed run explains itself on stderr. */
+/** The real command: what it printed either way, and the status a CronJob would act on. */
 const runAnnounce = async () => {
   const argv = ["job", "run", "announce", "--bundle", bundle, "--secrets", secrets];
   const env = { ...process.env };
   delete env.AGENT_TOOLKIT_HOME;
   delete env.XDG_CONFIG_HOME;
   try {
-    return (await exec(CLI, argv, { cwd: tmpdir(), env })).stdout;
+    return { stdout: (await exec(CLI, argv, { cwd: tmpdir(), env })).stdout, code: 0 };
   } catch (error) {
-    const failed = error as { stdout: string; stderr: string };
-    return `${failed.stdout}${failed.stderr}`;
+    const failed = error as { stdout: string; stderr: string; code: number };
+    return { stdout: `${failed.stdout}${failed.stderr}`, code: failed.code };
   }
 };
 
@@ -119,14 +119,23 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await relay?.stop();
-  rmSync(home, { recursive: true, force: true });
+  // Guarded for `relay?.stop()`'s reason: `home` is assigned after the relay binds a port,
+  // so a relay that failed to start would leave teardown throwing over the real failure.
+  if (home) rmSync(home, { recursive: true, force: true });
 });
 
 describe("a probing job run from the command line", () => {
   it("reads its report channel back through the surface this door connected", async () => {
+    const { stdout, code } = await runAnnounce();
+
     // The line was in the channel before the run started and nothing in this process
     // published it, so reaching it is the whole of what `report.history` grants — and it
     // can only be reached if this door handed the host the capability it minted.
-    expect(await runAnnounce()).toContain("new: item-41");
+    //
+    // On the gate rather than anywhere in the output: the body writes back what it read,
+    // so the host's `PROVEN:` in front of it is the run agreeing the read happened. A run
+    // that died before the body, or after it, does not print this line.
+    expect(stdout).toContain("PROVEN: new: item-41");
+    expect(code).toBe(0);
   }, 30_000);
 });
