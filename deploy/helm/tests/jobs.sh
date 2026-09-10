@@ -354,6 +354,20 @@ refuses "external worker below the supported Kubernetes floor" \
 render --kube-version 1.33.0
 counted 2 'kind: CronJob'
 
+# THE FLOOR ON A REAL CLUSTER. Every managed distribution reports its GitVersion with a
+# build suffix, which semver reads as a prerelease; the cases above use bare versions and
+# so cannot tell a working floor from one that refuses every cluster it is meant to admit.
+refuses "external worker below the floor on a managed distribution" \
+  "harry/shift: external worker requires Kubernetes 1.34 or newer" \
+  --kube-version v1.33.9-eks-bca9cf6 \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'
+
+render --kube-version v1.34.9-eks-bca9cf6 \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'
+counted 2 'kind: CronJob'
+
 render --kube-version 1.34.0 \
   --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
   --set agents.harry.workEvents=true \
