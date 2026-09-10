@@ -13,7 +13,7 @@ import {
   type JobRun,
 } from "../src/job-host.ts";
 import type { EventRef } from "../src/events.ts";
-import type { SwitchLookup, SwitchSource } from "../src/kill-switch.ts";
+import { interpretSwitchValue, type SwitchLookup, type SwitchSource } from "../src/kill-switch.ts";
 import { loadManifest, type JobAnnounce, type JobConfig } from "../src/manifest.ts";
 import { combineVerdicts, describeVerdict, type ProvenVoice } from "../src/verdict.ts";
 import { collectJobOutput, JOB_OUTPUT_LIMIT_BYTES, type FinalJobOutput } from "../src/job-output.ts";
@@ -1075,6 +1075,92 @@ describe("structured work lifecycle", () => {
       const result = await h.tick(body(`if(process.env.JOB_WORK_SCHEMA_VERSION!==${JSON.stringify(expected)})process.exit(1);${WRITE}JSON.stringify({gates:[{gate:"capability",executed:true,exitCode:0}]}));`));
       expect(result.verdict.status).toBe("PASS");
     }
+  });
+});
+
+describe("admission diagnostics on the terminal event", () => {
+  /** One run through a real host and a real switch source, and the record it wrote out. */
+  const terminal = async (
+    start: (host: JobHost, declared: JobConfig) => Promise<JobRun>,
+    source?: SwitchSource,
+    over: Record<string, string | undefined> = {},
+    script = PROVES,
+  ) => {
+    const { jobWorkEvents } = await import("../src/work-events.ts");
+    const events: Array<Record<string, any>> = [];
+    const h = new JobHost({
+      workDir, switchSource: source, env: { ...process.env, MARKER: marker },
+      ...jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" },
+        (line) => events.push(JSON.parse(line).sageox_work_event)),
+    });
+    const run = await start(h, body(script, over));
+    const own = events.filter((event) => event.run_id === run.runId && event.event === "run.completed");
+    expect(own).toHaveLength(1);
+    return { run, event: own[0]! };
+  };
+
+  /** A backend holding one value, classified by the same parser every real source uses. */
+  const stored = (value: string): SwitchSource => async () => interpretSwitchValue(value);
+  const unreadable = answers({ origin: "unreadable", failure: "timeout" });
+
+  it.each([
+    ["a value somebody armed", stored("on"), "closed", { state: "on", origin: "set", value: "arming" }],
+    ["a value somebody parked", stored("off"), "closed", { state: "off", origin: "set", value: "parking" }],
+    ["an annotated arming value", stored("on — operator annotation"), "closed",
+      { state: "off", origin: "set", value: "unrecognized" }],
+    ["a key nobody has written", answers({ origin: "never-set" }), "closed",
+      { state: "off", origin: "never-set" }],
+    ["a lookup that failed", unreadable, "closed",
+      { state: "off", origin: "unreadable", failure: "timeout" }],
+    ["the same failure on a fail-open job", unreadable, "open",
+      { state: "on", origin: "unreadable", failure: "timeout" }],
+    // The compatibility path: a source written before the classification existed returns
+    // the state and nothing else, and must never be read as somebody's decision to park.
+    ["a source that cannot classify", answers({ origin: "set", state: "off" }), "closed",
+      { state: "off", origin: "set", value: "unavailable" }],
+  ])("tells %s apart on a scheduled run", async (_case, source, failDirection, reading) => {
+    const { run, event } = await terminal((h, declared) => h.tick(declared), source,
+      { killSwitch: `{failDirection: ${failDirection}}` });
+    expect(event.admission).toEqual({ bypassed_switch: false, switch: reading });
+    expect(run.outcome).toBe(reading.state === "on" ? "completed" : "denied-switch");
+    // The classification is derived from the operator's text, and the event carries no
+    // part of that text — which is why an annotated value is `unrecognized`, never quoted.
+    expect(JSON.stringify(event)).not.toContain("annotation");
+  });
+
+  it("says a job with no kill switch has no reading, rather than one that reads parked", async () => {
+    const { run, event } = await terminal(
+      (h, declared) => h.request(declared, { kind: "human", id: "owner" }), undefined,
+      { killSwitch: undefined, trigger: "{onRequest: true}" });
+    expect(run.outcome).toBe("completed");
+    expect(event.admission).toEqual({ bypassed_switch: false, switch: null });
+  });
+
+  it("keeps a human's bypass out of the scheduled admission history", async () => {
+    const parked = { state: "off", origin: "set", value: "parking" };
+    const denied = await terminal((h, declared) => h.tick(declared), stored("off"));
+    const bypass = await terminal(
+      (h, declared) => h.request(declared, { kind: "human", id: "owner" }), stored("off"));
+
+    // Same switch, same reading, opposite outcomes — and the one that ran says so, so a
+    // monitor counting scheduled admissions cannot mistake it for the job being armed.
+    expect(denied.event).toMatchObject({ trigger: "schedule", outcome: "denied-switch",
+      admission: { bypassed_switch: false, switch: parked } });
+    expect(bypass.event).toMatchObject({ trigger: "on-request", outcome: "completed",
+      admission: { bypassed_switch: true, switch: parked } });
+    expect(spawns()).toBe(1);
+  });
+
+  it("keeps the host's admission over a report that claims its own", async () => {
+    const forged = { bypassed_switch: false, switch: { state: "on", origin: "set", value: "arming" } };
+    const { run, event } = await terminal(
+      (h, declared) => h.request(declared, { kind: "human", id: "owner" }), stored("off"), {},
+      `${WRITE}JSON.stringify({gates:[{gate:"ci",executed:true,exitCode:0}],admission:${JSON.stringify(forged)}}))`);
+
+    expect(run.reportStatus).toBe("invalid");
+    expect(event.admission).toEqual(
+      { bypassed_switch: true, switch: { state: "off", origin: "set", value: "parking" } });
+    expect(event.partial).toBe(true);
   });
 });
 

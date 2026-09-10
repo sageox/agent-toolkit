@@ -66,6 +66,33 @@ export type WorkStart = Pick<JobRun, "jobSlug" | "runId" | "trigger" | "startedA
   deadlineMs: number;
 };
 
+/**
+ * Why the host let this run start, or did not. Host-minted, from the reading `admitJob`
+ * took — never from the verdict file. `WorkReportSchema` is strict and rejects this key,
+ * and {@link jobWorkEvents} spreads the report ahead of this so that a report which ever
+ * did carry one would still lose to the host's.
+ *
+ * `switch: null` means this record carries no reading: the job declares no kill switch, or
+ * — on a `denied-trigger` or `skipped-overlap` outcome — the run was refused before one was
+ * read. `value: "unavailable"` means a value was retrieved by a source that predates the
+ * classification, which is not the same as, and must never be counted as, `parking`.
+ *
+ * None of it is derived from `outcome`: a run denied by `suspend` still reports the switch
+ * it read, because lifting `suspend` takes a reviewed manifest diff and clearing the switch
+ * takes a key write — an operator meeting a denial has to know which one is holding it.
+ */
+function admission(run: JobRun): Record<string, unknown> {
+  return {
+    bypassed_switch: run.bypassedSwitch,
+    switch: run.switch && {
+      state: run.switch.state,
+      origin: run.switch.origin,
+      ...(run.switch.origin === "set" ? { value: run.switch.value ?? "unavailable" } : {}),
+      ...(run.switch.failure ? { failure: run.switch.failure } : {}),
+    },
+  };
+}
+
 // Includes the reserved wrapper and newline, below common container log buffers.
 export const MAX_WORK_EVENT_BYTES = 8 * 1024;
 export { JOB_ARTIFACT_LIMIT_BYTES as MAX_WORK_REPORT_BYTES } from "./job-output.ts";
@@ -153,6 +180,8 @@ export function jobWorkEvents(
         execution: run.execution,
         report_status: run.reportStatus,
         ...(report.success ? report.data : {}),
+        // After the report, so a producer key that ever became valid still loses to the host.
+        admission: admission(run),
         partial: !report.success || report.data.partial === true ||
           (run.reportStatus !== undefined && run.reportStatus !== "valid") ||
           run.checks === undefined || checks.length !== run.checks.length,

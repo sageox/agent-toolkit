@@ -43,7 +43,7 @@ const tick: JobRequest = { trigger: "schedule" };
 describe("switch values", () => {
   it("arms only on a value that says so, in any of the spellings a human writes", () => {
     for (const value of ["on", "ON", " true ", "yes", "1", "enabled", "armed"]) {
-      expect(interpretSwitchValue(value)).toEqual({ origin: "set", state: "on" });
+      expect(interpretSwitchValue(value)).toEqual({ origin: "set", state: "on", value: "arming" });
     }
   });
 
@@ -52,8 +52,25 @@ describe("switch values", () => {
     // typo in the arming direction costs idle time somebody notices, while a typo in the
     // parking direction leaves automation running that somebody was trying to stop.
     for (const value of ["off", "false", "no", "0", "onn", "", "paused until Monday"]) {
-      expect(interpretSwitchValue(value)).toEqual({ origin: "set", state: "off" });
+      expect(interpretSwitchValue(value)).toMatchObject({ origin: "set", state: "off" });
     }
+  });
+
+  it("recognizes the parking spellings, and calls everything else parked but unrecognized", () => {
+    // Both halves park, and only the first is evidence that anyone meant to. A monitor
+    // watching a job that is never admitted suppresses `parking` and nothing else, so the
+    // list has to be exact: `off — back Monday` is a sentence, and admitting sentences
+    // would make `on — back Monday` — which parks, and which nobody intended to — look
+    // like somebody's decision. `sageox-agent job park` writes the bare `off`.
+    for (const value of ["off", "OFF", " false ", "no", "0", "disabled", "parked"]) {
+      expect(interpretSwitchValue(value).value, value).toBe("parking");
+    }
+    for (const value of ["onn", "", " ", "paused until Monday", "off — back Monday", "off_"]) {
+      expect(interpretSwitchValue(value).value, value).toBe("unrecognized");
+    }
+    // The arming direction stays strict, so an annotated `on` is denied and is not parking.
+    expect(interpretSwitchValue("on — operator annotation"))
+      .toEqual({ origin: "set", state: "off", value: "unrecognized" });
   });
 });
 
