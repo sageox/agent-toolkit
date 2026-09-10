@@ -1589,9 +1589,9 @@ function jobMembers(egress: SurfaceEgress): JobMembers {
 }
 
 /**
- * How a job that declared `report.history` reads its report channel back. Bound beside
- * {@link jobMembers}, and reaching no further: `readChannel` resolves the destination
- * against the same configured list a post is admitted through.
+ * How a job that declared `report.history` reads its channel back. Bound beside
+ * {@link jobMembers}: `readChannel` resolves the destination against the configured list a
+ * post is admitted through.
  */
 function jobHistory(egress: SurfaceEgress): JobHistory {
   return (to, limit) => egress.readChannel(to.surface, to.channel, limit);
@@ -1600,10 +1600,9 @@ function jobHistory(egress: SurfaceEgress): JobHistory {
 /**
  * Everything a job body may be given, from one egress.
  *
- * One object rather than a list repeated at each door, for {@link jobPoster}'s reason and
- * on its evidence: the two lists were written twice and drifted, so `history` reached the
- * reporter that mints it and not the host that serves it. A capability added here reaches
- * the gateway and `job run` together or reaches neither.
+ * One object rather than a list repeated at each door, for {@link jobPoster}'s reason: the
+ * gateway and `job run` are the two doors onto a job, and a capability that reached one and
+ * not the other would be offered to a body and refused on every call.
  */
 function jobCapabilities(egress: SurfaceEgress): JobCapabilities {
   return {

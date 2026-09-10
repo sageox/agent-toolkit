@@ -223,16 +223,14 @@ describe("the job channel", () => {
   it("reads recent messages in the declared channel, oldest first, and in no other", async () => {
     const { windows, window, handle } = feed({ report: job(ANNOUNCES).report! });
 
-    // No destination argument, as `channel_members` has none — and `more` travels out with
-    // the messages, because a window that stopped walking and one that reached the end of a
-    // quiet channel are the same list, and a run that missed its own last announcement in
-    // the first would make it twice.
+    // No destination argument, as `channel_members` has none, and `more` travels out with
+    // the messages: a window that stopped walking and one that ran out of quiet channel are
+    // the same list.
     const answered = await call(handle, "channel_history", { channel: "somewhere" });
     expect(answered).toEqual({ messages: window, more: true });
-    // Named rather than left to the comparison above: the tool's own description promises
-    // oldest first, and this layer's whole job is to hand on the order the surface put them
-    // in. The adapters are where that order is made, and where it is tested against
-    // deliberately out-of-order input — `buzz.test.ts` and `slack.test.ts` both.
+    // Named rather than left to the comparison above: the tool promises oldest first, and
+    // this layer's job is to hand on the order the surface chose. Making that order is the
+    // adapters', and `buzz.test.ts` and `slack.test.ts` both test it on unordered input.
     expect((answered.messages as ThreadReply[]).map((message) => message.text)).toEqual([
       "new: item-40",
       "new: item-41",
@@ -252,9 +250,8 @@ describe("the job channel", () => {
     const { windows, handle } = feed();
 
     expect(await list(handle)).toEqual(["post_message", "thread_read", "channel_members"]);
-    // The listing is not the bound. A body that calls the verb anyway is refused by name,
-    // and told which grant it is missing rather than something about the surface — this is
-    // the one verb here that hands back lines other people wrote.
+    // The listing is not the bound: a body that calls the verb anyway is refused by name,
+    // and told which grant it is missing rather than something about the surface.
     await expect(call(handle, "channel_history", {})).rejects.toThrow(
       /without report.history/,
     );
@@ -264,8 +261,8 @@ describe("the job channel", () => {
   it("says a surface cannot read the channel rather than answering that nothing was said", async () => {
     const { handle } = feed({ report: job(ANNOUNCES).report!, history: undefined });
 
-    // `channel_members`' distinction, and it bites harder here: an empty history is a real
-    // answer, so a run handed one for "cannot say" re-announces its whole lookback window.
+    // `channel_members`' distinction, sharper here: an empty history is a real answer, so a
+    // run handed one for "cannot say" re-announces its whole lookback window.
     await expect(call(handle, "channel_history", {})).rejects.toThrow(
       /nothing here can read a console channel back/,
     );

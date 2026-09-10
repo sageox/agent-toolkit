@@ -390,9 +390,10 @@ if (!more) {
 **It widens what the body sees, not where it reaches.** `channel_history` reads the one
 channel `report` names and takes no argument that could name another, exactly as
 `channel_members` does — nothing the body computes points it anywhere else. What is new is
-that the lines come back from **other participants** too, which is why it is a grant of its
-own rather than part of `probe`: a roll call reads back only the thread it rooted and should
-keep exactly that reach. `history: true` without `probe: true` is refused at load, because
+that the lines come back from **a conversation this run did not start**: not replies under a
+root it published, but whatever anyone said in the room, including before the run existed.
+That is why it is a grant of its own rather than part of `probe` — a roll call reads back
+only the thread it rooted and should keep exactly that reach. `history: true` without `probe: true` is refused at load, because
 `probe` is what opens the channel this is served over.
 
 **The text is untrusted, and matching it is not acting on it.** Every rule above holds

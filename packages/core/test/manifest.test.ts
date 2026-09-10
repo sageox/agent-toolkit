@@ -972,8 +972,8 @@ describe("jobs", () => {
   it("grants the channel history read only beside the channel it reads through", () => {
     const declared = (report: string) => loadManifest(withJob({ report })).jobs[0].report;
     // Two grants, not one: a probe reads back the thread it rooted, and only `history`
-    // adds the lines other participants wrote. A roll call declares the first and must not
-    // silently acquire the second.
+    // adds a conversation this run did not start. A roll call declares the first and must
+    // not silently acquire the second.
     expect(declared("{surface: console, channel: hive, probe: true}")?.history).toBe(false);
     expect(
       declared("{surface: console, channel: hive, probe: true, history: true}")?.history,

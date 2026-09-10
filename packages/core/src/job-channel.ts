@@ -44,9 +44,8 @@ const MAX_MEMBERS = 200;
 /**
  * The most messages one history read hands back, whatever the body asked for.
  *
- * One Slack `conversations.history` page, which is the ceiling the brain's `read_channel`
- * carries for the same reason: that API answers newest first, so a page of this size is
- * the recent end of the channel — the only end an idempotency check has a use for.
+ * One Slack `conversations.history` page, matching the brain's `read_channel`: that API
+ * answers newest first, so a page of this size is the recent end of the channel.
  */
 const MAX_HISTORY = 200;
 
@@ -70,8 +69,7 @@ export interface JobChannelOptions {
   /**
    * How the report channel's recent messages are read. Unset means no surface in this
    * process can, and `channel_history` says so rather than answering with an empty
-   * channel — a run that looked for its own last announcement in that would announce
-   * everything in its window again.
+   * channel — a run handed one would re-announce everything in its window.
    */
   history?: JobHistory;
 }
@@ -101,13 +99,12 @@ export interface JobChannelOptions {
  *   that could name another. It is what lets a probe *diagnose* the silence it just found
  *   rather than only report it: an agent that did not answer a roll call is slow, or was
  *   never in the room, and only the roster tells those apart.
- * - `channel_history` reads recent messages in that same one channel, and takes no argument
- *   that could name another either. It is how a run finds out what an **earlier** run said:
- *   a job that announces each new item once needs a record of what it already announced,
- *   and the announcement still in the channel is that record — no storage to keep, and
- *   nothing that can drift from what the room saw. It is the one verb here that hands back
- *   lines other participants wrote, so it is offered only where `report.history` is
- *   declared and refused by name where it is not: a roll call needs none of it.
+ * - `channel_history` reads recent messages in that same one channel, and takes no
+ *   argument that could name another. It is how a run finds out what an **earlier** run
+ *   said: the announcement still in the channel is the record that it was announced, so a
+ *   job posting each new item once keeps no state of its own. The one verb here that
+ *   returns lines from a conversation this run did not start, so it is offered only where
+ *   `report.history` is declared.
  *
  * It is not the gateway's tool surface and must not become one. The brain's servers live
  * as long as the process; this one is opened before the body is spawned, closed when it
@@ -120,8 +117,7 @@ export interface JobChannelOptions {
  * Everything `thread_read` and `channel_history` return is untrusted channel text. A body
  * may count it, match it, and tally it; splicing it into a prompt or a command line is the
  * vector this whole arrangement exists to avoid, because the reason a probe is
- * deterministic code at all is that an LLM composed the tally wrong. Matching an identifier
- * against a history to decide whether to post again is a tally, and stays one.
+ * deterministic code at all is that an LLM composed the tally wrong.
  */
 export function jobChannelHandler(opts: JobChannelOptions): McpHandler {
   const { report, post, read, members, history } = opts;
@@ -186,8 +182,8 @@ export function jobChannelHandler(opts: JobChannelOptions): McpHandler {
         });
       }
       if (tool === CHANNEL_HISTORY) {
-        // The declaration before the arguments, so a body whose bundle never asked for
-        // this read is told which grant it is missing, not something about the surface.
+        // Before the arguments, so a body whose bundle never asked for this read is told
+        // which grant it is missing rather than something about the surface.
         if (!report.history) {
           throw new Error(
             "this job declares report.probe without report.history, so its body may read " +
@@ -205,8 +201,7 @@ export function jobChannelHandler(opts: JobChannelOptions): McpHandler {
           );
         }
         // `more` travels out with the messages rather than being dropped here: a window
-        // that ran out of channel and one that stopped walking are the same list, and only
-        // that field tells a run which of the two it failed to find its last post in.
+        // that ran out of channel and one that stopped walking are the same list.
         return JSON.stringify(await history(report, Math.min(limit ?? MAX_HISTORY, MAX_HISTORY)));
       }
       if (tool !== THREAD_READ) throw new Error(`unknown tool ${tool}`);
@@ -258,12 +253,7 @@ const ReadArgs = z.object({
   limit: z.number().int().min(1).optional(),
 });
 
-/**
- * What the two destination-free reads take, which is a ceiling and nothing else.
- *
- * No channel argument on either: the destination is the job's own, as it is for
- * `post_message`, so there is nothing here for a body to compute one into.
- */
+/** No channel argument on either read: the destination is the job's own, as `post_message`'s is. */
 const LimitArgs = z.object({ limit: z.number().int().min(1).optional() });
 
 function tools(report: NonNullable<JobConfig["report"]>): unknown[] {
@@ -350,16 +340,16 @@ function tools(report: NonNullable<JobConfig["report"]>): unknown[] {
       },
     },
   ];
-  // Only where the job asked for it, so a body is not shown a verb whose every call is
-  // refused — and the refusal above stands anyway, because a list is not a bound.
+  // Only where the job declared it, so a body is not shown a verb whose every call is
+  // refused. The refusal in `call` stands regardless — a list is not a bound.
   if (report.history) {
     declared.push({
       name: CHANNEL_HISTORY,
       description:
-        `Read the recent messages in ${where}, this job's own report channel — the same ` +
-        "channel `post_message` writes into, and the only one this reads, so it takes no " +
-        "destination. Unlike `thread_read` it hands back lines this run did not post, " +
-        "which is what lets a run find its own earlier announcement and not make it twice. " +
+        `Read the recent messages in ${where}, this job's own report channel — the only ` +
+        "channel this tool reads, so it takes no destination. Unlike `thread_read` it hands " +
+        "back lines this run did not post, which is what lets a run find its own earlier " +
+        "announcement and not make it twice. " +
         "Answers `{messages}`, each `{author, text, ts}`, oldest first, and `more`: true " +
         "means the read stopped before it had the whole window and there is history it did " +
         "not reach, so these are the recent end of what was READ and not of the channel — " +

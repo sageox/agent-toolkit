@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what was announced, so a run that died halfway through re-posts only what it missed, and
   nothing has to be written to a claim or back into the system being watched.
   A grant of its own rather than part of `probe`, because it is the one job-channel verb
-  that hands back lines **other participants** wrote: a roll call keeps reading only the
-  thread it rooted, and an existing `probe` job gains nothing it did not ask for. It reaches
+  that hands back **a conversation this run did not start** — not replies under a root it
+  published, but whatever was said in the room. A roll call keeps reading only the thread it
+  rooted, and an existing `probe` job gains nothing it did not ask for. It reaches
   no further than `probe` already did — the channel is the declared one and there is no
   argument that could name another — and `history` without `probe` is refused at load. The
   text is untrusted on the same terms as every other channel read. See

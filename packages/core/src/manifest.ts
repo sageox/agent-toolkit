@@ -927,17 +927,15 @@ export const JobSchema = z
          * Whether that body may also read the recent messages in the channel, including
          * lines it did not post itself.
          *
-         * `probe` alone reads back only a thread the same run rooted, which is the whole
-         * of what a job whose product is *this run's* verdict needs. It cannot express a
-         * job that has to know what it said on an **earlier** run: a poller that announces
-         * each new item once needs a record of what it already announced, and the
-         * announcement still in the channel is that record — no storage to keep, and it
-         * cannot drift from what the room actually saw.
+         * `probe` alone reads back only a thread the same run rooted, which is all a job
+         * whose product is *this run's* verdict needs. It cannot express a job that has to
+         * know what it said on an **earlier** run: a poller announcing each new item once
+         * needs a record of what it already announced, and the announcement still in the
+         * channel is that record.
          *
          * Declared apart from `probe` because it widens what a body sees rather than where
-         * it reaches. The channel is the same one `report` names and is no more nameable
-         * from the body than before; what changes is that lines come back that **other
-         * participants** wrote, which a roll call never needed and should not be given.
+         * it reaches: the channel is the one `report` names and is no more nameable from
+         * the body, but the lines come back from a conversation this run did not start.
          *
          * Refused without `probe`, which is what opens the channel this reads through.
          */

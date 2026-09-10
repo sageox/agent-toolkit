@@ -219,17 +219,15 @@ export type JobMembers = (
 /**
  * How a job reads recent messages in the channel it reports into — `report.history`.
  *
- * Takes the `report` destination rather than a channel of its own, exactly as
- * {@link JobMembers} does: a body has no field to name a channel with, so there is no
- * value it can compute that points this anywhere else.
+ * Takes the `report` destination rather than a channel of its own, for {@link JobMembers}'
+ * reason: a body has no field to name a channel with.
  *
- * Answers the whole {@link ChannelHistory} rather than its messages, because `more` is
- * what separates a window that reached the end of a quiet channel from one that stopped
- * walking — and a run that looks for its own last announcement in the second kind, and
- * does not find it, posts it twice.
+ * Answers the whole {@link ChannelHistory} rather than its messages, because `more` is what
+ * separates a window that reached the end of a quiet channel from one that stopped walking,
+ * and a run that misses its own last announcement in the second kind posts it twice.
  *
- * Unset is not "the channel is empty" — it is "no surface here can say", and the job
- * channel refuses the read for {@link JobMembers}' reason.
+ * Unset is "no surface here can say", never "the channel is empty", and the job channel
+ * refuses the read.
  */
 export type JobHistory = (
   report: NonNullable<JobConfig["report"]>,
