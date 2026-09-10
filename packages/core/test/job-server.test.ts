@@ -626,15 +626,56 @@ describe("a job that outlasts a turn", () => {
     expect(text).toContain("posted back into this conversation");
 
     await vi.waitFor(() => expect(answers).toHaveLength(1), { timeout: 5000 });
-    // The same text a waited-for call returns, into the very message that asked.
-    expect(answers[0].text).toContain("job shift completed");
-    expect(answers[0].text).toContain("PROVEN: ci passed");
+    expect(answers[0].text).toBe("The shift job finished. Its result is ready to review.");
+    expect(answers[0].text).not.toMatch(/PROVEN|PASS|gate|run id|exit|[0-9]+ms/);
     expect(answers[0].home.id).toEqual({ surface: "buzz", nativeId: "m1" });
     // Answered where it was asked, so the channel is spared a clean verdict — exactly as
     // it is for a run whose caller waited.
     await vi.waitFor(() => expect(runs).toHaveLength(1), { timeout: 5000 });
     expect(posts).toEqual([]);
   });
+
+  it.each([
+    [SILENT, "The shift job finished, but its result could not be verified."],
+    [RECORD + "process.exit(1)", "The shift job did not finish successfully. An operator can inspect its saved result."],
+  ])("keeps failed or unverified results honest in chat (%s)", async (body, expected) => {
+    const answers: string[] = [];
+    let resolveReply!: () => void;
+    const replied = new Promise<void>((resolve) => { resolveReply = resolve; });
+    await call([withBody(jobs(REPORTING)[0], body)], { job: "shift" }, {
+      ...impatient, answering: turnAuthor({ id: "npub1ryan" }),
+      reply: async (_home, text) => { answers.push(text); resolveReply(); },
+    });
+    await replied;
+    expect(answers).toEqual([expected]);
+    expect(runs[0].verdict.status).not.toBe("PASS");
+  });
+
+  it.each([
+    ["cancelled", "Check its result before trying again."],
+    ["unknown", "Check its result before trying again."],
+    ["budget-bowout", "Check its result before trying again."],
+    ["skipped-overlap", "The shift job was skipped because another run was already active."],
+  ] as const)(
+    "describes a %s outcome without implying success or refusal", async (outcome, expected) => {
+      const host = jobHost();
+      const job = withBody(jobs(REPORTING)[0], SILENT);
+      await call([job], { job: "shift" }, { host });
+      const run: JobRun = { ...runs[0], outcome };
+      vi.spyOn(host, "startRequest").mockImplementation(async (_job, _requester, _params, answer) => {
+        await answer!(run);
+        return { runId: run.runId, refused: null };
+      });
+      const answers: string[] = [];
+      await call([job], { job: "shift" }, {
+        ...impatient, host, answering: turnAuthor({ id: "npub1ryan" }),
+        reply: async (_home, text) => { answers.push(text); },
+      });
+      expect(answers).toHaveLength(1);
+      expect(answers[0]).toContain(expected);
+      expect(answers[0]).not.toMatch(/did not run|refused|ready to review|PROVEN|run id/);
+    },
+  );
 
   it("lets the status post carry a verdict the asker could not be given", async () => {
     const reply = async () => {
@@ -669,8 +710,7 @@ describe("a job that outlasts a turn", () => {
     await host.abandon();
     // Settled inside the shutdown's own wait, not after it.
     expect(answers).toHaveLength(1);
-    expect(answers[0]).toContain("job shift abandoned");
-    expect(answers[0]).toContain("NOT PROVEN");
+    expect(answers[0]).toBe("The shift job was interrupted. Check its result before trying again.");
   });
 
   it("promises no answer when the gateway can name no one conversation", async () => {

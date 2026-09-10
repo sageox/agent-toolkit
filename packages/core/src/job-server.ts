@@ -231,8 +231,11 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
         "Run one of this agent's declared jobs now. You choose which job; the job's own " +
         "declaration decides what runs, for how long, and with what arguments. A job short " +
         "enough to finish inside one turn is waited for, and this tool answers with the " +
-        "verdict it minted — report that verdict exactly as it is returned, because a job " +
-        "that proved nothing did not pass. A job whose budget is longer than a turn is " +
+        "verdict it minted. Explain the outcome in your conversational voice, preserving " +
+        "failure and uncertainty: a job that proved nothing did not pass. Do not copy " +
+        "diagnostic IDs, gate counts, timings or exit codes into an ordinary chat reply. " +
+        "A completed job is not proof of an application change; read its declared output " +
+        "before claiming one. A job whose budget is longer than a turn is " +
         "started rather than waited for, and the answer says only that it is running and " +
         "where its result will be posted: there is no verdict in it, so say it is running " +
         "and report the result when it lands. A parked job runs when the message you are " +
@@ -373,13 +376,12 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
       // quoted; one that cannot is started, and answers where it declared it would.
       if (job.worker || jobDeadlineMs(job) > turnTimeoutMs) {
         // Read now, not when the run lands: by then the turn is over and the gateway has
-        // forgotten which message it was answering. The verdict goes back as the same text
-        // a waited-for call returns, so the two shapes read alike where they arrive.
+        // forgotten which message it was answering. Chat gets a bounded human summary;
+        // diagnostic prose stays in tool results and the declared operator reports.
         const home = answering?.() ?? null;
         if (job.worker && !home) throw new Error("external job requests require an unambiguous originating message; ask from a chat conversation");
         const answer =
-          home && reply ? (run: JobRun, failureReport?: string) =>
-            reply(home, describeRun(run, job) + (failureReport ? `\n${failureReport}\n` : "")) : undefined;
+          home && reply ? (run: JobRun) => reply(home, describeChatCompletion(run)) : undefined;
         const start = await host.startRequest(
           job,
           requester(agentName, answering, owner),
@@ -401,6 +403,37 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
       );
     },
   });
+}
+
+/** Chat needs a bounded outcome; operator diagnostics may contain private worker text. */
+function describeChatCompletion(run: JobRun): string {
+  const subject = `The ${run.jobSlug.replaceAll("-", " ")} job`;
+  if (run.outcome === "abandoned") {
+    return `${subject} was interrupted. Check its result before trying again.`;
+  }
+  if (run.outcome === "cancelled") {
+    return `${subject} was cancelled; any changes already made remain. Check its result before trying again.`;
+  }
+  if (run.outcome === "unknown") {
+    return `${subject}'s outcome is uncertain. Check its result before trying again.`;
+  }
+  if (run.outcome === "budget-bowout") {
+    return `${subject} ran out of time. Check its result before trying again.`;
+  }
+  if (run.outcome === "crashed" || run.verdict.status === "FAIL") {
+    return `${subject} did not finish successfully. An operator can inspect its saved result.`;
+  }
+  if (run.outcome === "skipped-overlap") {
+    return `${subject} was skipped because another run was already active.`;
+  }
+  if (run.outcome !== "completed") {
+    return `${subject} did not run. An operator can check why it was refused.`;
+  }
+  // PASS proves the worker's checks, not an invitation, deployment or other side
+  // effect. Only the declared application output can establish that outcome.
+  return run.verdict.status === "PASS"
+    ? `${subject} finished. Its result is ready to review.`
+    : `${subject} finished, but its result could not be verified.`;
 }
 
 /** A finished run, plus the one thing about a refusal the brain can do something with. */

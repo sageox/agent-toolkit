@@ -199,9 +199,10 @@ export class ClaudeAcpBrain implements Brain {
       // it in context, and repeating it every message would waste tokens and read as
       // the agent being re-briefed mid-conversation.
       await session.prompt(assembleTurnPrompt(event, ctx, { steer: !existing }));
-      let text = await session.readText();
+      let text = await readFinalText(session);
 
       for (let retries = 0; ; retries++) {
+        if (!text.trim()) return;
         // Where the reply lands is the adapter's call — upstream keeps threads flat — so
         // the brain returns text and says nothing about threading.
         const feedback = yield { type: "reply", msg: { text } };
@@ -209,7 +210,7 @@ export class ClaudeAcpBrain implements Brain {
         if (retries >= maxRetries) return;
 
         await session.prompt(refusalPrompt(feedback));
-        text = await session.readText();
+        text = await readFinalText(session);
       }
     } finally {
       // The session stays open — it is this channel's memory. Closing happens on
@@ -264,6 +265,22 @@ export class ClaudeAcpBrain implements Brain {
       Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
       Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>,
     );
+  }
+}
+
+/** ACP's convenience reader joins progress and final text, producing contradictory replies. */
+async function readFinalText(session: ChannelSession["session"]): Promise<string> {
+  let text = "";
+  for (;;) {
+    const message = await session.nextUpdate();
+    if (message.kind === "stop") return text;
+    const { update } = message;
+    // ACP readText concatenates narration across tool calls. A new call supersedes
+    // that narration; a late tool_call_update must not erase the final answer.
+    if (update.sessionUpdate === "tool_call") text = "";
+    if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+      text += update.content.text;
+    }
   }
 }
 

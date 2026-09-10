@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Chat replies keep the final ACP answer without replaying narration superseded by
+  tool calls. Detached jobs reply to their requester in plain language; diagnostic
+  IDs, timings, gate details and raw failure reports stay in operator records/reports.
+  Tool guidance preserves outcome and uncertainty without requiring diagnostic prose
+  to be repeated verbatim. Worker completion never claims an application side effect.
 - Repository Codex hooks now notify SageOx on `SessionEnd`, allowing active recordings
   to finalize when the session ends.
 - **Helm external workers cannot inherit invalid mounts or reuse scheduled-job
