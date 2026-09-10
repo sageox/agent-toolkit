@@ -735,6 +735,7 @@ describe("the status post", () => {
         announce,
         proven,
         probe: false,
+        history: false,
       });
       return id(posts.length);
     };

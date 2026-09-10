@@ -965,7 +965,25 @@ describe("jobs", () => {
       announce: "unproven",
       proven: "labelled",
       probe: false,
+      history: false,
     });
+  });
+
+  it("grants the channel history read only beside the channel it reads through", () => {
+    const declared = (report: string) => loadManifest(withJob({ report })).jobs[0].report;
+    // Two grants, not one: a probe reads back the thread it rooted, and only `history`
+    // adds the lines other participants wrote. A roll call declares the first and must not
+    // silently acquire the second.
+    expect(declared("{surface: console, channel: hive, probe: true}")?.history).toBe(false);
+    expect(
+      declared("{surface: console, channel: hive, probe: true, history: true}")?.history,
+    ).toBe(true);
+
+    // `history` alone reads as a capability the bundle asked for and would have none: the
+    // per-run channel it is served over is what `probe` opens.
+    expect(() =>
+      loadManifest(withJob({ report: "{surface: console, channel: hive, history: true}" })),
+    ).toThrow(/report.history/);
   });
 
   it("gates the status post on the verdict unless the job says otherwise", () => {

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A job can announce something once without keeping any state.** A job that declares
+  `report.history: true` beside `report.probe: true` gets a fourth verb on its per-run
+  channel, `channel_history`: the recent messages in the one channel `report` names, oldest
+  first, with the `more` flag the brain's `read_channel` carries. That is what a scheduled
+  poller needs to be idempotent — the announcement already in the channel is the record of
+  what was announced, so a run that died halfway through re-posts only what it missed, and
+  nothing has to be written to a claim or back into the system being watched.
+  A grant of its own rather than part of `probe`, because it is the one job-channel verb
+  that hands back lines **other participants** wrote: a roll call keeps reading only the
+  thread it rooted, and an existing `probe` job gains nothing it did not ask for. It reaches
+  no further than `probe` already did — the channel is the declared one and there is no
+  argument that could name another — and `history` without `probe` is refused at load. The
+  text is untrusted on the same terms as every other channel read. See
+  [the job contract](docs/job-contract.md#a-job-that-announces-something-once).
 - Chat replies keep the final ACP answer without replaying narration superseded by
   tool calls. Detached jobs reply to their requester in plain language; diagnostic
   IDs, timings, gate details and raw failure reports stay in operator records/reports.

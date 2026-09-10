@@ -72,6 +72,7 @@ import {
   type JobConfig,
   type JobParams,
   type JobPoster,
+  type JobHistory,
   type JobMembers,
   type JobReader,
   type JobRun,
@@ -423,6 +424,7 @@ async function buildBrain(
       post: egress && jobPoster(egress),
       read: egress && jobReader(egress),
       members: egress && jobMembers(egress),
+      history: egress && jobHistory(egress),
     });
     const server = await serveJobs(
       {
@@ -1590,6 +1592,15 @@ function jobMembers(egress: SurfaceEgress): JobMembers {
 }
 
 /**
+ * How a job that declared `report.history` reads its report channel back. Bound beside
+ * {@link jobMembers}, and reaching no further: `readChannel` resolves the destination
+ * against the same configured list a post is admitted through.
+ */
+function jobHistory(egress: SurfaceEgress): JobHistory {
+  return (to, limit) => egress.readChannel(to.surface, to.channel, limit);
+}
+
+/**
  * How a detached run answers the conversation that asked for it: the guarded reply the
  * turn itself would have made, into the same thread. A refusal is thrown so the host counts
  * the run as unanswered and lets the status post carry it instead.
@@ -1618,7 +1629,14 @@ async function jobReporter(
   job: JobConfig,
   secretsDir?: string,
 ): Promise<
-  { post: JobPoster; read: JobReader; members: JobMembers; stop: () => Promise<void> } | undefined
+  | {
+      post: JobPoster;
+      read: JobReader;
+      members: JobMembers;
+      history: JobHistory;
+      stop: () => Promise<void>;
+    }
+  | undefined
 > {
   const kind = job.report?.surface;
   // `loadManifest` already refuses a `report.surface` this agent does not declare.
@@ -1638,6 +1656,7 @@ async function jobReporter(
     post: jobPoster(egress),
     read: jobReader(egress),
     members: jobMembers(egress),
+    history: jobHistory(egress),
     stop: () => adapter.stop(),
   };
 }

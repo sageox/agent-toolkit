@@ -261,6 +261,9 @@ MCP `tools/call` over HTTP, so a `curl` is enough and there is still nothing to 
 | `thread_read` | `root` — a `threadRoot` this run was handed — and optionally `limit` | `{"replies": [{"author", "text", "ts"}, …]}`, oldest first |
 | `channel_members` | optionally `limit`. No destination: the channel is the one `report` names | `{"members": [{"surface", "id", "isSelf", "isAgent", "name", "mentionable"}, …]}` |
 
+A fourth, `channel_history`, is declared separately — see
+[a job that announces](#a-job-that-announces-something-once).
+
 ```js
 const call = async (name, args) =>
   JSON.parse(
@@ -340,6 +343,62 @@ the status word in front of them is still minted by the host from what it ran. R
 channel is how a probe finds its evidence, never how it grades it — which is the point: the
 timing and the tally are deterministic code, and the brain only relays a result it did not
 invent.
+
+## A job that announces something once
+
+A poller is the other shape that needs the channel: it watches an external system — a
+tracker, a release feed, a queue — and announces each new item **once**. Announcing is
+at-least-once by construction, since a run that dies after its third post of five must
+re-post only the two it missed on the next tick, so the job needs a record of what it
+already said.
+
+The channel is that record. The message the last run posted *is* the fact that the item was
+announced: it needs no storage, it cannot drift from what the room actually saw, and a
+channel someone cleared out self-heals into a re-announcement rather than into silence.
+
+Declare `history: true` beside `probe: true`, and the body gains a fourth verb:
+
+```yaml
+report:
+  surface: buzz
+  channel: "…"
+  probe: true       # this body talks through the channel while it runs
+  history: true     # …and may read the channel's recent lines, not only its own thread
+```
+
+| Tool | Takes | Answers |
+|---|---|---|
+| `channel_history` | optionally `limit`. No destination: the channel is the one `report` names | `{"messages": [{"author", "text", "ts"}, …], "more": false}`, oldest first |
+
+```js
+// The lookback window. `limit` is a ceiling and not a quota, capped at 200.
+const { messages, more } = await call("channel_history", { limit: 100 });
+
+// `more: true` means the read stopped before it had the whole window, so these are the
+// recent end of what was READ and not of the channel. An item missing from a short read is
+// not an item that was never announced — write that gate `{executed: false}` and announce
+// nothing, rather than posting a second copy of what is already up there.
+if (!more) {
+  const said = new Set(messages.flatMap((m) => m.text.match(/\bitem-\d+\b/g) ?? []));
+  for (const item of await newItems()) {
+    if (said.has(item.id)) continue;
+    await call("post_message", { text: `new: ${item.id} — ${item.title}` });
+  }
+}
+```
+
+**It widens what the body sees, not where it reaches.** `channel_history` reads the one
+channel `report` names and takes no argument that could name another, exactly as
+`channel_members` does — nothing the body computes points it anywhere else. What is new is
+that the lines come back from **other participants** too, which is why it is a grant of its
+own rather than part of `probe`: a roll call reads back only the thread it rooted and should
+keep exactly that reach. `history: true` without `probe: true` is refused at load, because
+`probe` is what opens the channel this is served over.
+
+**The text is untrusted, and matching it is not acting on it.** Every rule above holds
+here — count it, match it, tally it, and never splice it into a prompt or a command line.
+Deciding whether to post again by matching an identifier is a tally, in deterministic code,
+with no model in the path.
 
 ## Structured work events (schema 1)
 

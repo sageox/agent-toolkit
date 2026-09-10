@@ -19,7 +19,7 @@ import { passthroughEnv } from "./brain-env.ts";
 import { errorLine, errorText } from "./errors.ts";
 import { diagnosticOutput, type ExecutionInfo, type WorkerDiagnostics } from "./job-diagnostics.ts";
 import { collectJobOutput, JOB_ARTIFACT_LIMIT_BYTES, JOB_OUTPUT_LIMIT_BYTES, type FinalJobOutput } from "./job-output.ts";
-import type { ActorRef, EventRef, ThreadReply } from "./events.ts";
+import type { ActorRef, ChannelHistory, EventRef, ThreadReply } from "./events.ts";
 import { serveJobChannel } from "./job-channel.ts";
 import type { HostedMcp } from "./mcp-http.ts";
 import { withTimeout } from "./gateway.ts";
@@ -217,6 +217,26 @@ export type JobMembers = (
 ) => Promise<readonly ActorRef[]>;
 
 /**
+ * How a job reads recent messages in the channel it reports into — `report.history`.
+ *
+ * Takes the `report` destination rather than a channel of its own, exactly as
+ * {@link JobMembers} does: a body has no field to name a channel with, so there is no
+ * value it can compute that points this anywhere else.
+ *
+ * Answers the whole {@link ChannelHistory} rather than its messages, because `more` is
+ * what separates a window that reached the end of a quiet channel from one that stopped
+ * walking — and a run that looks for its own last announcement in the second kind, and
+ * does not find it, posts it twice.
+ *
+ * Unset is not "the channel is empty" — it is "no surface here can say", and the job
+ * channel refuses the read for {@link JobMembers}' reason.
+ */
+export type JobHistory = (
+  report: NonNullable<JobConfig["report"]>,
+  limit?: number,
+) => Promise<ChannelHistory>;
+
+/**
  * How whoever asked for a detached run hears how it ended.
  *
  * Bound by the door that knows who asked — the chat tool holds the message it was answering
@@ -259,6 +279,11 @@ export interface JobHostOptions {
    * diagnosing a silence. Unset is refused rather than answered as an empty roster.
    */
   members?: JobMembers;
+  /**
+   * How a probing job's body reads recent messages in its report channel, for a job that
+   * declared `report.history`. Unset is refused rather than answered as an empty channel.
+   */
+  history?: JobHistory;
   /** Where verdict artifacts are written. Defaults to a directory under the system temp. */
   workDir?: string;
   /** Every run record, always — denied and dropped ticks included. */
@@ -1121,6 +1146,7 @@ export class JobHost {
       post: this.opts.post,
       read: this.opts.read,
       members: this.opts.members,
+      history: this.opts.history,
     });
   }
 
