@@ -15,12 +15,16 @@ On publication, `ghcr.io/sageox/agent-base:0.5.0` takes `:latest` and `:0.5`. `:
 on 0.4.1. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
 published. Pin the digest recorded on the GitHub Release in production.
 
-**Upgrade the dispatcher before the gateway and the scheduled launchers.** A host on this
-release sends `switch.value` on every armed external job, and the request schema is
-strict, so a dispatcher still on 0.4.1 rejects those requests. The chart gives the gateway
-and the dispatcher the same `imageRef` and rolls their Deployments independently, so an
-in-place `helm upgrade` leaves a window in which armed external jobs fail to dispatch.
-Deployments with no external jobs are unaffected.
+**A `helm upgrade` has a window in which armed external jobs fail to dispatch, and the
+chart cannot order it away.** A host on this release sends `switch.value` on every armed
+external job, and the request schema is strict, so a dispatcher still on 0.4.1 rejects
+those requests. One `imageRef` covers the gateway, the dispatcher and the scheduled
+launchers, and their workloads roll independently — there is no values setting that takes
+the dispatcher to the new image first. Nothing is wedged by the window: it ends when the
+dispatcher Pod is replaced, a requested run that failed in it can be asked for again, and
+a scheduled one fails a tick and takes the next. To skip it, park each armed external job
+before the upgrade with `sageox-agent job park <slug>` and arm it after. Deployments with
+no external jobs are unaffected.
 
 **Two values files that rendered under chart 0.12.1 now fail.** An external worker below
 Kubernetes 1.34 is refused at render rather than shipped to a cluster that cannot run it —
