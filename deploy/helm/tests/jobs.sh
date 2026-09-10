@@ -58,13 +58,13 @@ readme="$copied_chart/README.md"
 if grep -Eq '\.\./\.\./docs/(job-contract|external-jobs)\.md' "$readme"; then
   fail 'copied chart README contains a repository-relative job documentation link'
 fi
-contract_link_count=$(grep -oE 'https://github\.com/sageox/agent-toolkit/blob/v0\.4\.1/docs/(job-contract|external-jobs)\.md(#[^)[:space:]]+)?' "$readme" | wc -l | tr -d ' ')
+contract_link_count=$(grep -oE 'https://github\.com/sageox/agent-toolkit/blob/v0\.5\.0/docs/(job-contract|external-jobs)\.md(#[^)[:space:]]+)?' "$readme" | wc -l | tr -d ' ')
 [ "$contract_link_count" = 5 ] || fail "expected 5 pinned job documentation links, found $contract_link_count"
 for link in \
-  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/job-contract.md#structured-work-events-schema-1' \
-  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/external-jobs.md#structured-answers' \
-  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/job-contract.md#what-a-body-finds-on-disk' \
-  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/external-jobs.md'
+  'https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs/job-contract.md#structured-work-events-schema-1' \
+  'https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs/external-jobs.md#structured-answers' \
+  'https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs/job-contract.md#what-a-body-finds-on-disk' \
+  'https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs/external-jobs.md'
 do
   grep -qF "$link" "$readme" || fail "copied chart README is missing pinned link: $link"
 done
