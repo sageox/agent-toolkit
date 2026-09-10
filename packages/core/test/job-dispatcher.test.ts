@@ -723,7 +723,8 @@ it.each(["buzz", "slack"])("automatically explains an uncaught script error in t
     expect(JSON.stringify(posts)).not.toContain("worker-secret");
     expect(reply).toHaveBeenCalledTimes(1);
     expect(reply.mock.calls[0]![0]).toBe(home);
-    expect(reply.mock.calls[0]![1]).toContain("Error: synthetic worker exception: [REDACTED]");
+    expect(reply.mock.calls[0]![1]).toContain("did not finish successfully");
+    expect(reply.mock.calls[0]![1]).not.toMatch(/synthetic worker exception|run id|process exited|FAILED:/);
     expect(reply.mock.calls[0]![1]).not.toContain("worker-secret");
     expect(JSON.stringify(onRun.mock.calls)).not.toContain("synthetic worker exception");
     const modelStatus = JSON.stringify(await handler({ method: "tools/call", params: { name: "job_status", arguments: { job: job.slug, runId: start.runId } } }));

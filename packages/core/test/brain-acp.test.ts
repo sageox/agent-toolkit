@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { agent, AGENT_METHODS, CLIENT_METHODS, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
-import type { AgentApp } from "@agentclientprotocol/sdk";
+import type { AgentApp, SessionUpdate } from "@agentclientprotocol/sdk";
 import { ClaudeAcpBrain } from "../src/brain-acp.ts";
 import { loadToolPolicy } from "../src/tool-policy.ts";
 import type { GuardFeedback } from "../src/brain.ts";
@@ -20,7 +20,7 @@ const ev = (text: string): InboundEvent => ({
 
 /** A fake ACP agent: replies with the next canned string per prompt. */
 function fakeAgent(
-  replies: string[],
+  replies: (string | SessionUpdate[])[],
   opts: { askPermission?: boolean; supportsClose?: boolean; permissionTool?: string } = {},
 ) {
   const prompts: string[] = [];
@@ -67,13 +67,16 @@ function fakeAgent(
         permissionOutcomes.push(res.outcome);
       }
 
-      await ctx.client.notify(CLIENT_METHODS.session_update, {
-        sessionId: ctx.params.sessionId,
-        update: {
-          sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: replies[i++] ?? "" },
-        },
-      });
+      const reply = replies[i++] ?? "";
+      const updates: SessionUpdate[] = typeof reply === "string"
+        ? [{ sessionUpdate: "agent_message_chunk", content: { type: "text", text: reply } }]
+        : reply;
+      for (const update of updates) {
+        await ctx.client.notify(CLIENT_METHODS.session_update, {
+          sessionId: ctx.params.sessionId,
+          update,
+        });
+      }
       return { stopReason: "end_turn" as const };
     });
 
@@ -105,6 +108,48 @@ async function drain(
 }
 
 describe("ClaudeAcpBrain", () => {
+  it("keeps final answer chunks but drops narration superseded by tool calls", async () => {
+    const f = fakeAgent([[
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Still running — checking back." } },
+      { sessionUpdate: "tool_call", toolCallId: "status", title: "Check status", status: "in_progress" },
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Already has access. " } },
+      // A late status update is not a new tool call or a new answer.
+      { sessionUpdate: "tool_call_update", toolCallId: "status", status: "completed" },
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "No invitation sent." } },
+    ]]);
+    const brain = new ClaudeAcpBrain({ target: f.app });
+    try {
+      expect(await drain(brain, ev("check access"), () => undefined))
+        .toEqual(["Already has access. No invitation sent."]);
+    } finally { await brain.stop(); }
+  });
+
+  it("does not replay pre-tool narration when the agent supplies no final answer", async () => {
+    const f = fakeAgent([[
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Checking now." } },
+      { sessionUpdate: "tool_call", toolCallId: "status", title: "Check status", status: "in_progress" },
+      { sessionUpdate: "tool_call_update", toolCallId: "status", status: "completed" },
+    ]]);
+    const brain = new ClaudeAcpBrain({ target: f.app });
+    try {
+      expect(await drain(brain, ev("check access"), () => undefined)).toEqual([]);
+    } finally { await brain.stop(); }
+  });
+
+  it("also drops superseded narration when rewriting a refused reply", async () => {
+    const f = fakeAgent(["private details", [
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Let me check again." } },
+      { sessionUpdate: "tool_call", toolCallId: "status", title: "Check status", status: "in_progress" },
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "No invitation sent." } },
+    ]]);
+    const brain = new ClaudeAcpBrain({ target: f.app });
+    try {
+      expect(await drain(brain, ev("status"), (text) => text === "private details"
+        ? { blocked: true, rule: "publicChannel", reason: "private information" } : undefined))
+        .toEqual(["private details", "No invitation sent."]);
+    } finally { await brain.stop(); }
+  });
+
   it("yields the agent's reply from a real ACP round-trip", async () => {
     const f = fakeAgent(["the deploy is green"]);
     const brain = new ClaudeAcpBrain({ target: f.app });
