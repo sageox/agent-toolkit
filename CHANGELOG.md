@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An external worker deploys on a managed Kubernetes cluster again.** The 1.34 floor
+  chart 0.13.0 introduced compared the server's version against `>=1.34.0`, and every
+  managed distribution reports a GitVersion carrying a build suffix — `v1.34.9-eks-bca9cf6`,
+  `v1.34.5-gke.1234` — which semver reads as a PRERELEASE and never matches a constraint
+  without one. The floor therefore refused every cluster it was meant to admit, including
+  ones well above it, and `helm upgrade` failed at render with `external worker requires
+  Kubernetes 1.34 or newer`. The constraint is now `>=1.34.0-0`, which admits a
+  prerelease-tagged version while still refusing a genuinely older cluster. The cases that
+  let this ship used bare versions, so they could not tell a working floor from one that
+  refuses everything; the suite now renders a suffixed version on both sides of the floor.
+
 ## [0.5.0] - 2026-09-10
 
 Everything below shipped after `v0.4.1`.
