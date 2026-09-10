@@ -406,6 +406,11 @@ it("isolates forged child envelopes from host records for both trigger paths", a
       expect(events.map((event) => event.event)).toEqual(["run.started", "run.completed"]);
       expect(events.every((event) => event.trigger === trigger)).toBe(true);
       expect(json.some((line) => line.job_diagnostic?.text.includes("forged"))).toBe(true);
+      // This bundle has no private brain, so `shift` really cannot read the switch it
+      // declares. It runs because `failDirection: open` says to, and `origin: "unreadable"`
+      // keeps that distinct from a run somebody armed.
+      expect(events[1].admission).toEqual({ bypassed_switch: false,
+        switch: { state: "on", origin: "unreadable", failure: "backend-missing" } });
     }
   } finally { vi.unstubAllEnvs(); }
 });
@@ -466,6 +471,9 @@ require("readline").createInterface({input:process.stdin}).on("line",async line=
     const events = records.filter((r) => r.sageox_work_event).map((r) => r.sageox_work_event);
     expect(events.map((e) => e.event)).toEqual(["run.started", "run.completed"]);
     expect(events[1]).toMatchObject({ run_id: events[0].run_id, agent: "demo", job: "shift", trigger: "on-request", verdict: "PASS" });
+    // The gateway host carries the same admission contract the `job run` host does. This
+    // job declares no kill switch, which is a different record from one that read parked.
+    expect(events[1].admission).toEqual({ bypassed_switch: false, switch: null });
     expect(records.some((r) => r.job_diagnostic?.text.includes("forged"))).toBe(true);
   } finally {
     child.kill("SIGTERM");

@@ -70,7 +70,7 @@ describe("the remote half of the kill switch", () => {
 
     // Fail-open, so nothing but a value somebody wrote could have stopped this job.
     expect(admission).toMatchObject({ admitted: false, outcome: "denied-switch" });
-    expect(admission.switch).toEqual({ state: "off", origin: "set" });
+    expect(admission.switch).toEqual({ state: "off", origin: "set", value: "parking" });
     // Admission reads. A run never writes the posture it just read — not to arm it, and
     // not to "confirm" it.
     expect(relay.published.length).toBe(written);
@@ -86,7 +86,7 @@ describe("the remote half of the kill switch", () => {
       engramSwitchSource(config),
     );
     expect(admission).toMatchObject({ admitted: true, bypassedSwitch: false });
-    expect(admission.switch).toEqual({ state: "on", origin: "set" });
+    expect(admission.switch).toEqual({ state: "on", origin: "set", value: "arming" });
   });
 
   it("calls an untouched key never-set, which is not the same as off", async () => {

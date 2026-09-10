@@ -21,6 +21,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   argument that could name another — and `history` without `probe` is refused at load. The
   text is untrusted on the same terms as every other channel read. See
   [the job contract](docs/job-contract.md#a-job-that-announces-something-once).
+- **A monitor can tell a deliberately parked job from one nobody meant to stop.** Every
+  `run.completed` work event now carries a host-minted `admission` section: the switch
+  reading this run took (`state`, `origin`, bounded `failure`), what its stored value was
+  recognized as (`arming`, `parking`, `unrecognized`, or `unavailable` from a switch source
+  that predates the classification), and `bypassed_switch` for a human's run of a parked
+  job. `switch: null` means the record holds no reading — the job declares none, or the run
+  was refused before one was read. Unrecognized values still park the job, and only
+  `value: "parking"` is evidence anyone chose that: a scheduled job denied every run
+  because its key was never written no longer reads the same as one somebody parked. No
+  stored value, annotation, requester or backend error text is emitted. Existing manifests
+  and custom `SwitchSource` implementations need no change; consumers must treat a missing
+  `admission` as unknown, never as parked. External-dispatch requests gain the same
+  optional field, which a dispatcher parses strictly. A request carries it whenever the
+  switch key holds a value, which is every armed job: bring the dispatcher to this release
+  before the gateway, or those jobs fail to dispatch while the gateway is ahead of it. See
+  [the job contract](docs/job-contract.md#admission-diagnostics-on-the-terminal-record).
 - Chat replies keep the final ACP answer without replaying narration superseded by
   tool calls. Detached jobs reply to their requester in plain language; diagnostic
   IDs, timings, gate details and raw failure reports stay in operator records/reports.

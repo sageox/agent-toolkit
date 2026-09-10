@@ -76,6 +76,26 @@ it("contains output failures and keeps identity/outcome when optional facts over
   expect(event.health).toHaveLength(100);
 });
 
+it("keeps host admission facts when a valid report overflows the line", () => {
+  const lines: string[] = [];
+  const opts = jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" }, (line) => lines.push(line));
+  const health = Array.from({ length: 100 }, (_, index) => ({
+    subject: { provider: "runtime", kind: "service" as const, id: `${index}${"a".repeat(200)}` },
+    check: "readiness", status: "unknown" as const, observed_at: "2026-09-07T00:00:00Z",
+  }));
+  opts.onRun!({ ...run, work: { health },
+    switch: { state: "off", origin: "unreadable", failure: "timeout" } });
+
+  // `admission` is not in the list `workEventLine` sheds from, and it is small enough that
+  // it never has to be: shedding it would leave a denial with nothing that says why.
+  const event = JSON.parse(lines[0]!).sageox_work_event;
+  expect(Buffer.byteLength(lines[0]!)).toBeLessThanOrEqual(MAX_WORK_EVENT_BYTES);
+  expect(event.health.length).toBeLessThan(health.length);
+  expect(event.partial).toBe(true);
+  expect(event.admission).toEqual({ bypassed_switch: false,
+    switch: { state: "off", origin: "unreadable", failure: "timeout" } });
+});
+
 it("contains asynchronous sink failures", async () => {
   let calls = 0;
   const opts = jobWorkEvents("worker", { AGENT_WORK_EVENTS: "1" }, async () => {
