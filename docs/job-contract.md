@@ -443,8 +443,9 @@ parsed strictly: a reader rejects a field it does not recognize. An added option
 field is therefore compatible in one direction only. A gateway older than the
 dispatcher it sends to omits `value`, the dispatcher accepts the request, and the
 run reports `unavailable`. The reverse does not hold — a dispatcher older than its
-gateway rejects the request, and the worker job does not start. Never run a
-dispatcher behind the gateway that dispatches to it.
+gateway rejects any request carrying `value`, and that worker job does not start.
+A request carries `value` whenever the switch key holds a value, so this reaches
+every armed job. Never run a dispatcher behind the gateway that dispatches to it.
 
 ### Optional facts in the existing verdict file
 

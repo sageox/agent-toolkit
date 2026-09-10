@@ -911,7 +911,7 @@ it.each([
 
   const events: Array<Record<string, any>> = [];
   jobWorkEvents("demo", { AGENT_WORK_EVENTS: "1" }, (line) => events.push(JSON.parse(line).sageox_work_event))
-    .onRun!(externalRun(req, { ...status, state: "finished", endedAt: req.startedAt + 50,
+    .onRun!(externalRun(stored, { ...status, state: "finished", endedAt: req.startedAt + 50,
       outcome: "completed", result: { outcome: "completed", counts: { PASS: 1, FAIL: 0, UNKNOWN: 0 } } }));
   expect(events[0]!.admission).toEqual({ bypassed_switch: true,
     switch: { state: "off", origin: "set", value: reported } });
