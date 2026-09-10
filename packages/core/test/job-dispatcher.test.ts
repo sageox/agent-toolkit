@@ -678,7 +678,7 @@ it.each(["buzz", "slack"])("automatically explains an uncaught script error in t
   const original = manifest().jobs[0]!;
   const job: JobConfig = { ...original,
     run: { ...original.run, command: process.execPath, args: ["-e", 'console.log("step: connecting"); throw new Error("synthetic worker exception: " + process.env.API_TOKEN)'] },
-    report: { surface, channel: "operations", announce: "unproven", proven: "labelled", probe: false },
+    report: { surface, channel: "operations", announce: "unproven", proven: "labelled", probe: false, history: false },
   };
   const api = new Cluster(), dispatch = dispatcher(api, [job]);
   const token = "private-gateway-token".repeat(3);

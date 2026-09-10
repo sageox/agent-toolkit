@@ -709,7 +709,9 @@ a channel is the failure to watch for.
 A job that probes reads the same way, through its own per-run channel rather than this
 server: `channel_members` there takes no destination at all, because a job body has no
 field to name a channel with. It is what lets a roll call say whether an agent that did not
-answer is slow or was never in the room. See
+answer is slow or was never in the room. A job that also declares `report.history` gets
+`channel_history` beside it — this same `more`-bearing read of its own report channel,
+which is how a job that announces each new item once knows what it announced last time. See
 [the job contract](../job-contract.md).
 
 ---

@@ -8,6 +8,7 @@ import type { EventRef, ThreadReply } from "../src/events.ts";
 import { jobChannelHandler, type JobChannelOptions } from "../src/job-channel.ts";
 import {
   JobHost,
+  type JobHistory,
   type JobMembers,
   type JobPoster,
   type JobReader,
@@ -17,12 +18,13 @@ import { loadManifest, type JobConfig } from "../src/manifest.ts";
 import type { McpHandler } from "../src/mcp-http.ts";
 
 /**
- * The two verbs a probing job body has, driven through the real handler and — at the
- * bottom of this file — through a real body over a real socket.
+ * The verbs a probing job body has, driven through the real handler and — at the bottom of
+ * this file — through a real body over a real socket.
  *
- * The property under test throughout is the pair of bounds, not the plumbing: a body may
- * speak into the one channel its job declared, and may read back only a thread the same
- * run rooted. Everything else it might name is refused.
+ * The property under test throughout is the bounds, not the plumbing: a body may speak into
+ * the one channel its job declared, may read back a thread the same run rooted, and reads
+ * that channel's own recent lines only where the declaration says so. Everything else it
+ * might name is refused.
  */
 
 const base =
@@ -39,6 +41,7 @@ const job = (report: string): JobConfig =>
   ).jobs[0];
 
 const PROBES = "{surface: console, channel: hive, probe: true}";
+const ANNOUNCES = "{surface: console, channel: hive, probe: true, history: true}";
 const REPORTS_ONLY = "{surface: console, channel: hive}";
 
 const speaker = (id: string): ThreadReply["author"] => ({
@@ -71,14 +74,26 @@ describe("the job channel", () => {
       rosters.push({ channel: `${report.surface}:${report.channel}`, limit });
       return [speaker("drone"), speaker("forager")];
     };
+    const windows: Array<{ channel: string; limit?: number }> = [];
+    // Two lines an hour apart, because a one-message answer comes back in the same order
+    // whichever way this layer handed it on.
+    const window: ThreadReply[] = [
+      { author: speaker("hive"), text: "new: item-40", ts: "2026-08-30T07:00:00.000Z" },
+      { author: speaker("drone"), text: "new: item-41", ts: "2026-08-30T08:00:00.000Z" },
+    ];
+    const history: JobHistory = async (report, limit) => {
+      windows.push({ channel: `${report.surface}:${report.channel}`, limit });
+      return { messages: window, more: true };
+    };
     const handle = jobChannelHandler({
       report: job(PROBES).report!,
       post,
       read,
       members,
+      history,
       ...over,
     });
-    return { posts, reads, rosters, handle };
+    return { posts, reads, rosters, windows, window, handle };
   };
 
   /** Calls a tool the way the body does, and parses the JSON it reads back. */
@@ -90,6 +105,12 @@ describe("the job channel", () => {
     const result = await handle({ id: 1, method: "tools/call", params: { name, arguments: args } });
     const text = ((result?.content as Array<{ text: string }>) ?? [])[0]?.text ?? "";
     return JSON.parse(text) as Record<string, unknown>;
+  };
+
+  /** What the body is offered, which is not the same question as what it may call. */
+  const list = async (handle: McpHandler): Promise<string[]> => {
+    const result = await handle({ id: 1, method: "tools/list" });
+    return ((result?.tools as Array<{ name: string }>) ?? []).map((tool) => tool.name);
   };
 
   it("posts into the channel the job declared, and hands back the root", async () => {
@@ -198,6 +219,54 @@ describe("the job channel", () => {
       /nothing here can read the membership of a console channel/,
     );
   });
+
+  it("reads recent messages in the declared channel, oldest first, and in no other", async () => {
+    const { windows, window, handle } = feed({ report: job(ANNOUNCES).report! });
+
+    // No destination argument, as `channel_members` has none, and `more` travels out with
+    // the messages: a window that stopped walking and one that ran out of quiet channel are
+    // the same list.
+    const answered = await call(handle, "channel_history", { channel: "somewhere" });
+    expect(answered).toEqual({ messages: window, more: true });
+    // Named rather than left to the comparison above: the tool promises oldest first, and
+    // this layer's job is to hand on the order the surface chose. Making that order is the
+    // adapters', and `buzz.test.ts` and `slack.test.ts` both test it on unordered input.
+    expect((answered.messages as ThreadReply[]).map((message) => message.text)).toEqual([
+      "new: item-40",
+      "new: item-41",
+    ]);
+    expect(windows).toEqual([{ channel: "console:hive", limit: 200 }]);
+
+    // Capped whatever was asked for, and the cap is in the tool's own description.
+    await call(handle, "channel_history", { limit: 5000 });
+    expect(windows[1].limit).toBe(200);
+
+    await expect(call(handle, "channel_history", { limit: 0 })).rejects.toThrow();
+    await expect(call(handle, "channel_history", { limit: "all" })).rejects.toThrow();
+    expect(windows).toHaveLength(2);
+  });
+
+  it("neither offers nor serves the history read to a probe that did not declare it", async () => {
+    const { windows, handle } = feed();
+
+    expect(await list(handle)).toEqual(["post_message", "thread_read", "channel_members"]);
+    // The listing is not the bound: a body that calls the verb anyway is refused by name,
+    // and told which grant it is missing rather than something about the surface.
+    await expect(call(handle, "channel_history", {})).rejects.toThrow(
+      /without report.history/,
+    );
+    expect(windows).toEqual([]);
+  });
+
+  it("says a surface cannot read the channel rather than answering that nothing was said", async () => {
+    const { handle } = feed({ report: job(ANNOUNCES).report!, history: undefined });
+
+    // `channel_members`' distinction, sharper here: an empty history is a real answer, so a
+    // run handed one for "cannot say" re-announces its whole lookback window.
+    await expect(call(handle, "channel_history", {})).rejects.toThrow(
+      /nothing here can read a console channel back/,
+    );
+  });
 });
 
 describe("a job body that probes", () => {
@@ -230,6 +299,19 @@ describe("a job body that probes", () => {
     'gate:"answered",executed:true,exitCode:t.replies.length===2?0:1,' +
     'detail:t.replies.map(r=>r.author.id).join(", ")}]}))})()';
 
+  /**
+   * Announces one item unless the channel already carries it — the whole idempotency case,
+   * with no state kept anywhere but the channel.
+   */
+  const ANNOUNCE =
+    CALL +
+    "(async()=>{" +
+    'const h=await call("channel_history",{limit:50});' +
+    'const said=h.messages.some(m=>m.text.includes("item-41"));' +
+    'if(!said)await call("post_message",{text:"new: item-41"});' +
+    "fs.writeFileSync(process.env.JOB_VERDICT_PATH,JSON.stringify({gates:[{" +
+    'gate:"announced",executed:true,exitCode:0,detail:said?"already said":"said it"}]}))})()';
+
   /** Writes down what the envelope told it, and proves one gate. */
   const REPORTS =
     'fs.appendFileSync(process.env.MARKER,String(process.env.JOB_CHANNEL_URL)+"\\n");' +
@@ -256,8 +338,19 @@ describe("a job body that probes", () => {
     return ref;
   };
   const read: JobReader = async (root) => thread.get(root.nativeId) ?? [];
+  /** The channel as the surface would read it back: every line anyone has posted into it. */
+  const history: JobHistory = async () => ({
+    messages: posts.map((text, i) => ({
+      author: speaker("hive"),
+      text,
+      ts: new Date(Date.UTC(2026, 7, 30, 9, i)).toISOString(),
+    })),
+    more: false,
+  });
 
-  const host = (over: { post?: JobPoster; read?: JobReader } = { post, read }) =>
+  const host = (
+    over: { post?: JobPoster; read?: JobReader; history?: JobHistory } = { post, read },
+  ) =>
     new JobHost({
       workDir,
       env: { ...process.env, MARKER: marker },
@@ -301,6 +394,17 @@ describe("a job body that probes", () => {
     // and a way into a channel, with nothing left that legitimately calls it.
     expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
     await expect(fetch(url, { method: "POST", body: "{}" })).rejects.toThrow();
+  });
+
+  it("reads its own earlier announcement back, and does not make it twice", async () => {
+    const first = await host({ post, history }).tick(body(job(ANNOUNCES), ANNOUNCE));
+    const second = await host({ post, history }).tick(body(job(ANNOUNCES), ANNOUNCE));
+
+    expect([first.verdict.status, second.verdict.status]).toEqual(["PASS", "PASS"]);
+    // Two separate runs, two separate hosts, and nothing durable between them: the second
+    // knew what the first had said because it read the channel the first said it in.
+    expect(posts).toEqual(["new: item-41"]);
+    expect(second.gates.map((gate) => gate.detail)).toContain("already said");
   });
 
   it("refuses to start a probe it has no channel for", async () => {

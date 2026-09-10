@@ -923,6 +923,23 @@ export const JobSchema = z
          * ran — reading a channel is how it finds its evidence, never how it grades it.
          */
         probe: z.boolean().default(false),
+        /**
+         * Whether that body may also read the recent messages in the channel, including
+         * lines it did not post itself.
+         *
+         * `probe` alone reads back only a thread the same run rooted, which is all a job
+         * whose product is *this run's* verdict needs. It cannot express a job that has to
+         * know what it said on an **earlier** run: a poller announcing each new item once
+         * needs a record of what it already announced, and the announcement still in the
+         * channel is that record.
+         *
+         * Declared apart from `probe` because it widens what a body sees rather than where
+         * it reaches: the channel is the one `report` names and is no more nameable from
+         * the body, but the lines come back from a conversation this run did not start.
+         *
+         * Refused without `probe`, which is what opens the channel this reads through.
+         */
+        history: z.boolean().default(false),
       })
       .strict()
       .optional(),
@@ -1158,6 +1175,13 @@ const ManifestSchema = z
   })
   .refine((m) => m.jobs.every((job) => !job.worker || !job.report?.probe), {
     message: "external workers do not support report.probe; channel credentials stay in the gateway",
+    path: ["jobs"],
+  })
+  // A grant with nothing to grant through: `history` is read over the per-run channel, and
+  // only `probe` opens one. Refused rather than ignored, because a bundle that declared it
+  // asked for a capability, and a run that quietly had none would fail at the call.
+  .refine((m) => m.jobs.every((job) => !job.report?.history || job.report.probe), {
+    message: "report.history is read through the per-run job channel — declare report.probe too",
     path: ["jobs"],
   })
   // `envelope` merges the two maps, so a name in both would silently take whichever landed
