@@ -421,10 +421,7 @@ async function buildBrain(
       // gateway already holds the adapters and the guarded path through them, so this
       // needs none of the connecting `job run` has to do for itself — and without it a
       // job would report to `#hive` on a clock and go quiet the moment someone asked.
-      post: egress && jobPoster(egress),
-      read: egress && jobReader(egress),
-      members: egress && jobMembers(egress),
-      history: egress && jobHistory(egress),
+      ...(egress ? jobCapabilities(egress) : {}),
     });
     const server = await serveJobs(
       {
@@ -1601,6 +1598,30 @@ function jobHistory(egress: SurfaceEgress): JobHistory {
 }
 
 /**
+ * Everything a job body may be given, from one egress.
+ *
+ * One object rather than a list repeated at each door, for {@link jobPoster}'s reason and
+ * on its evidence: the two lists were written twice and drifted, so `history` reached the
+ * reporter that mints it and not the host that serves it. A capability added here reaches
+ * the gateway and `job run` together or reaches neither.
+ */
+function jobCapabilities(egress: SurfaceEgress): JobCapabilities {
+  return {
+    post: jobPoster(egress),
+    read: jobReader(egress),
+    members: jobMembers(egress),
+    history: jobHistory(egress),
+  };
+}
+
+interface JobCapabilities {
+  post: JobPoster;
+  read: JobReader;
+  members: JobMembers;
+  history: JobHistory;
+}
+
+/**
  * How a detached run answers the conversation that asked for it: the guarded reply the
  * turn itself would have made, into the same thread. A refusal is thrown so the host counts
  * the run as unanswered and lets the status post carry it instead.
@@ -1628,16 +1649,7 @@ async function jobReporter(
   manifest: AgentManifest,
   job: JobConfig,
   secretsDir?: string,
-): Promise<
-  | {
-      post: JobPoster;
-      read: JobReader;
-      members: JobMembers;
-      history: JobHistory;
-      stop: () => Promise<void>;
-    }
-  | undefined
-> {
+): Promise<{ channel: JobCapabilities; stop: () => Promise<void> } | undefined> {
   const kind = job.report?.surface;
   // `loadManifest` already refuses a `report.surface` this agent does not declare.
   const surface = kind && manifest.surfaces.find((s) => s.kind === kind);
@@ -1652,13 +1664,7 @@ async function jobReporter(
   // Slack, put the whole status post behind an inbound connection it does not need.
   await adapter.start();
   const egress = new SurfaceEgress({ manifest, adapters: [adapter] });
-  return {
-    post: jobPoster(egress),
-    read: jobReader(egress),
-    members: jobMembers(egress),
-    history: jobHistory(egress),
-    stop: () => adapter.stop(),
-  };
+  return { channel: jobCapabilities(egress), stop: () => adapter.stop() };
 }
 
 /**
@@ -1872,9 +1878,7 @@ async function jobCmd(argv: string[]): Promise<void> {
     requestId: process.env.AGENT_JOB_REQUEST_ID ? `${process.env.AGENT_JOB_REQUEST_ID}:${slug}` : undefined,
     ...jobWorkEvents(manifest.name),
     switchSource,
-    post: reporter?.post,
-    read: reporter?.read,
-    members: reporter?.members,
+    ...reporter?.channel,
     secretOpts: { dir: jobSecretDirs(argv, secretsDir) },
   });
   let run: JobRun;

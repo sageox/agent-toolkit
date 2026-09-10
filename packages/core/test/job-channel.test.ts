@@ -75,12 +75,15 @@ describe("the job channel", () => {
       return [speaker("drone"), speaker("forager")];
     };
     const windows: Array<{ channel: string; limit?: number }> = [];
+    // Two lines an hour apart, because a one-message answer comes back in the same order
+    // whichever way this layer handed it on.
+    const window: ThreadReply[] = [
+      { author: speaker("hive"), text: "new: item-40", ts: "2026-08-30T07:00:00.000Z" },
+      { author: speaker("drone"), text: "new: item-41", ts: "2026-08-30T08:00:00.000Z" },
+    ];
     const history: JobHistory = async (report, limit) => {
       windows.push({ channel: `${report.surface}:${report.channel}`, limit });
-      return {
-        messages: [{ author: speaker("hive"), text: "new: item-41", ts: "2026-08-30T08:00:00.000Z" }],
-        more: true,
-      };
+      return { messages: window, more: true };
     };
     const handle = jobChannelHandler({
       report: job(PROBES).report!,
@@ -90,7 +93,7 @@ describe("the job channel", () => {
       history,
       ...over,
     });
-    return { posts, reads, rosters, windows, handle };
+    return { posts, reads, rosters, windows, window, handle };
   };
 
   /** Calls a tool the way the body does, and parses the JSON it reads back. */
@@ -217,19 +220,23 @@ describe("the job channel", () => {
     );
   });
 
-  it("reads recent messages in the declared channel, and in no other", async () => {
-    const { windows, handle } = feed({ report: job(ANNOUNCES).report! });
+  it("reads recent messages in the declared channel, oldest first, and in no other", async () => {
+    const { windows, window, handle } = feed({ report: job(ANNOUNCES).report! });
 
     // No destination argument, as `channel_members` has none — and `more` travels out with
     // the messages, because a window that stopped walking and one that reached the end of a
     // quiet channel are the same list, and a run that missed its own last announcement in
     // the first would make it twice.
-    expect(await call(handle, "channel_history", { channel: "somewhere" })).toEqual({
-      messages: [
-        { author: speaker("hive"), text: "new: item-41", ts: "2026-08-30T08:00:00.000Z" },
-      ],
-      more: true,
-    });
+    const answered = await call(handle, "channel_history", { channel: "somewhere" });
+    expect(answered).toEqual({ messages: window, more: true });
+    // Named rather than left to the comparison above: the tool's own description promises
+    // oldest first, and this layer's whole job is to hand on the order the surface put them
+    // in. The adapters are where that order is made, and where it is tested against
+    // deliberately out-of-order input — `buzz.test.ts` and `slack.test.ts` both.
+    expect((answered.messages as ThreadReply[]).map((message) => message.text)).toEqual([
+      "new: item-40",
+      "new: item-41",
+    ]);
     expect(windows).toEqual([{ channel: "console:hive", limit: 200 }]);
 
     // Capped whatever was asked for, and the cap is in the tool's own description.
