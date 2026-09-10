@@ -58,16 +58,23 @@ readme="$copied_chart/README.md"
 if grep -Eq '\.\./\.\./docs/(job-contract|external-jobs)\.md' "$readme"; then
   fail 'copied chart README contains a repository-relative job documentation link'
 fi
-contract_link_count=$(grep -oE 'https://github\.com/sageox/agent-toolkit/blob/v0\.4\.1/docs/(job-contract|external-jobs)\.md(#[^)[:space:]]+)?' "$readme" | wc -l | tr -d ' ')
-[ "$contract_link_count" = 5 ] || fail "expected 5 pinned job documentation links, found $contract_link_count"
-for link in \
-  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/job-contract.md#structured-work-events-schema-1' \
-  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/external-jobs.md#structured-answers' \
-  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/job-contract.md#what-a-body-finds-on-disk' \
-  'https://github.com/sageox/agent-toolkit/blob/v0.4.1/docs/external-jobs.md'
-do
-  grep -qF "$link" "$readme" || fail "copied chart README is missing pinned link: $link"
-done
+# The exact multiset, not a total plus the set of distinct values: `external-jobs.md` is
+# linked twice, so a count alone still passes when one of those two is replaced by a copy
+# of another pinned link. Matched at any tag rather than at this release's, so a link left
+# behind on the previous one is reported as the stale link it is.
+release_docs='https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs'
+expected=$(printf '%s\n' \
+  "$release_docs/external-jobs.md" \
+  "$release_docs/external-jobs.md" \
+  "$release_docs/external-jobs.md#structured-answers" \
+  "$release_docs/job-contract.md#structured-work-events-schema-1" \
+  "$release_docs/job-contract.md#what-a-body-finds-on-disk" | sort)
+# Assigned rather than piped into the comparison: under `pipefail` a `grep` that matches
+# nothing fails the assignment, and `set -e` would then kill the script before the
+# assertion below could name what was wrong.
+found=$(grep -oE 'https://github\.com/sageox/agent-toolkit/blob/[^/]+/docs/(job-contract|external-jobs)\.md(#[^)[:space:]]+)?' "$readme" | sort) || found=''
+[ "$found" = "$expected" ] || fail "pinned job documentation links in the copied chart README do not match the release:
+$(diff <(printf '%s\n' "$expected") <(printf '%s\n' "$found") | sed 's/^/  /')"
 
 # Three declared jobs across two agents: one scheduled, one on-request, one parked.
 render

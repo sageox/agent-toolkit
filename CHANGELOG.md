@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-10
+
+Everything below shipped after `v0.4.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.5.0` takes `:latest` and `:0.5`. `:0.4` stays
+on 0.4.1. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+**A `helm upgrade` has a window in which armed external jobs fail to dispatch, and the
+chart cannot order it away.** A host on this release sends `switch.value` on every armed
+external job, and the request schema is strict, so a dispatcher still on 0.4.1 rejects
+those requests. One `imageRef` covers the gateway, the dispatcher and the scheduled
+launchers, and their workloads roll independently — there is no values setting that takes
+the dispatcher to the new image first. Nothing is wedged by the window: it ends when the
+dispatcher Pod is replaced, a requested run that failed in it can be asked for again, and
+a scheduled one fails a tick and takes the next. To skip it, park each armed external job
+before the upgrade with `sageox-agent job park <slug>` and arm it after. Deployments with
+no external jobs are unaffected.
+
+**Two values files that rendered under chart 0.12.1 now fail.** An external worker below
+Kubernetes 1.34 is refused at render rather than shipped to a cluster that cannot run it —
+1.34 has been the documented floor since external workers shipped — and a worker Secret
+that an agent's `jobSecrets` already mounts is refused as a shared credential.
+
+Everything else is additive: existing manifests need no new fields, and `report.history`,
+the `admission` section on work events and `sageox-agent validate` are each opt-in.
+
 - **A job can announce something once without keeping any state.** A job that declares
   `report.history: true` beside `report.probe: true` gets a fourth verb on its per-run
   channel, `channel_history`: the recent messages in the one channel `report` names, oldest
@@ -45,10 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to be repeated verbatim. Worker completion never claims an application side effect.
 - Repository Codex hooks now notify SageOx on `SessionEnd`, allowing active recordings
   to finalize when the session ends.
-- **Helm external workers cannot inherit invalid mounts or reuse scheduled-job
-  credentials.** Dispatcher bundle staging now excludes gateway shared volumes, and chart
-  validation rejects a worker Secret that is already used by any agent's gateway,
-  dispatcher, or scheduled jobs.
+- **Helm chart 0.13.0 keeps an external worker off every credential and cluster it must
+  not reach.** Dispatcher bundle staging now excludes gateway shared volumes. Chart
+  validation rejects a worker Secret already used by any agent's gateway, dispatcher, or
+  `jobSecrets`, and refuses an external worker rendered for a cluster older than
+  Kubernetes 1.34 — the floor
+  [the external jobs guide](docs/external-jobs.md) already named.
 - **A repository that authors `agent.yaml` files can check them in CI.** `sageox-agent
   validate <path…>` parses each file against the schema `run` loads at startup and exits
   non-zero if any is invalid, naming the field path and the expectation for each problem.
