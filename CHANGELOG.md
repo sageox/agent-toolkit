@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because its key was never written no longer reads the same as one somebody parked. No
   stored value, annotation, requester or backend error text is emitted. Existing manifests
   and custom `SwitchSource` implementations need no change; consumers must treat a missing
-  `admission` as unknown, never as parked. See
+  `admission` as unknown, never as parked. External-dispatch requests gain the same
+  optional field, which a dispatcher parses strictly: bring the dispatcher to this release
+  before the gateway, or a worker job fails to dispatch for as long as the gateway is
+  ahead of it. See
   [the job contract](docs/job-contract.md#admission-diagnostics-on-the-terminal-record).
 - Chat replies keep the final ACP answer without replaying narration superseded by
   tool calls. Detached jobs reply to their requester in plain language; diagnostic

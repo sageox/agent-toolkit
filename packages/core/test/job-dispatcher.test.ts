@@ -893,6 +893,30 @@ it.each([false, true])("reads short verdict chunks completely while preserving t
   } finally { reads.mockRestore(); await rm(dir, { recursive: true, force: true }); }
 });
 
+it.each([
+  ["a classified value", "parking" as const, "parking"],
+  // The compatible direction, and the only one there is: the request schema is strict, so
+  // a dispatcher older than its gateway rejects `value` outright and nothing dispatches.
+  ["a gateway that predates the classification", undefined, "unavailable"],
+])("carries %s across the dispatch wire", async (_case, value, reported) => {
+  const { jobWorkEvents } = await import("../src/work-events.ts");
+  const api = new Cluster(), dispatch = dispatcher(api), job = manifest().jobs[0]!;
+  const req: ExternalRequest = { ...request(job),
+    switch: { origin: "set", state: "off", ...(value ? { value } : {}) } };
+
+  const status = await dispatch.dispatch(req);
+  expect(status.state).toBe("pending");
+  const stored: ExternalRequest = JSON.parse(api.objects.get(`configmaps/${runName(req.runId)}`)!.data!.run!).request;
+  expect(stored.switch).toEqual(req.switch);
+
+  const events: Array<Record<string, any>> = [];
+  jobWorkEvents("demo", { AGENT_WORK_EVENTS: "1" }, (line) => events.push(JSON.parse(line).sageox_work_event))
+    .onRun!(externalRun(req, { ...status, state: "finished", endedAt: req.startedAt + 50,
+      outcome: "completed", result: { outcome: "completed", counts: { PASS: 1, FAIL: 0, UNKNOWN: 0 } } }));
+  expect(events[0]!.admission).toEqual({ bypassed_switch: true,
+    switch: { state: "off", origin: "set", value: reported } });
+});
+
 it.each(["pending", "finished", "skipped-overlap"] as const)("reports external %s observation with its existing run ID despite throwing observers", async (state) => {
   const { jobWorkEvents } = await import("../src/work-events.ts");
   const job = manifest().jobs[0]!;

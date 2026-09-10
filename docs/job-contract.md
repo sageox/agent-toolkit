@@ -436,8 +436,15 @@ parked.
 Custom `SwitchSource` implementations keep working unchanged and report
 `value: "unavailable"`. To classify, return the `value` field on a `set` lookup —
 `interpretSwitchValue` from core produces it, and is what the Buzz engram source
-uses. External-dispatch requests carry the same optional field, so a gateway and a
-dispatcher on different toolkit releases still dispatch.
+uses.
+
+External-dispatch requests carry the same optional field, and that request is
+parsed strictly: a reader rejects a field it does not recognize. An added optional
+field is therefore compatible in one direction only. A gateway older than the
+dispatcher it sends to omits `value`, the dispatcher accepts the request, and the
+run reports `unavailable`. The reverse does not hold — a dispatcher older than its
+gateway rejects the request, and the worker job does not start. Never run a
+dispatcher behind the gateway that dispatches to it.
 
 ### Optional facts in the existing verdict file
 
