@@ -68,8 +68,9 @@ export type WorkStart = Pick<JobRun, "jobSlug" | "runId" | "trigger" | "startedA
 
 /**
  * Why the host let this run start, or did not. Host-minted, from the reading `admitJob`
- * took — never from the verdict file, which `WorkReportSchema` would reject this key from
- * anyway, and which is spread before this in {@link jobWorkEvents} so that it cannot win.
+ * took — never from the verdict file. `WorkReportSchema` is strict and rejects this key,
+ * and {@link jobWorkEvents} spreads the report ahead of this so that a report which ever
+ * did carry one would still lose to the host's.
  *
  * `switch: null` means this record carries no reading: the job declares no kill switch, or
  * — on a `denied-trigger` or `skipped-overlap` outcome — the run was refused before one was
@@ -77,7 +78,8 @@ export type WorkStart = Pick<JobRun, "jobSlug" | "runId" | "trigger" | "startedA
  * classification, which is not the same as, and must never be counted as, `parking`.
  *
  * None of it is derived from `outcome`: a run denied by `suspend` still reports the switch
- * it read, because "parked twice" and "parked once" send an operator to different files.
+ * it read, because lifting `suspend` takes a reviewed manifest diff and clearing the switch
+ * takes a key write — an operator meeting a denial has to know which one is holding it.
  */
 function admission(run: JobRun): Record<string, unknown> {
   return {

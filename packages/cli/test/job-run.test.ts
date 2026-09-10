@@ -407,7 +407,8 @@ it("isolates forged child envelopes from host records for both trigger paths", a
       expect(events.every((event) => event.trigger === trigger)).toBe(true);
       expect(json.some((line) => line.job_diagnostic?.text.includes("forged"))).toBe(true);
       // This bundle has no private brain, so `shift` really cannot read the switch it
-      // declares. Fails open, runs, and the record says which of those two it was.
+      // declares. It runs because `failDirection: open` says to, and `origin: "unreadable"`
+      // keeps that distinct from a run somebody armed.
       expect(events[1].admission).toEqual({ bypassed_switch: false,
         switch: { state: "on", origin: "unreadable", failure: "backend-missing" } });
     }

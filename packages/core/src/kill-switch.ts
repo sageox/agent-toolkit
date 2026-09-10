@@ -37,8 +37,8 @@ export type SwitchState = "on" | "off";
  * Every value that does not arm parks, so `state` alone cannot say whether a human chose
  * `off` or fat-fingered `onn`. A monitor watching for a job that is never admitted has to
  * tell those apart: the first is somebody's decision and must not page anyone, the second
- * is a job nobody meant to stop. Recorded rather than re-derived because the value itself
- * never leaves this function — it is the operator's text, and events carry none of it.
+ * is a job nobody meant to stop. Classified here rather than downstream because the raw
+ * text stops here — it is the operator's, and no record this produces carries it.
  */
 export type SwitchValueClass = "arming" | "parking" | "unrecognized";
 

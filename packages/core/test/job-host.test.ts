@@ -1123,8 +1123,8 @@ describe("admission diagnostics on the terminal event", () => {
       { killSwitch: `{failDirection: ${failDirection}}` });
     expect(event.admission).toEqual({ bypassed_switch: false, switch: reading });
     expect(run.outcome).toBe(reading.state === "on" ? "completed" : "denied-switch");
-    // The operator's text is what the classification was derived from, and the only place
-    // it is allowed to exist. Nothing carries it onto a log line.
+    // The classification is derived from the operator's text, and the event carries no
+    // part of that text — which is why an annotated value is `unrecognized`, never quoted.
     expect(JSON.stringify(event)).not.toContain("annotation");
   });
 

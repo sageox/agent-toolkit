@@ -896,7 +896,8 @@ it.each([false, true])("reads short verdict chunks completely while preserving t
 it.each([
   ["a classified value", "parking" as const, "parking"],
   // The compatible direction, and the only one there is: the request schema is strict, so
-  // a dispatcher older than its gateway rejects `value` outright and nothing dispatches.
+  // a dispatcher older than its gateway rejects every request that carries `value` — which
+  // is every armed job, since a reading only has one when the switch key holds a value.
   ["a gateway that predates the classification", undefined, "unavailable"],
 ])("carries %s across the dispatch wire", async (_case, value, reported) => {
   const { jobWorkEvents } = await import("../src/work-events.ts");
