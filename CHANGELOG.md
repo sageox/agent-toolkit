@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prerelease-tagged version while still refusing a genuinely older cluster. The cases that
   let this ship used bare versions, so they could not tell a working floor from one that
   refuses everything; the suite now renders a suffixed version on both sides of the floor.
+  Chart 0.13.1. The runtime is untouched — this is a template comparison, so the published
+  image for 0.5.0 is already correct and no new one is needed.
 
 ## [0.5.0] - 2026-09-10
 
