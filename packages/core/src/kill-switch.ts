@@ -32,6 +32,17 @@ export type SwitchFailure =
 export type SwitchState = "on" | "off";
 
 /**
+ * What a retrieved value was recognized as, decided while the raw text is still in hand.
+ *
+ * Every value that does not arm parks, so `state` alone cannot say whether a human chose
+ * `off` or fat-fingered `onn`. A monitor watching for a job that is never admitted has to
+ * tell those apart: the first is somebody's decision and must not page anyone, the second
+ * is a job nobody meant to stop. Recorded rather than re-derived because the value itself
+ * never leaves this function — it is the operator's text, and events carry none of it.
+ */
+export type SwitchValueClass = "arming" | "parking" | "unrecognized";
+
+/**
  * What the backend said, before any job's fail-direction interprets it.
  *
  * Separate from {@link SwitchReading} because the two answer different questions: this one
@@ -39,7 +50,7 @@ export type SwitchState = "on" | "off";
  * of opposite fail-direction turn the same lookup into opposite readings.
  */
 export type SwitchLookup =
-  | { origin: "set"; state: SwitchState }
+  | { origin: "set"; state: SwitchState; value?: SwitchValueClass }
   | { origin: "never-set" }
   | { origin: "unreadable"; failure: SwitchFailure };
 
@@ -47,6 +58,12 @@ export type SwitchLookup =
 export interface SwitchReading {
   state: SwitchState;
   origin: SwitchOrigin;
+  /**
+   * Only ever set when `origin` is `set` — the other two origins never reached a value.
+   * Absent from a source written before this existed, which is why nothing may read a bare
+   * `origin: "set"` as evidence that somebody deliberately parked the job.
+   */
+  value?: SwitchValueClass;
   /**
    * Only ever set when `origin` is `unreadable` — a never-set reading is a fact about the
    * key, and hanging a "why it failed" off it would invent one.
@@ -102,16 +119,33 @@ export interface JobAdmission {
 const ARMING_VALUES = new Set(["on", "true", "yes", "1", "enabled", "armed"]);
 
 /**
+ * The values that are recognized as somebody having parked the job on purpose.
+ *
+ * It changes no outcome — everything outside {@link ARMING_VALUES} parks either way — so it
+ * is safe for it to be a closed list where the arming one has to be. What it decides is
+ * whether a denial is worth telling anyone about, and only an exact spelling settles that:
+ * an annotated `off — back Monday` is a sentence, and admitting sentences here would make
+ * `on — back Monday` (which parks, and which nobody intended to) look deliberate too.
+ * `sageox-agent job park` writes a bare `off` for exactly this reason.
+ */
+const PARKING_VALUES = new Set(["off", "false", "no", "0", "disabled", "parked"]);
+
+/**
  * What one stored value means. The vocabulary is the switch's, not any transport's.
  *
  * Always `set` — a value in hand is evidence of intent, whatever it says. The other two
  * origins are facts about a read that did not reach one, which is why the transport builds
  * them and this never does.
  */
-export function interpretSwitchValue(raw: string): { origin: "set"; state: SwitchState } {
+export function interpretSwitchValue(
+  raw: string,
+): { origin: "set"; state: SwitchState; value: SwitchValueClass } {
+  const value = raw.trim().toLowerCase();
+  if (ARMING_VALUES.has(value)) return { origin: "set", state: "on", value: "arming" };
   return {
     origin: "set",
-    state: ARMING_VALUES.has(raw.trim().toLowerCase()) ? "on" : "off",
+    state: "off",
+    value: PARKING_VALUES.has(value) ? "parking" : "unrecognized",
   };
 }
 
@@ -206,7 +240,11 @@ function resolveSwitchReading(
   lookup: SwitchLookup,
   failDirection: "open" | "closed",
 ): SwitchReading {
-  if (lookup.origin === "set") return { state: lookup.state, origin: "set" };
+  if (lookup.origin === "set") {
+    // Omitted rather than guessed when the source did not classify: a reader that saw
+    // `value: "parking"` here would be reading this line's default, not the stored value.
+    return { state: lookup.state, origin: "set", ...(lookup.value ? { value: lookup.value } : {}) };
+  }
   const state: SwitchState = failDirection === "open" ? "on" : "off";
   return lookup.origin === "never-set"
     ? { state, origin: "never-set" }

@@ -18,6 +18,9 @@ export const ExternalRequestSchema = z.object({
   switch: z.object({
     state: z.enum(["on", "off"]),
     origin: z.enum(["set", "never-set", "unreadable"]),
+    // Optional so a gateway that predates the classification still dispatches. Its absence
+    // is carried through to the work event as `unavailable`, never as deliberate parking.
+    value: z.enum(["arming", "parking", "unrecognized"]).optional(),
     failure: z.enum(["no-signing-key", "no-owner", "backend-missing", "timeout", "unreachable", "auth-failed", "backend-error"]).optional(),
   }).strict().nullable(),
   bypassedSwitch: z.boolean(),

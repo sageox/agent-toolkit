@@ -358,7 +358,7 @@ named fleets. Consumers must ignore unsupported schema versions.
 
 ```jsonl
 {"sageox_work_event":{"schema_version":1,"agent":"reviewer","job":"triage","run_id":"opaque-run-id","trigger":"schedule","started_at":"2026-09-07T03:00:00.000Z","deadline_ms":300000,"event":"run.started","occurred_at":"2026-09-07T03:00:00.010Z"}}
-{"sageox_work_event":{"schema_version":1,"agent":"reviewer","job":"triage","run_id":"opaque-run-id","trigger":"schedule","started_at":"2026-09-07T03:00:00.000Z","deadline_ms":300000,"event":"run.completed","occurred_at":"2026-09-07T03:00:12.000Z","outcome":"completed","verdict":"PASS","checks":[{"gate":"job:triage","executed":true,"exit_code":0,"source":"host"},{"gate":"ci","executed":true,"exit_code":0,"source":"producer"}],"report_status":"valid","partial":false}}
+{"sageox_work_event":{"schema_version":1,"agent":"reviewer","job":"triage","run_id":"opaque-run-id","trigger":"schedule","started_at":"2026-09-07T03:00:00.000Z","deadline_ms":300000,"event":"run.completed","occurred_at":"2026-09-07T03:00:12.000Z","outcome":"completed","verdict":"PASS","checks":[{"gate":"job:triage","executed":true,"exit_code":0,"source":"host"},{"gate":"ci","executed":true,"exit_code":0,"source":"producer"}],"report_status":"valid","admission":{"bypassed_switch":false,"switch":{"state":"on","origin":"set","value":"arming"}},"partial":false}}
 ```
 
 `started_at` records the attempt; the start event's `occurred_at` records admission.
@@ -395,6 +395,49 @@ contract does not expand the worker's termination-log protocol or cloud policies
 A killed host can leave a start with **no terminal record**. Absence is not proof
 of success or failure. Observer/output failures are best-effort losses and never
 change job admission or settlement. There is no durable event queue or replay.
+
+### Admission diagnostics on the terminal record
+
+`admission` is host-minted and appears on every `run.completed` record. It answers
+why the run was allowed to start, or was not, without carrying the stored value.
+
+`switch` is the reading this run's job took, or `null`. A `null` means this record
+holds no reading: the job declares no kill switch, or — on a `denied-trigger` or
+`skipped-overlap` outcome — the run was refused before one was read, which the
+`outcome` already names. Otherwise:
+
+| Field | Values | Present |
+|---|---|---|
+| `state` | `on`, `off` | always — after the job's `failDirection` is applied |
+| `origin` | `set`, `never-set`, `unreadable` | always |
+| `value` | `arming`, `parking`, `unrecognized`, `unavailable` | when `origin` is `set` |
+| `failure` | one of the bounded lookup failure codes | when `origin` is `unreadable` |
+
+`value` is what the stored text was recognized as, classified before the text was
+discarded. `arming` is one of `on`, `true`, `yes`, `1`, `enabled`, `armed`;
+`parking` is one of `off`, `false`, `no`, `0`, `disabled`, `parked`; both are
+compared after trimming and lowercasing. Everything else is `unrecognized` and
+still parks the job — including an annotated form such as `off — back Monday`, and
+including a typo of an arming value such as `onn`. `sageox-agent job park` writes a
+bare `off`. `unavailable` means a value was retrieved by a switch source that
+predates this classification. **Only `value: "parking"` is evidence that somebody
+parked the job on purpose. `origin: "set"` alone is not.**
+
+`bypassed_switch` is `true` when a human's `on-request` run was admitted while the
+job was parked. That run is manual execution and is not evidence that scheduled
+admission works: a consumer counting admissions must read `trigger` alongside it.
+
+A monitor watching for a job that is never admitted can suppress
+`value: "parking"` without also suppressing `never-set`, `unreadable`,
+`unrecognized`, or `unavailable`. Records from a toolkit release before this
+contract carry no `admission` key at all; treat its absence as unknown, never as
+parked.
+
+Custom `SwitchSource` implementations keep working unchanged and report
+`value: "unavailable"`. To classify, return the `value` field on a `set` lookup —
+`interpretSwitchValue` from core produces it, and is what the Buzz engram source
+uses. External-dispatch requests carry the same optional field, so a gateway and a
+dispatcher on different toolkit releases still dispatch.
 
 ### Optional facts in the existing verdict file
 

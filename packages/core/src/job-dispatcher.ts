@@ -151,7 +151,9 @@ export class JobDispatcher {
     // No caller of the model-facing tool can set either this reading or requestedBy.
     const admission = await admitJob(job, request, async () => {
       const reading = request.switch;
-      if (reading?.origin === "set") return { origin: "set", state: reading.state };
+      if (reading?.origin === "set") {
+        return { origin: "set", state: reading.state, ...(reading.value ? { value: reading.value } : {}) };
+      }
       if (reading?.origin === "never-set") return { origin: "never-set" };
       return { origin: "unreadable", failure: reading?.failure ?? "backend-missing" };
     });
