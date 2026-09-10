@@ -146,7 +146,11 @@ SecretProviderClass, and renders a single object rather than two.
 {{- if not $agent.dispatcher -}}
 {{- fail (printf "%s/%s: external worker requires dispatcher.tokenSecret" $name $job.slug) -}}
 {{- end -}}
-{{- if not (semverCompare ">=1.34.0" $.Capabilities.KubeVersion.Version) -}}
+{{- /* `-0` is load-bearing: a managed distribution reports its GitVersion with a
+     build suffix (EKS v1.34.9-eks-bca9cf6, GKE v1.34.5-gke.1234), semver reads that
+     as a PRERELEASE, and a constraint carrying none never matches one. Without it
+     this floor refuses every managed cluster, including ones far above it. */}}
+{{- if not (semverCompare ">=1.34.0-0" $.Capabilities.KubeVersion.Version) -}}
 {{- fail (printf "%s/%s: external worker requires Kubernetes 1.34 or newer" $name $job.slug) -}}
 {{- end -}}
 {{- if hasKey $gatewayAccounts $job.worker.serviceAccountName -}}
