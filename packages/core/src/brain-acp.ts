@@ -268,6 +268,7 @@ export class ClaudeAcpBrain implements Brain {
   }
 }
 
+/** ACP's convenience reader joins progress and final text, producing contradictory replies. */
 async function readFinalText(session: ChannelSession["session"]): Promise<string> {
   let text = "";
   for (;;) {

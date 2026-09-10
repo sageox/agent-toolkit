@@ -405,6 +405,7 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
   });
 }
 
+/** Chat needs a bounded outcome; operator diagnostics may contain private worker text. */
 function describeChatCompletion(run: JobRun): string {
   const subject = `The ${run.jobSlug.replaceAll("-", " ")} job`;
   if (run.outcome === "abandoned") {
@@ -421,6 +422,9 @@ function describeChatCompletion(run: JobRun): string {
   }
   if (run.outcome === "crashed" || run.verdict.status === "FAIL") {
     return `${subject} did not finish successfully. An operator can inspect its saved result.`;
+  }
+  if (run.outcome === "skipped-overlap") {
+    return `${subject} was skipped because another run was already active.`;
   }
   if (run.outcome !== "completed") {
     return `${subject} did not run. An operator can check why it was refused.`;

@@ -640,16 +640,24 @@ describe("a job that outlasts a turn", () => {
     [RECORD + "process.exit(1)", "The shift job did not finish successfully. An operator can inspect its saved result."],
   ])("keeps failed or unverified results honest in chat (%s)", async (body, expected) => {
     const answers: string[] = [];
+    let resolveReply!: () => void;
+    const replied = new Promise<void>((resolve) => { resolveReply = resolve; });
     await call([withBody(jobs(REPORTING)[0], body)], { job: "shift" }, {
       ...impatient, answering: turnAuthor({ id: "npub1ryan" }),
-      reply: async (_home, text) => { answers.push(text); },
+      reply: async (_home, text) => { answers.push(text); resolveReply(); },
     });
-    await vi.waitFor(() => expect(answers).toEqual([expected]), { timeout: 5000 });
+    await replied;
+    expect(answers).toEqual([expected]);
     expect(runs[0].verdict.status).not.toBe("PASS");
   });
 
-  it.each(["cancelled", "unknown", "budget-bowout"] as const)(
-    "never says an uncertain %s run had no side effects", async (outcome) => {
+  it.each([
+    ["cancelled", "Check its result before trying again."],
+    ["unknown", "Check its result before trying again."],
+    ["budget-bowout", "Check its result before trying again."],
+    ["skipped-overlap", "The shift job was skipped because another run was already active."],
+  ] as const)(
+    "describes a %s outcome without implying success or refusal", async (outcome, expected) => {
       const host = jobHost();
       const job = withBody(jobs(REPORTING)[0], SILENT);
       await call([job], { job: "shift" }, { host });
@@ -664,8 +672,8 @@ describe("a job that outlasts a turn", () => {
         reply: async (_home, text) => { answers.push(text); },
       });
       expect(answers).toHaveLength(1);
-      expect(answers[0]).toContain("Check its result before trying again.");
-      expect(answers[0]).not.toMatch(/did not run|ready to review|PROVEN|run id/);
+      expect(answers[0]).toContain(expected);
+      expect(answers[0]).not.toMatch(/did not run|refused|ready to review|PROVEN|run id/);
     },
   );
 
