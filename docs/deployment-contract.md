@@ -14,7 +14,7 @@ around it. A deployment target must preserve this contract instead of translatin
 | Identity | Run exactly one replica for an agent identity. Two replicas would answer twice and race on one cursor. |
 | Shutdown | Allow longer than `limits.turnTimeoutMs` between `SIGTERM` and `SIGKILL`. |
 | Warmup | Connect first. Repository clone/fetch, indexing, cache fills, and other recoverable warmup never gate the agent process. The runtime enforces its half: only a precondition decides whether `run` starts, and no capability health ever does. See [Startup and readiness](startup-and-readiness.md). |
-| Jobs | Run every entry in `jobs[]` on its declared schedule, under a deadline derived from its budget, without overlap and without retry. An agent whose declared jobs render nothing deploys looking healthy with no scheduled work. See [Jobs](#jobs). |
+| Jobs | Run every `jobs[]` entry that declares a `run` body on its declared schedule, under a deadline derived from its budget, without overlap and without retry. An entry declaring a `prompt` body is a turn on the agent's own clock: no scheduled object, no deadline to derive. An agent whose declared jobs render nothing deploys looking healthy with no scheduled work. See [Jobs](#jobs). |
 
 The runtime does not need an inbound port: Buzz and Slack use outbound connections. A target
 therefore should not create a Service or Ingress unless a future surface explicitly needs
@@ -93,6 +93,10 @@ target already deploys, never through a scheduled object
 ([RFC §6.3](design/2026-08-19-jobs-rfc.md#63-the-switch-parks-automation-not-the-job)). A
 parked `prompt` job has no such door: nothing may ask for one, so it stays parked until the
 switch is armed. What a target owes either way is that the schedule itself does not fire.
+
+The two paragraphs below are a `run` body's. A `prompt` body has no budget to derive a
+deadline from and no scheduled object to hold single-flight over — the gateway's own clock
+runs it, one turn at a time, inside the process the target already deploys.
 
 The deadline is derived, never a setting of its own. An operator who can set it independently
 will eventually set it below the budget, and the job is then SIGKILLed inside the window

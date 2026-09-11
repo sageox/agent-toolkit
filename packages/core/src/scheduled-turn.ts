@@ -748,7 +748,11 @@ function named(
   // `Number("")` is 0, so a blank end would read as a legal value and `1-` would refuse
   // for counting backwards rather than for being half a range.
   if (!written) return undefined;
-  const byName = names?.indexOf(written.slice(0, 3).toLowerCase());
+  // Exactly three, never a prefix of what was written. `MONSOON` truncates to a valid
+  // `MON` and would schedule Mondays for an expression nobody meant — and Kubernetes'
+  // own parser takes the three-letter abbreviations and nothing longer, so a `run` job
+  // and a `prompt` job carrying one expression have to refuse it the same way.
+  const byName = written.length === 3 ? names?.indexOf(written.toLowerCase()) : -1;
   if (byName !== undefined && byName >= 0) return byName + min;
   const value = Number(written);
   return Number.isInteger(value) && value >= min && value <= max ? value : undefined;

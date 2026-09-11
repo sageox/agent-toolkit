@@ -96,6 +96,17 @@ describe("nextFire", () => {
     expect(() => nextFire(["0 3 * * 1-"], "UTC", new Date())).toThrow(/not a value or a range/);
     expect(() => nextFire(["0 9-5 * * *"], "UTC", new Date())).toThrow(/counts backwards/);
   });
+
+  it("takes a three-letter name and refuses anything that merely starts like one", () => {
+    // Truncating to three would read `MONSOON` as Monday and schedule an expression nobody
+    // meant. Kubernetes' own parser takes the abbreviations and nothing longer, so one
+    // expression has to mean the same thing to a `run` job and to a `prompt` job.
+    const from = new Date("2026-09-10T13:00:00Z");
+    expect(wall(nextFire(["0 0 * * MON"], "UTC", from), "UTC")).toBe("2026-09-14 00:00:00");
+    for (const bad of ["0 0 * * MONSOON", "0 0 * * MONDAY", "0 0 1 JUNX *", "0 0 * * MO"]) {
+      expect(() => nextFire([bad], "UTC", from), bad).toThrow(/not a value or a range/);
+    }
+  });
 });
 
 const base =
