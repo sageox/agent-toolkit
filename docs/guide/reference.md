@@ -120,7 +120,7 @@ jobs:
     description: Summarize the last 24 hours of the status channel and post it on Slack.
     trigger: { schedules: ["0 18 * * *"], timezone: America/Los_Angeles }
     killSwitch: { failDirection: closed }
-    prompt: { file: ./jobs/daily-digest.md }   # or an inline string, for a one-liner
+    prompt: { skill: daily-digest }           # or an inline string, for a one-liner
     report: { surface: slack, channel: "C0123456789" }
 ```
 
@@ -135,10 +135,14 @@ The tick posts at top level in `report.channel`, through the same guard the brai
 declaring it here rather than scheduling a bot message on the platform: a clock outside the
 agent is a clock none of those can see. `prompt` refuses `run`, `worker`, `parameters`,
 `model`, `output`, `report.probe`, `report.history`, `trigger.onRequest` and
-`trigger.webhook`; `budget` is optional and can only shorten the turn. The prompt file is
-read when the gateway starts, so editing it needs a restart — and `doctor` prints its path,
-its size, and the next fire time in the declared zone. The full contract is in
-[the job body contract](../job-contract.md#a-job-that-is-a-turn).
+`trigger.webhook`; `budget` is optional and can only shorten the turn.
+
+The words live at `skills/<name>/SKILL.md` in the bundle — the layout every agent runtime
+uses for a page of instructions an agent reads and follows — and the manifest names the
+skill rather than pointing at a path, so the same name is what a person will later say to
+invoke it. It is read when the gateway starts, so editing it needs a restart, and `doctor`
+prints the resolved file, its size, and the next fire time in the declared zone. The full
+contract is in [the job body contract](../job-contract.md#a-job-that-is-a-turn).
 
 ## What the log says about tool calls
 

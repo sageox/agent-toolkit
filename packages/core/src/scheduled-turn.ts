@@ -70,10 +70,16 @@ const Frontmatter = z.object({
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
 /**
- * The subtree of an agent directory the runtime owns rather than the bundle: repository
- * checkouts and the indexes over them. See `createRepoWorkspace`, which roots them here.
+ * Where a bundle keeps its skills, and what one is called.
+ *
+ * `skills/<name>/SKILL.md` is the shape the rest of the world already uses for a page of
+ * instructions an agent reads and follows, which is exactly what a prompt job's body is.
+ * Harness-neutral on purpose: a harness discovers skills under a root of its own choosing,
+ * and `docs/naming.md` is why the manifest does not spell one of those roots — this
+ * contract outlives any single one.
  */
-const RUNTIME_STATE = "workspace";
+const SKILLS_DIR = "skills";
+const SKILL_FILE = "SKILL.md";
 
 /** Whether `path` is `root` itself or sits beneath it. Both must already be resolved. */
 function within(path: string, root: string): boolean {
@@ -142,32 +148,31 @@ export function readJobPrompt(job: PromptJob, agentDir: string): JobPrompt {
     return { source: "inline", bytes: Buffer.byteLength(job.prompt), body: job.prompt };
   }
 
-  const source = resolve(agentDir, job.prompt.file);
-  const named = `job "${job.slug}" prompt ${source}`;
-  const steering =
-    "a prompt is read as steering, so it comes from the bundle and nowhere a review would " +
-    "not see it";
+  const name = job.prompt.skill;
+  // The one place the layout is written down. A name is all the manifest supplies, so there
+  // is no path here for an operator to point somewhere else and none for this to contain.
+  const source = join(resolve(agentDir), SKILLS_DIR, name, SKILL_FILE);
+  // Canonical only for the containment test below. The path an operator is shown stays the
+  // one they wrote the bundle at — `/private/var/...` on a macOS temp dir is a true answer
+  // to a question nobody asked.
+  const tree = join(realpathSync(resolve(agentDir)), SKILLS_DIR);
+  const named = `job "${job.slug}" skill ${name} (${source})`;
 
-  // The words go to the brain as steering rather than inside the untrusted fence, and the
-  // whole argument for that is that they came out of the same reviewed bundle the persona
-  // did. Both halves of that are checked here, because they fail differently.
+  // What the filesystem says it really is. A slug cannot traverse, but a symlink at any
+  // step of `skills/<name>/SKILL.md` can still point out of the bundle — at a mounted
+  // credential, or at `workspace/`, where repository checkouts sit refreshed from their
+  // remotes. The words go to the brain as steering rather than as fenced data, and the
+  // whole argument for that is that they came out of the reviewed bundle; a link is the
+  // one way the diff shows a path and never the content it will resolve to.
   //
-  // The path as written: `/mnt/shared/digest.md` is mutable by whoever mounted it and
-  // appears in no bundle diff.
-  if (!within(source, resolve(agentDir))) {
-    throw new Error(`${named} is outside the agent directory — ${steering}`);
-  }
-
-  // Neither check can see a *mount* inside the bundle — a mount point is an ordinary
-  // directory to `realpath` — so a target that can place one owes that refusal itself. The
-  // chart refuses a `sharedVolumes` claim under `/agents/<name>` for this reason.
+  // Contained to `skills/` rather than to the agent directory, which is stricter and says
+  // what is meant: the bundle's skills tree is where a skill lives, and every other
+  // subtree — the runtime's included — is out by construction rather than by a carve-out
+  // per subtree.
   //
-  // And what the filesystem says it really is. A symlink committed into the bundle is the
-  // case the first check cannot see, and it is the worse one: the diff shows a path and
-  // never the content, the content can change after the review that approved it, and what
-  // it resolves to reaches the brain as trusted words in the process that holds this
-  // agent's credentials. Writing the prompt file directly is not the same act — that puts
-  // the words themselves in front of a reviewer.
+  // What this cannot see is a *mount* placed inside the tree; a mount point is an ordinary
+  // directory to `realpath`. The chart refuses a `sharedVolumes` claim under
+  // `/agents/<name>` for that reason.
   let real: string;
   try {
     real = realpathSync(source);
@@ -175,31 +180,17 @@ export function readJobPrompt(job: PromptJob, agentDir: string): JobPrompt {
     // Missing, or unreadable on the way down. Same sentence the read below would give.
     throw new Error(`${named}: ${errorText(error)}`);
   }
-  // One resolved root for every test below it: on a host where the agent directory is
-  // reached through a link — `/var` on macOS, a mounted bundle anywhere — comparing a real
-  // path against an unresolved root silently matches nothing.
-  const root = realpathSync(resolve(agentDir));
-  if (!within(real, root)) {
-    throw new Error(`${named} is a link to ${real}, which is outside the agent directory — ${steering}`);
-  }
-
-  // `workspace/` is the runtime's, not the bundle's: repository checkouts land there and are
-  // refreshed from their remotes on every start, so a prompt read out of one is words
-  // whoever can merge to that repository chose — arriving as steering, in the process that
-  // holds this agent's credentials. The gateway already refuses to make a checkout the
-  // brain's working directory for this exact reason; this is the same rule at the other
-  // door. Unlike a mount, the runtime can see this one, because the directory is its own.
-  if (within(real, join(root, RUNTIME_STATE))) {
+  if (!within(real, tree)) {
     throw new Error(
-      `${named} is under ${RUNTIME_STATE}/, which the runtime writes and refreshes from ` +
-        `remotes — ${steering}`,
+      `${named} is a link to ${real}, outside the bundle's ${SKILLS_DIR}/ tree — a prompt is ` +
+        "read as steering, so it comes from the bundle and nowhere a review would not see it",
     );
   }
 
   let raw: Buffer;
   try {
-    // The identity of what containment admitted, pinned here and compared against the
-    // descriptor that gets read — see {@link readBounded}.
+    // The identity of what the containment check admitted, pinned here and compared against
+    // the descriptor that gets read — see {@link readBounded}.
     raw = readBounded(real, statSync(real));
   } catch (error) {
     throw new Error(`${named}: ${errorText(error)}`);
@@ -222,13 +213,22 @@ export function readJobPrompt(job: PromptJob, agentDir: string): JobPrompt {
   const matter = FRONTMATTER.exec(text);
   if (!matter) {
     throw new Error(
-      `${named} has no frontmatter — a prompt file opens with \`---\`, a \`name\` and a ` +
+      `${named} has no frontmatter — a ${SKILL_FILE} opens with \`---\`, a \`name\` and a ` +
         "`description`, and a closing `---`, then the words the tick sends",
     );
   }
   const parsed = Frontmatter.safeParse(parseYaml(matter[1]!)); // data only — never evaluated
   if (!parsed.success) {
     throw new Error(`${named}: frontmatter needs a \`name\` and a \`description\``);
+  }
+  // The frontmatter stopped being decorative the moment the manifest addressed this by
+  // name: two spellings of one name is how a skill is found under one and announces itself
+  // as another, and whichever the chat face later reads would be a coin toss.
+  if (parsed.data.name !== name) {
+    throw new Error(
+      `${named}: its frontmatter says \`name: ${parsed.data.name}\`, and a skill is found ` +
+        "under the name it calls itself",
+    );
   }
   const body = text.slice(matter[0].length).trim();
   if (!body) throw new Error(`${named} is frontmatter and nothing else — there is no prompt`);

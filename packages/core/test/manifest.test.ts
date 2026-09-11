@@ -1060,14 +1060,27 @@ describe("a job whose body is a prompt", () => {
       .map(([key, value]) => `${key}: ${value}`)
       .join(", ")}}]\n`;
 
-  it("takes a one-liner inline and a page as a file, and never both", () => {
+  it("takes a one-liner inline and a page as a named skill, and never both", () => {
     expect(loadManifest(withJob()).jobs[0]!.prompt).toBe("Summarize the day.");
-    expect(loadManifest(withJob({ prompt: "{file: ./jobs/digest.md}" })).jobs[0]!.prompt).toEqual({
-      file: "./jobs/digest.md",
+    expect(loadManifest(withJob({ prompt: "{skill: daily-digest}" })).jobs[0]!.prompt).toEqual({
+      skill: "daily-digest",
     });
     expect(() =>
-      loadManifest(withJob({ prompt: "{file: ./digest.md, text: inline}" })),
+      loadManifest(withJob({ prompt: "{skill: daily-digest, text: inline}" })),
     ).toThrow(/unrecognized/i);
+  });
+
+  it("takes a name rather than a path, so there is nothing to traverse with", () => {
+    // The narrowing that removes a category rather than closing a door: a slug cannot be
+    // absolute, cannot climb out, and cannot name the runtime's own `workspace/`.
+    for (const bad of ["./jobs/digest.md", "../secrets/token", "/etc/motd", "Daily-Digest", "1st"]) {
+      expect(() => loadManifest(withJob({ prompt: `{skill: '${bad}'}` })), bad).toThrow(
+        /a skill name is lower-case letters/,
+      );
+    }
+    expect(() => loadManifest(withJob({ prompt: "{file: ./jobs/digest.md}" }))).toThrow(
+      /unrecognized/i,
+    );
   });
 
   it("needs exactly one body, because two bodies is two jobs", () => {

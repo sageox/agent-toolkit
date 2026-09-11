@@ -169,8 +169,19 @@ describe("sageox-agent validate", () => {
     "    description: One short post per day.\n" +
     "    trigger: {schedules: ['0 18 * * *'], timezone: America/Los_Angeles}\n" +
     "    killSwitch: {failDirection: closed}\n" +
-    "    prompt: {file: ./jobs/digest.md}\n" +
+    "    prompt: {skill: daily-digest}\n" +
     "    report: {surface: slack, channel: C01}\n";
+
+  /** `skills/<name>/SKILL.md` beside the manifest — the one layout a name resolves to. */
+  const writeSkill = (name = "daily-digest") => {
+    mkdirSync(join(dir, "skills", name), { recursive: true });
+    const path = join(dir, "skills", name, "SKILL.md");
+    writeFileSync(
+      path,
+      `---\nname: ${name}\ndescription: One short post per day.\n---\nSummarize the day.\n`,
+    );
+    return path;
+  };
 
   /**
    * Slack rather than the scaffold's console surface, and the channel the job answers in:
@@ -183,27 +194,19 @@ describe("sageox-agent validate", () => {
         "    appToken: TEST_SLACK_APP_TOKEN\n    channels: [{id: C01, reply: private}]\n",
     );
 
-  it("lists a prompt job with its file, its size, and its next fire time", async () => {
-    mkdirSync(join(dir, "jobs"));
-    writeFileSync(
-      join(dir, "jobs", "digest.md"),
-      "---\nname: daily-digest\ndescription: One short post per day.\n---\nSummarize the day.\n",
-    );
+  it("lists a prompt job with its skill, its size, and its next fire time", async () => {
+    const skill = writeSkill();
     const path = write("agent.yaml", withChannel(AGENT_YAML("demo")) + PROMPT_JOB);
 
     const { code, stdout } = await validate([path]);
 
     expect(code).toBe(0);
-    expect(stdout).toContain(`daily-digest: scheduled turn, prompt ${join(dir, "jobs", "digest.md")}`);
+    expect(stdout).toContain(`daily-digest: scheduled turn, prompt ${skill}`);
     expect(stdout).toMatch(/\(\d+ bytes\), next \d{4}-\d{2}-\d{2} 18:00:00 America\/Los_Angeles/);
   });
 
   it("fails on a report channel the gateway would refuse to start on", async () => {
-    mkdirSync(join(dir, "jobs"));
-    writeFileSync(
-      join(dir, "jobs", "digest.md"),
-      "---\nname: daily-digest\ndescription: One short post per day.\n---\nSummarize the day.\n",
-    );
+    writeSkill();
     const path = write(
       "agent.yaml",
       withChannel(AGENT_YAML("demo")) + PROMPT_JOB.replace("channel: C01", "channel: nowhere"),
@@ -218,11 +221,7 @@ describe("sageox-agent validate", () => {
   it("fails on a report surface that carries no top-level post at all", async () => {
     // The half a channel list cannot answer: console lists the channel and still has no way
     // to publish a new top-level message in it, which is how a scheduled turn answers.
-    mkdirSync(join(dir, "jobs"));
-    writeFileSync(
-      join(dir, "jobs", "digest.md"),
-      "---\nname: daily-digest\ndescription: One short post per day.\n---\nSummarize the day.\n",
-    );
+    writeSkill();
     const path = write(
       "agent.yaml",
       AGENT_YAML("demo").replace(
@@ -237,13 +236,13 @@ describe("sageox-agent validate", () => {
     expect(stdout).toContain("carries no top-level posts");
   });
 
-  it("fails on a prompt file the gateway would refuse to start on", async () => {
+  it("fails on a skill the gateway would refuse to start on", async () => {
     const path = write("agent.yaml", withChannel(AGENT_YAML("demo")) + PROMPT_JOB);
 
     const { code, stdout } = await validate([path]);
 
     expect(code).not.toBe(0);
-    expect(stdout).toContain("jobs/digest.md");
+    expect(stdout).toContain("skill daily-digest");
     expect(stdout).toContain("FAIL");
   });
 });

@@ -137,6 +137,16 @@ function promptJob(over: Record<string, string> = {}): PromptJob {
 
 describe("readJobPrompt", () => {
   let dir: string;
+  /** Writes `skills/<name>/SKILL.md`, the one layout the manifest can address. */
+  const writeSkill = async (name: string, body: string, frontmatterName = name) => {
+    await mkdir(join(dir, "skills", name), { recursive: true });
+    await writeFile(
+      join(dir, "skills", name, "SKILL.md"),
+      `---\nname: ${frontmatterName}\ndescription: One short post per day.\n---\n${body}\n`,
+    );
+    return join(dir, "skills", name, "SKILL.md");
+  };
+
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "prompt-"));
   });
@@ -149,133 +159,114 @@ describe("readJobPrompt", () => {
     expect(prompt).toEqual({ source: "inline", bytes: 18, body: "Summarize the day." });
   });
 
-  it("sends the body of a file and never its frontmatter", async () => {
-    await writeFile(
-      join(dir, "digest.md"),
-      "---\nname: daily-digest\ndescription: One short post per day.\n---\nRead the channel.\n",
-    );
-    const prompt = readJobPrompt(promptJob({ prompt: "{file: ./digest.md}" }), dir);
+  it("finds a named skill at its standard path and sends only the body", async () => {
+    const path = await writeSkill("daily-digest", "Read the channel.");
+    const prompt = readJobPrompt(promptJob({ prompt: "{skill: daily-digest}" }), dir);
     expect(prompt.body).toBe("Read the channel.");
-    expect(prompt.source).toBe(join(dir, "digest.md"));
+    expect(prompt.source).toBe(path);
     expect(prompt.bytes).toBeGreaterThan(prompt.body.length);
   });
 
-  it("refuses a file that is missing, oversized, or not UTF-8", async () => {
-    const job = promptJob({ prompt: "{file: ./digest.md}" });
+  it("refuses a skill whose frontmatter calls it something else", async () => {
+    // Two spellings of one name is how a skill is found under one and announces itself as
+    // another — and whichever the chat face later reads would be a coin toss.
+    await writeSkill("daily-digest", "Read the channel.", "nightly-digest");
+    expect(() => readJobPrompt(promptJob({ prompt: "{skill: daily-digest}" }), dir)).toThrow(
+      /frontmatter says `name: nightly-digest`/,
+    );
+  });
+
+  it("refuses a skill that is missing, oversized, or not UTF-8", async () => {
+    const job = promptJob({ prompt: "{skill: daily-digest}" });
     expect(() => readJobPrompt(job, dir)).toThrow(/ENOENT|no such file/i);
 
-    const head = "---\nname: d\ndescription: d\n---\n";
-    await writeFile(join(dir, "digest.md"), head + "x".repeat(JOB_ARTIFACT_LIMIT_BYTES));
+    const head = "---\nname: daily-digest\ndescription: d\n---\n";
+    await mkdir(join(dir, "skills", "daily-digest"), { recursive: true });
+    const path = join(dir, "skills", "daily-digest", "SKILL.md");
+    await writeFile(path, head + "x".repeat(JOB_ARTIFACT_LIMIT_BYTES));
     expect(() => readJobPrompt(job, dir)).toThrow(/over the \d+-byte limit/);
 
     // A lone 0x80 continuation byte. `readFileSync(…, "utf8")` would hand back U+FFFD and
     // the agent would post a prompt nobody wrote.
-    await writeFile(join(dir, "digest.md"), Buffer.concat([Buffer.from(head), Buffer.from([0x80])]));
+    await writeFile(path, Buffer.concat([Buffer.from(head), Buffer.from([0x80])]));
     expect(() => readJobPrompt(job, dir)).toThrow(/not valid UTF-8/);
   });
 
   it("refuses a path that is not a regular file, rather than blocking the load on it", async () => {
     // A FIFO would hang `readFileSync` forever, and the load path this runs on is `run`,
     // `doctor` and `validate` — a startup that never returns and never says why.
-    const job = promptJob({ prompt: "{file: ./digest.md}" });
-    execFileSync("mkfifo", [join(dir, "digest.md")]);
+    const job = promptJob({ prompt: "{skill: daily-digest}" });
+    await mkdir(join(dir, "skills", "daily-digest"), { recursive: true });
+    const path = join(dir, "skills", "daily-digest", "SKILL.md");
+    execFileSync("mkfifo", [path]);
     expect(() => readJobPrompt(job, dir)).toThrow(/not a regular file/);
 
-    await rm(join(dir, "digest.md"));
-    await mkdir(join(dir, "digest.md"));
+    await rm(path);
+    await mkdir(path);
     expect(() => readJobPrompt(job, dir)).toThrow(/not a regular file|EISDIR/);
   });
 
-  it("stops reading an oversized file instead of taking the whole of it in", async () => {
-    const job = promptJob({ prompt: "{file: ./digest.md}" });
-    const head = "---\nname: d\ndescription: d\n---\n";
-    // Well past the bound, so a read that allocated the file would be plain in the timing.
-    await writeFile(join(dir, "digest.md"), head + "x".repeat(JOB_ARTIFACT_LIMIT_BYTES * 40));
-    expect(() => readJobPrompt(job, dir)).toThrow(
-      new RegExp(`over the ${JOB_ARTIFACT_LIMIT_BYTES}-byte limit`),
-    );
-  });
+  it("refuses a skill linked out of the bundle, including into the runtime's own subtree", async () => {
+    // A name cannot traverse, so this is the only way left out — and it is the one a
+    // reviewed diff shows as a path and never as the content it will resolve to.
+    const job = promptJob({ prompt: "{skill: daily-digest}" });
+    await mkdir(join(dir, "skills", "daily-digest"), { recursive: true });
 
-  it("refuses a prompt that is not inside the agent directory", async () => {
-    // The words go in as steering, and the argument for that is that they came out of the
-    // reviewed bundle. A path that leaves it reads a file no diff ever showed.
-    await writeFile(join(dir, "outside.md"), "---\nname: d\ndescription: d\n---\nelsewhere\n");
-    const inner = join(dir, "bundle");
-    await mkdir(inner);
-    for (const file of ["../outside.md", join(dir, "outside.md")]) {
-      expect(() => readJobPrompt(promptJob({ prompt: `{file: '${file}'}` }), inner), file).toThrow(
-        /outside the agent directory/,
-      );
-    }
-    await writeFile(join(inner, "digest.md"), "---\nname: d\ndescription: d\n---\ninside\n");
-    expect(readJobPrompt(promptJob({ prompt: "{file: ./digest.md}" }), inner).body).toBe("inside");
-  });
+    await writeFile(join(dir, "outside.md"), "---\nname: daily-digest\ndescription: d\n---\nelsewhere\n");
+    await symlink(join(dir, "outside.md"), join(dir, "skills", "daily-digest", "SKILL.md"));
+    expect(() => readJobPrompt(job, dir)).toThrow(/outside the bundle's skills\/ tree/);
 
-  it("refuses a prompt out of the repository checkouts, which are not the bundle", async () => {
-    // `workspace/` holds clones refreshed from their remotes on every start, so a prompt
-    // read from one is words whoever can merge to that repository chose. The gateway
-    // already refuses to make a checkout the brain's cwd for the same reason.
+    // `workspace/` holds clones refreshed from their remotes, so a link into one is words
+    // whoever can merge to that repository chose. Out by construction now: it is not under
+    // `skills/`, so no carve-out per subtree is needed to exclude it.
+    await rm(join(dir, "skills", "daily-digest", "SKILL.md"));
     await mkdir(join(dir, "workspace", "repos", "acme"), { recursive: true });
     await writeFile(
-      join(dir, "workspace", "repos", "acme", "digest.md"),
-      "---\nname: d\ndescription: d\n---\nfrom a clone\n",
+      join(dir, "workspace", "repos", "acme", "SKILL.md"),
+      "---\nname: daily-digest\ndescription: d\n---\nfrom a clone\n",
     );
-    expect(() =>
-      readJobPrompt(promptJob({ prompt: "{file: ./workspace/repos/acme/digest.md}" }), dir),
-    ).toThrow(/under workspace\/, which the runtime writes/);
-
-    // And a symlink into it, which the path check alone would admit.
-    await writeFile(join(dir, "ok.md"), "---\nname: d\ndescription: d\n---\nbundled\n");
-    await symlink(join(dir, "workspace", "repos", "acme", "digest.md"), join(dir, "linked.md"));
-    expect(() => readJobPrompt(promptJob({ prompt: "{file: ./linked.md}" }), dir)).toThrow(
-      /under workspace\//,
+    await symlink(
+      join(dir, "workspace", "repos", "acme", "SKILL.md"),
+      join(dir, "skills", "daily-digest", "SKILL.md"),
     );
-    expect(readJobPrompt(promptJob({ prompt: "{file: ./ok.md}" }), dir).body).toBe("bundled");
+    expect(() => readJobPrompt(job, dir)).toThrow(/outside the bundle's skills\/ tree/);
   });
 
-  it("refuses a symlink out of the bundle, which a reviewed diff never shows the content of", async () => {
-    // The case a path check cannot see. `jobs/digest.md -> /mnt/secrets/TOKEN` reviews as
-    // one short line, its content is never in the diff, and the content can change after
-    // the review that approved it — and it would reach the brain as trusted words.
-    const inner = join(dir, "bundle");
-    await mkdir(inner);
-    await writeFile(join(dir, "outside.md"), "---\nname: d\ndescription: d\n---\nelsewhere\n");
-    await symlink(join(dir, "outside.md"), join(inner, "digest.md"));
-
-    expect(() => readJobPrompt(promptJob({ prompt: "{file: ./digest.md}" }), inner)).toThrow(
-      /is a link to .*outside\.md, which is outside the agent directory/,
+  it("follows a link that stays inside the tree, and an agent directory that is itself one", async () => {
+    // Real-path on both sides, so a bundle reached through a symlinked home — which is how
+    // a mount usually arrives — is not mistaken for an escape.
+    await writeSkill("shared-digest", "inside");
+    await mkdir(join(dir, "skills", "daily-digest"), { recursive: true });
+    await symlink(
+      join(dir, "skills", "shared-digest", "SKILL.md"),
+      join(dir, "skills", "daily-digest", "SKILL.md"),
     );
-  });
-
-  it("follows a link that stays inside the bundle, and an agent directory that is itself one", async () => {
-    // The containment is real-path on both sides, so a bundle reached through a symlinked
-    // home — which is how a mount usually arrives — is not mistaken for an escape.
-    const inner = join(dir, "bundle");
-    await mkdir(join(inner, "prompts"), { recursive: true });
-    await writeFile(
-      join(inner, "prompts", "shared.md"),
-      "---\nname: d\ndescription: d\n---\ninside\n",
-    );
-    await symlink(join(inner, "prompts", "shared.md"), join(inner, "digest.md"));
     const linkedHome = join(dir, "home");
-    await symlink(inner, linkedHome);
+    await symlink(dir, linkedHome);
 
-    for (const home of [inner, linkedHome]) {
-      expect(readJobPrompt(promptJob({ prompt: "{file: ./digest.md}" }), home).body, home).toBe(
+    for (const home of [dir, linkedHome]) {
+      // The frontmatter still has to agree with the name it was found under.
+      expect(() => readJobPrompt(promptJob({ prompt: "{skill: daily-digest}" }), home), home).toThrow(
+        /frontmatter says `name: shared-digest`/,
+      );
+      expect(readJobPrompt(promptJob({ prompt: "{skill: shared-digest}" }), home).body, home).toBe(
         "inside",
       );
     }
   });
 
   it("refuses a file that is not shaped like a skill", async () => {
-    const job = promptJob({ prompt: "{file: ./digest.md}" });
-    await writeFile(join(dir, "digest.md"), "Read the channel.\n");
+    const job = promptJob({ prompt: "{skill: daily-digest}" });
+    await mkdir(join(dir, "skills", "daily-digest"), { recursive: true });
+    const path = join(dir, "skills", "daily-digest", "SKILL.md");
+
+    await writeFile(path, "Read the channel.\n");
     expect(() => readJobPrompt(job, dir)).toThrow(/no frontmatter/);
 
-    await writeFile(join(dir, "digest.md"), "---\nname: daily-digest\n---\nRead the channel.\n");
+    await writeFile(path, "---\nname: daily-digest\n---\nRead the channel.\n");
     expect(() => readJobPrompt(job, dir)).toThrow(/needs a `name` and a `description`/);
 
-    await writeFile(join(dir, "digest.md"), "---\nname: d\ndescription: d\n---\n");
+    await writeFile(path, "---\nname: daily-digest\ndescription: d\n---\n");
     expect(() => readJobPrompt(job, dir)).toThrow(/there is no prompt/);
   });
 });

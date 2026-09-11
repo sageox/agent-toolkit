@@ -422,11 +422,12 @@ jobs:
     description: Summarize the last 24 hours of the status channel and post it on Slack.
     trigger: { schedules: ["0 18 * * *"], timezone: America/Los_Angeles }
     killSwitch: { key: mem/daily-digest/enabled, failDirection: closed }
-    prompt: { file: ./jobs/daily-digest.md }   # or an inline string, for a one-liner
+    prompt: { skill: daily-digest }           # or an inline string, for a one-liner
     report: { surface: slack, channel: "C0123456789" }
 ```
 
-The prompt file is shaped like a skill — frontmatter, then the body the tick sends:
+The words are **a skill**, at the layout every agent runtime already uses for a page of
+instructions an agent reads and follows — `skills/<name>/SKILL.md` in the bundle:
 
 ```markdown
 ---
@@ -439,32 +440,31 @@ carry. Name agents with nothing as quiet. If `more` was true, say the window was
 than one read covers. Post nothing else.
 ```
 
-The shape is fixed now because nothing in the runtime reads those two fields yet. When
-skills arrive, the same file can be offered to the chat face — so *run the digest now*,
-asked by a person, becomes this prompt invoked on request, with no second declaration and
-no edit to the file.
+**Named, not pointed at.** A name is what a person says and what a tool argument carries,
+so the day a skill can be invoked from the chat face, *run the digest now* resolves the
+same name through the same lookup — no second declaration, no file moved. A path would not
+be an invocation handle. `name` in the frontmatter has to match the directory the skill was
+found under, because two spellings of one name is how a skill is found under one and
+announces itself as another.
 
-The path resolves against the agent directory, as `persona` does, and is **refused at load
-if it lands outside it** — along with a file that is missing, is not UTF-8, or is larger
-than a verdict artifact may be. The containment is what makes the rest of this section
-true: these words go to the brain as steering rather than as fenced data, and the reason
-they may is that they came out of the same reviewed bundle the persona did. A prompt read
-off a mounted path appears in no bundle diff.
+The root is `skills/` in the bundle rather than a harness's own discovery directory. A
+harness scans wherever it scans; this is the toolkit's contract and it outlives any one of
+them, which is [the naming rule](naming.md) applied to a layout instead of an identifier.
 
-Both the declared path and its real path are checked, because they fail differently. A
-symlink committed into the bundle is the one a path check cannot see, and it is the worse
-of the two: the diff shows a path and never the content, the content can change after the
-review that approved it, and what it resolves to reaches the brain as trusted words inside
-the process holding this agent's credentials. Writing the prompt file directly is not the
-same act — that puts the words themselves in front of a reviewer. A link that stays inside
-the bundle is fine, and so is a bundle reached through a symlinked home, which is how a
-mount usually arrives.
+A name is also the narrower thing to admit. A slug cannot be absolute, cannot climb out of
+the bundle, and cannot reach `workspace/` — where repository checkouts sit, refreshed from
+their remotes on every start, and whose contents are whoever can merge to them. None of
+those are doors this has to close one at a time; they are not expressible.
 
-`workspace/` is refused too, and it is inside the agent directory: the runtime owns that
-subtree, repository checkouts land there, and they are refreshed from their remotes on
-every start. A prompt read out of one is words whoever can merge to that repository chose.
-The gateway already refuses to make a checkout the brain's working directory for the same
-reason; this is that rule at the other door.
+What is still worth checking is what the filesystem says the file really is. A symlink at
+any step of `skills/<name>/SKILL.md` can point out of the bundle, and that is the case a
+reviewed diff shows as a path and never as the content it will resolve to — content that
+can change after the review that approved it, and that reaches the brain as trusted words
+inside the process holding this agent's credentials. So the real path has to land inside
+the bundle's `skills/` tree, and a skill that is missing, not UTF-8, not a regular file, or
+larger than a verdict artifact may be is refused at load. A link that stays inside the tree
+is fine, and so is a bundle reached through a symlinked home, which is how a mount usually
+arrives.
 
 What the runtime cannot see is a **mount** placed inside the bundle — a mount point is an
 ordinary directory to `realpath` — so the target that can create one owes the refusal. The
@@ -519,8 +519,8 @@ shorten the turn: `wallClockMs` below `limits.turnTimeoutMs` wins, and above it 
 nothing. A job declaring both bodies, or neither, is refused.
 
 `sageox-agent doctor` and `sageox-agent validate` list every prompt job with where its
-words came from, their size, and its next fire time in the declared zone — a resolved path
-for a file-backed prompt, `inline` for a one-liner. A prompt that silently changed size is
+words came from, their size, and its next fire time in the declared zone — the resolved
+`SKILL.md` for a named skill, `inline` for a one-liner. A prompt that silently changed size is
 the kind of thing nobody notices until the 3am post reads wrong.
 `sageox-agent job run` refuses a prompt job: there is no process to spawn, and the gateway
 holds the clock. `sageox-agent job park <slug>` stops it without a deploy, as it stops any

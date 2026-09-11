@@ -860,26 +860,52 @@ export const JobSchema = z
      * a tick enters the turn path as a synthetic inbound event and comes out as a post in
      * the channel `report` names.
      *
-     * A one-liner may be written inline. Anything longer is a file, root-relative to the
-     * agent directory exactly as `persona` is, because a page of prompt inside a YAML block
-     * scalar is a page nobody reviews. The file is read at load and refused there if it is
-     * missing, is not UTF-8, is larger than a verdict artifact may be, or resolves outside
-     * the agent directory — a schedule that discovers its own prompt is unreadable at 18:00
-     * has nothing to say and nowhere to say it, and one reading a file from outside the
-     * bundle is not the reviewed steering the tier below claims it is.
+     * A one-liner may be written inline. Anything longer **is a skill**, named here and
+     * found at `skills/<name>/SKILL.md` in the bundle — a page of prompt inside a YAML
+     * block scalar is a page nobody reviews, and a skill is what the rest of the world
+     * already calls a page of instructions an agent reads and follows.
      *
-     * It is shaped like a skill — `name` and `description` in frontmatter, then the body
-     * the tick sends — and that shape is the whole of what this fixes now. The runtime has
-     * no skills notion, and v1 depends on none arriving; when one does, the same file can
-     * be offered to the chat face so "run the digest now" is this prompt invoked on
-     * request, without a second declaration.
+     * Named rather than pointed at, and that is the whole of the difference. A name is what
+     * a person says and what a tool argument carries, so the day a skill can be invoked
+     * from the chat face, "run the digest now" resolves the same name through the same
+     * lookup with no second declaration and no file moved. A path is not an invocation
+     * handle. It is also the narrower thing to admit: a slug cannot be absolute, cannot
+     * traverse, and cannot reach the runtime's own `workspace/` — where repository
+     * checkouts live, refreshed from their remotes — so those are not doors this has to
+     * close one at a time.
+     *
+     * The file is read at load, and refused there if it is missing, is not UTF-8, is larger
+     * than a verdict artifact may be, or really lives outside the bundle's `skills/` tree.
+     * A schedule that discovers its own prompt is unreadable at 18:00 has nothing to say
+     * and nowhere to say it.
      *
      * Provenance is the property that must survive: the words come from the reviewed
      * bundle and nowhere else. No channel message can start one of these turns, edit its
      * prompt, or claim to be one.
      */
     prompt: z
-      .union([z.string().trim().min(1), z.object({ file: z.string().min(1) }).strict()])
+      .union([
+        z.string().trim().min(1),
+        z
+          .object({
+            /**
+             * The directory under `skills/` holding this skill's `SKILL.md`, and the name
+             * its frontmatter has to agree with — two spellings of one thing are how a
+             * skill ends up found under one name and announcing itself as another.
+             *
+             * A job slug's grammar, because it names the same kind of thing and a second
+             * spelling of "what may name a thing here" is one more rule to remember.
+             */
+            skill: z
+              .string()
+              .regex(
+                /^[a-z][a-z0-9-]*$/,
+                "a skill name is lower-case letters, digits, and hyphens, starting with a " +
+                  "letter — it names the directory under `skills/`",
+              ),
+          })
+          .strict(),
+      ])
       .optional(),
     /**
      * Values a caller may hand one run of this job, by name. See {@link JobParameterSchema}.

@@ -19,15 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `archetype`, `trigger.schedules` and `trigger.timezone`, `killSwitch`, `suspend`,
   `report`, `announce`, the work events, `doctor` and `validate` — which is why this is one
   list and not a second block. `prompt` takes an inline string for a one-liner or
-  `{ file: ./path.md }` for anything longer, resolved against the agent directory exactly as
-  `persona` is, read at load and refused there if it is missing, over 64 KiB, not UTF-8, or
-  lands outside that directory by path or through a symlink, or under `workspace/`, where
-  the runtime keeps repository checkouts refreshed from their remotes — the words reach the
-  brain as steering rather than as fenced data, and the reason they may is that they came
-  out of the reviewed bundle.
-  The file is shaped like a skill (frontmatter `name` and `description`, then the body the
-  tick sends), so the day a skill can be offered to the chat face, "run the digest now"
-  asked by a person is this prompt invoked on request with no second declaration.
+  `{ skill: <name> }` for anything longer — **a skill**, at `skills/<name>/SKILL.md` in the
+  bundle, which is the layout every agent runtime already uses for a page of instructions an
+  agent reads and follows. Named rather than pointed at, because a name is what a person
+  says and what a tool argument carries: the day a skill can be invoked from the chat face,
+  "run the digest now" resolves the same name through the same lookup, with no second
+  declaration and no file moved. The frontmatter `name` must match the directory. The root
+  is the bundle's own `skills/` rather than a harness's discovery directory, which is
+  `docs/naming.md` applied to a layout. Read at load and refused there if the skill is
+  missing, over 64 KiB, not UTF-8, not a regular file, or really lands outside the bundle's
+  `skills/` tree — the words reach the brain as steering rather than as fenced data, and the
+  reason they may is that they came out of the reviewed bundle. A name cannot be absolute,
+  cannot traverse, and cannot reach the runtime's own `workspace/`, so those are not doors
+  this closes one at a time.
 
   The tick admits in the job host's order — kill switch, `suspend`, then the gateway's own
   turn caps — and a refused tick is recorded and posts nothing. It then enters the turn path

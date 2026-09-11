@@ -105,9 +105,9 @@ scheduled run is lost.
 {{/*
 Refuses a shared claim mounted inside an agent's own bundle directory.
 
-A `prompt` job's words are read from `/agents/<name>` and handed to the brain as steering
-rather than as fenced data, and the whole argument for that is that they came out of the
-reviewed bundle. A claim mounted under that path breaks it without tripping any check the
+A `prompt` job's words are read from `skills/<name>/SKILL.md` under `/agents/<name>` and
+handed to the brain as steering rather than as fenced data, and the whole argument for that
+is that they came out of the reviewed bundle. A claim mounted under that path breaks it without tripping any check the
 runtime can make: the file is genuinely inside the agent directory, and its content is
 another workload's to change after the bundle was reviewed.
 

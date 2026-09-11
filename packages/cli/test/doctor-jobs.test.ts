@@ -147,27 +147,33 @@ describe("doctor and the job tool", () => {
         `    report: ${report}\n`,
     );
 
-  it("names a scheduled turn's prompt, its size, and when it next fires", async () => {
-    mkdirSync(join(agentDir, "jobs"));
+  /** `skills/<name>/SKILL.md` — the one layout a named skill resolves to. */
+  const writeSkill = (name: string) => {
+    mkdirSync(join(agentDir, "skills", name), { recursive: true });
     writeFileSync(
-      join(agentDir, "jobs", "digest.md"),
-      "---\nname: daily-digest\ndescription: One short post per day.\n---\nSummarize the day.\n",
+      join(agentDir, "skills", name, "SKILL.md"),
+      `---\nname: ${name}\ndescription: One short post per day.\n---\nSummarize the day.\n`,
     );
-    declarePrompt("{file: ./jobs/digest.md}");
+    return join(agentDir, "skills", name, "SKILL.md");
+  };
+
+  it("names a scheduled turn's skill, its size, and when it next fires", async () => {
+    const path = writeSkill("daily-digest");
+    declarePrompt("{skill: daily-digest}");
 
     const report = await doctor(home, TOKENS);
 
     expect(report).toContain('job "daily-digest" is a scheduled turn');
-    expect(report).toContain(join(agentDir, "jobs", "digest.md"));
+    expect(report).toContain(path);
     expect(report).toMatch(/\(\d+ bytes\), next \d{4}-\d{2}-\d{2} 18:00:00 America\/Los_Angeles/);
   });
 
-  it("fails on a prompt file that is not there, rather than at 18:00", async () => {
-    declarePrompt("{file: ./jobs/digest.md}");
+  it("fails on a skill that is not there, rather than at 18:00", async () => {
+    declarePrompt("{skill: daily-digest}");
 
     // `doctorReport` hands back stdout either way, so the path alone would pass on a run
     // that merely mentioned the file. The verdict beside it is what says `run` would refuse.
-    expect(await doctor(home, TOKENS)).toMatch(/FAIL\s+job "daily-digest" prompt .*jobs\/digest\.md/);
+    expect(await doctor(home, TOKENS)).toMatch(/FAIL\s+job "daily-digest" skill daily-digest/);
   });
 
   it("fails when the turn would have nowhere to post", async () => {

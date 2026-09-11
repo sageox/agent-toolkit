@@ -363,9 +363,9 @@ and it is the one kind that renders none while declaring a schedule. Its body is
 turn, held on a clock inside the gateway process, so there is no command for a Pod to run.
 Mirror it as `{slug, suspend, trigger, prompt: true}` and state no `budget`; the chart
 refuses one, because nothing here would bound it. It also refuses a `sharedVolumes` claim
-mounted inside `/agents/<name>`: a prompt job's words are read from that directory and go to
-the brain as steering rather than as fenced data, so the bundle has to be the only thing
-that can supply them. The runtime cannot see this one — a mount point is an ordinary
+mounted inside `/agents/<name>`: a prompt job's words are read from `skills/<name>/SKILL.md`
+under that directory and go to the brain as steering rather than as fenced data, so the
+bundle has to be the only thing that can supply them. The runtime cannot see this one — a mount point is an ordinary
 directory to `realpath` — which is why the refusal belongs where the mount is made. `sageox-agent doctor` prints each one's
 next fire time, and `sageox-agent job park <slug>` stops it without a deploy.
 
