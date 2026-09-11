@@ -1,9 +1,9 @@
 import type { AgentManifest } from "./manifest.ts";
 import type { SurfaceAdapter } from "./adapter.ts";
 import type { Brain, BrainContext, GuardFeedback } from "./brain.ts";
-import type { InboundEvent } from "./events.ts";
+import type { GuardedMessage, InboundEvent } from "./events.ts";
 import type { ProbeResult } from "./health.ts";
-import { evaluateEgress } from "./guard.ts";
+import { evaluateEgress, type GuardVerdict } from "./guard.ts";
 import { SurfaceEgress, type LiveTurnHandle } from "./surface-egress.ts";
 import { TurnPolicy } from "./policy.ts";
 import { ChannelQueue } from "./queue.ts";
@@ -38,6 +38,37 @@ export interface GatewayOpts {
    * has not.
    */
   capabilities?: () => readonly ProbeResult[];
+}
+
+/**
+ * How one step of a turn reaches its channel. A message the brain woke on is answered
+ * where it was asked ({@link SurfaceEgress.reply}); a clock tick has no message to answer,
+ * so it posts at top level ({@link SurfaceEgress.postReply}). Both clear the same guard,
+ * and both hand a refusal back rather than throwing, because the turn loop replays one to
+ * the brain as the result of its own yield.
+ */
+type Send = (msg: GuardedMessage) => Promise<GuardVerdict>;
+
+/**
+ * What a turn did with its channel, counted as it goes into an object the caller holds.
+ *
+ * Held rather than only returned, because a turn that timed out still posted whatever it
+ * posted before it hung, and a promise that rejected cannot say so. A caller that has to
+ * report on the turn needs both halves.
+ */
+export interface TurnTally {
+  /** Replies the brain asked to send. */
+  asked: number;
+  /** Replies that cleared the guard and reached the surface. */
+  sent: number;
+}
+
+/** {@link Gateway.tick}'s answer: whether the turn ran at all, and what it did. */
+export interface TickOutcome extends TurnTally {
+  /** Why no turn ran, in {@link Gateway}'s own skip vocabulary. Absent when one did. */
+  skipped?: string;
+  /** The turn threw, or outlived its timeout. The tally still says what had landed. */
+  error?: unknown;
 }
 
 /**
@@ -159,7 +190,7 @@ export class Gateway {
       const turn = this.egress.answers(e);
       const stopSignalling = this.signalWorking(e, adapter, turn);
       try {
-        const sent = await this.runTurn(e, adapter);
+        const { sent } = await this.runTurn(e, (msg) => this.egress.reply(adapter, e, msg));
         console.info(
           `turn_done surface=${e.surface} channel=${e.channel.id} event=${e.id.nativeId} ` +
             `sent=${sent} ms=${Date.now() - started}`,
@@ -175,6 +206,68 @@ export class Gateway {
         stopSignalling();
         turn.close();
       }
+    });
+  }
+
+  /**
+   * A clock tick, run as an ordinary turn and answered with what it did.
+   *
+   * The event is synthetic: nothing in a channel produced it, and its text came from the
+   * reviewed bundle. That is the whole of what makes this safe to admit without a mention
+   * — see `scheduled-turn.ts`, which is the only caller.
+   *
+   * **One check is skipped and only one**: the author gate, because the author is this
+   * process's own clock and `respondTo` has nothing to weigh about it. The kill switch and
+   * the policy caps are applied here in the order `skipReason` applies them, and the turn
+   * is queued on the destination channel, so a tick waits behind a live turn there rather
+   * than interleaving posts with it.
+   *
+   * The answer is a top-level post into `to`, which the guard admits exactly as it admits
+   * the brain's own `post_message`: a channel the agent has no consent to speak in is one
+   * this cannot reach either.
+   */
+  async tick(
+    event: InboundEvent,
+    to: { surface: string; channel: string },
+    timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
+  ): Promise<TickOutcome> {
+    const tally: TurnTally = { asked: 0, sent: 0 };
+    if (!this.serving) return { ...tally, skipped: "kill_switch" };
+    const admission = this.policy.admit(event);
+    if (!admission.ok) return { ...tally, skipped: `limit:${admission.rule}` };
+
+    return new Promise<TickOutcome>((resolve) => {
+      this.queue.submit(`${event.surface}:${event.channel.id}`, async () => {
+        const started = Date.now();
+        console.info(
+          `tick_start surface=${event.surface} channel=${event.channel.id} author=${event.author.id}`,
+        );
+        try {
+          const scheduled = true; // the prompt is the bundle's, so the turn is not fenced
+          await this.runTurn(
+            event,
+            (msg) => this.egress.postReply(to.surface, to.channel, msg),
+            tally,
+            timeoutMs,
+            scheduled,
+          );
+          console.info(
+            `tick_done surface=${event.surface} channel=${event.channel.id} ` +
+              `author=${event.author.id} sent=${tally.sent} ms=${Date.now() - started}`,
+          );
+          resolve(tally);
+        } catch (error) {
+          // Never rethrown into the queue: a failed tick is this caller's to report, and
+          // `ChannelQueue.onError` would put it in the log as a chat turn that failed.
+          console.warn(
+            `tick_failed surface=${event.surface} channel=${event.channel.id} ` +
+              `author=${event.author.id} ms=${Date.now() - started}`,
+          );
+          resolve({ ...tally, error });
+        }
+      // Shed rather than run: the queue is full of live chat in this channel, which is the
+      // `channelQueueLimit` cap doing its job. The tick is owed a record either way.
+      }, () => resolve({ ...tally, skipped: "limit:channelQueueLimit" }));
     });
   }
 
@@ -278,20 +371,27 @@ export class Gateway {
     );
   }
 
-  private async runTurn(e: InboundEvent, adapter: SurfaceAdapter): Promise<number> {
+  private async runTurn(
+    e: InboundEvent,
+    send: Send,
+    tally: TurnTally = { asked: 0, sent: 0 },
+    timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
+    scheduled = false,
+  ): Promise<TurnTally> {
     const turn = this.opts.brain.runTurn(e, {
       agentName: this.opts.manifest.name,
       persona: this.opts.persona,
       memory: this.opts.memory,
       postMessage: this.opts.postMessage,
       react: this.opts.react,
+      scheduled,
       capabilities: this.opts.capabilities?.(),
     });
     try {
       return await withTimeout(
-        this.drive(turn, e, adapter),
-        this.opts.manifest.limits.turnTimeoutMs,
-        `turn timed out after ${this.opts.manifest.limits.turnTimeoutMs}ms`,
+        this.drive(turn, e, send, tally),
+        timeoutMs,
+        `turn timed out after ${timeoutMs}ms`,
       );
     } finally {
       // An abandoned generator never runs its own `finally`, so the brain would never
@@ -314,9 +414,9 @@ export class Gateway {
   private async drive(
     turn: ReturnType<Brain["runTurn"]>,
     e: InboundEvent,
-    adapter: SurfaceAdapter,
-  ): Promise<number> {
-    let sent = 0;
+    send: Send,
+    tally: TurnTally,
+  ): Promise<TurnTally> {
     // The guard is a feedback loop: a refused step is handed back to the brain as the
     // result of its own yield, so it can adapt without the turn ending. The loop is
     // bounded by the brain — the gateway never retries on its behalf.
@@ -328,8 +428,9 @@ export class Gateway {
 
       const step = next.value;
       if (step.type !== "reply") continue;
+      tally.asked++;
 
-      const verdict = await this.egress.reply(adapter, e, step.msg);
+      const verdict = await send(step.msg);
       if (!verdict.ok) {
         // The reason too, not just the rule: `leakPatterns` refuses over a list of pattern
         // names an operator has to see to act on, and a bare `rule=leakPatterns` says a
@@ -343,9 +444,9 @@ export class Gateway {
         feedback = { blocked: true, rule: verdict.rule, reason: verdict.reason };
         continue;
       }
-      sent++;
+      tally.sent++;
     }
-    return sent;
+    return tally;
   }
 }
 

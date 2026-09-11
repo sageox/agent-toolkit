@@ -63,11 +63,11 @@ const TRIAGE =
 const withBody = (job: JobConfig, script: string): JobConfig => ({
   ...job,
   run: {
-    ...job.run,
+    ...job.run!,
     command: process.execPath,
     args: ["-e", `const fs=require("fs");${script}`, "--", "--declared"],
     // `MARKER` is ambient on the host's base env, so the body has to name it to see it.
-    passthrough: [...job.run.passthrough, "MARKER"],
+    passthrough: [...job.run!.passthrough, "MARKER"],
   },
 });
 

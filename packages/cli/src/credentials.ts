@@ -352,7 +352,8 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
   // this error otherwise offers — mount the file here, add it to `.env` — are both the
   // arrangement the split was for.
   manifest.jobs.forEach((job, index) => {
-    if (job.worker) return;
+    // A prompt body declares no credential at all — its turn runs on the gateway's own.
+    if (job.worker || !job.run) return;
     for (const [envVar, ref] of Object.entries(job.run.secrets)) {
       declared.push({
         ...spawnedSecretSpec(ref, envVar, "the job body"),

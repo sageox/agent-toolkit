@@ -122,4 +122,54 @@ describe("doctor and the job tool", () => {
     expect(report).not.toContain("job tool");
     expect(report).not.toContain("mcp__jobs__job_run");
   });
+  /**
+   * A job whose body is a prompt: the gateway holds its clock, so `run` reads the prompt at
+   * startup and refuses to launch on a file it cannot read. `doctor` has to find that first
+   * — the same rule that puts every declared `secretRef` in this report.
+   */
+  const declarePrompt = (body: string, report = "{surface: console, channel: local}") =>
+    writeFileSync(
+      join(agentDir, "agent.yaml"),
+      AGENT_YAML("demo").replace(
+        "surfaces:\n  - kind: console\n",
+        "surfaces:\n  - kind: console\n    channels: [{id: local, reply: private}]\n",
+      ) +
+        "\nbrains:\n  - preset: local\nkillSwitchParkBy: []\n" +
+        "jobs:\n  - slug: daily-digest\n    archetype: watch\n" +
+        "    description: One short post per day.\n" +
+        "    trigger: {schedules: ['0 18 * * *'], timezone: America/Los_Angeles}\n" +
+        "    killSwitch: {failDirection: closed}\n" +
+        `    prompt: ${body}\n` +
+        `    report: ${report}\n`,
+    );
+
+  it("names a scheduled turn's prompt, its size, and when it next fires", async () => {
+    mkdirSync(join(agentDir, "jobs"));
+    writeFileSync(
+      join(agentDir, "jobs", "digest.md"),
+      "---\nname: daily-digest\ndescription: One short post per day.\n---\nSummarize the day.\n",
+    );
+    declarePrompt("{file: ./jobs/digest.md}");
+
+    const report = await doctor(home);
+
+    expect(report).toContain('job "daily-digest" is a scheduled turn');
+    expect(report).toContain(join(agentDir, "jobs", "digest.md"));
+    expect(report).toMatch(/\(\d+ bytes\), next \d{4}-\d{2}-\d{2} 18:00:00 America\/Los_Angeles/);
+  });
+
+  it("fails on a prompt file that is not there, rather than at 18:00", async () => {
+    declarePrompt("{file: ./jobs/digest.md}");
+
+    expect(await doctor(home)).toContain("jobs/digest.md");
+  });
+
+  it("fails when the turn would have nowhere to post", async () => {
+    declarePrompt("'Summarize the day.'", "{surface: console, channel: nowhere}");
+
+    const report = await doctor(home);
+
+    expect(report).toContain("FAIL");
+    expect(report).toContain("does not list as a channel");
+  });
 });

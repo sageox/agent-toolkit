@@ -155,4 +155,53 @@ describe("sageox-agent validate", () => {
     expect(existsSync(home)).toBe(false);
     expect(readdirSync(dir)).toEqual(before);
   });
+  /**
+   * A prompt job, whose words live in a file beside the manifest. `run` reads that file at
+   * startup and refuses to launch on one it cannot, so a CI step that passed on a broken
+   * one would be green about a bundle that will not boot.
+   */
+  const PROMPT_JOB =
+    "brains:\n  - preset: local\n" +
+    "# A channel on the surface the job reports to, which is where the turn answers.\n" +
+    "killSwitchParkBy: []\n" +
+    "jobs:\n" +
+    "  - slug: daily-digest\n" +
+    "    archetype: watch\n" +
+    "    description: One short post per day.\n" +
+    "    trigger: {schedules: ['0 18 * * *'], timezone: America/Los_Angeles}\n" +
+    "    killSwitch: {failDirection: closed}\n" +
+    "    prompt: {file: ./jobs/digest.md}\n" +
+    "    report: {surface: console, channel: local}\n";
+
+  /** The console surface gains the channel the job above answers in. */
+  const withChannel = (yaml: string) =>
+    yaml.replace(
+      "surfaces:\n  - kind: console\n",
+      "surfaces:\n  - kind: console\n    channels: [{id: local, reply: private}]\n",
+    );
+
+  it("lists a prompt job with its file, its size, and its next fire time", async () => {
+    mkdirSync(join(dir, "jobs"));
+    writeFileSync(
+      join(dir, "jobs", "digest.md"),
+      "---\nname: daily-digest\ndescription: One short post per day.\n---\nSummarize the day.\n",
+    );
+    const path = write("agent.yaml", withChannel(AGENT_YAML("demo")) + PROMPT_JOB);
+
+    const { code, stdout } = await validate([path]);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain(`daily-digest: scheduled turn, prompt ${join(dir, "jobs", "digest.md")}`);
+    expect(stdout).toMatch(/\(\d+ bytes\), next \d{4}-\d{2}-\d{2} 18:00:00 America\/Los_Angeles/);
+  });
+
+  it("fails on a prompt file the gateway would refuse to start on", async () => {
+    const path = write("agent.yaml", withChannel(AGENT_YAML("demo")) + PROMPT_JOB);
+
+    const { code, stdout } = await validate([path]);
+
+    expect(code).not.toBe(0);
+    expect(stdout).toContain("jobs/digest.md");
+    expect(stdout).toContain("FAIL");
+  });
 });

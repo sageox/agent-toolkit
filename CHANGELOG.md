@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A job's body may be a prompt, so an agent can do light scheduled work only its brain
+  can do.** Work started in exactly two ways before this: a turn, when a message mentioned
+  the agent, and a job, which spawns a process with no brain, no tool broker, and no second
+  surface. So nothing could read channel A on surface X, summarize it, and post to channel B
+  on surface Y — and nothing could happen at 18:00 unless somebody posted a mention at
+  18:00. Every workaround put the clock outside the agent, where its kill switch, `suspend`,
+  `doctor` and work events cannot see it. A `jobs[]` entry now declares exactly one body:
+  `run` for a process in a pod of its own, or the new `prompt` for a brain turn in the
+  gateway process. Everything around it is the envelope that was already there — `slug`,
+  `archetype`, `trigger.schedules` and `trigger.timezone`, `killSwitch`, `suspend`,
+  `report`, `announce`, the work events, `doctor` and `validate` — which is why this is one
+  list and not a second block. `prompt` takes an inline string for a one-liner or
+  `{ file: ./path.md }` for anything longer, resolved against the agent directory exactly as
+  `persona` is, read at load and refused there if it is missing, over 64 KiB, or not UTF-8.
+  The file is shaped like a skill (frontmatter `name` and `description`, then the body the
+  tick sends), so the day a skill can be offered to the chat face, "run the digest now"
+  asked by a person is this prompt invoked on request with no second declaration.
+
+  The tick admits in the job host's order — kill switch, `suspend`, then the gateway's own
+  turn caps — and a refused tick is recorded and posts nothing. It then enters the turn path
+  as a synthetic inbound event: the author is `schedule:<slug>`, an id no surface issues, so
+  the author gate is skipped because there is nobody to weigh, and nothing else about the
+  turn changes. The reply is a top-level post in `report.channel` through the same guarded
+  chokepoint the brain's own `post_message` clears; an empty reply posts nothing. The prompt
+  comes from the reviewed bundle and nowhere else — no channel text can start one of these
+  turns, edit its prompt, or claim to be one. Ticks that fall while the gateway is down are
+  not replayed, and the in-process clock computes the next fire in `trigger.timezone`: a
+  local time a spring-forward deletes does not run that day, and the hour a fall-back
+  repeats fires once. `doctor` and `validate` print each prompt job's resolved file, its
+  size, and its next fire time; `job run` refuses one, and `job park` still stops it. Chart
+  0.14.0 mirrors a prompt job as `{slug, suspend, trigger, prompt: true}` with no `budget`
+  and renders no CronJob for it. See
+  [the job body contract](docs/job-contract.md#a-job-that-is-a-turn).
+
 - **An external worker deploys on a managed Kubernetes cluster again.** The 1.34 floor
   chart 0.13.0 introduced compared the server's version against `>=1.34.0`, and every
   managed distribution reports a GitVersion carrying a build suffix — `v1.34.9-eks-bca9cf6`,

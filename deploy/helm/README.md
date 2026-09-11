@@ -51,7 +51,7 @@ Or depend on it, and nest this chart's values under its name. Helm hands every s
 # Chart.yaml
 dependencies:
   - name: agent
-    version: 0.13.1
+    version: 0.14.0
     repository: "file://../agent-toolkit/deploy/helm"
 ```
 
@@ -357,6 +357,13 @@ own SIGTERM at the budget and SIGKILL at the deadline always land first. A job w
 schedule renders no scheduled object, which is the correct rendering of an on-request job —
 start one by hand with `sageox-agent job run <slug> --trigger on-request`. `timeZone` needs
 Kubernetes 1.27 or newer.
+
+A job whose `agent.yaml` body is `prompt:` rather than `run:` renders no `CronJob` either,
+and it is the one kind that renders none while declaring a schedule. Its body is a brain
+turn, held on a clock inside the gateway process, so there is no command for a Pod to run.
+Mirror it as `{slug, suspend, trigger, prompt: true}` and state no `budget`; the chart
+refuses one, because nothing here would bound it. `sageox-agent doctor` prints each one's
+next fire time, and `sageox-agent job park <slug>` stops it without a deploy.
 
 Each Job execs `sageox-agent job run <slug> --trigger schedule` against the same bundle the
 Deployment runs, so the envelope is the host's: admission past both switches, single-flight,

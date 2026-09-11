@@ -5,7 +5,7 @@ import { request as httpsRequest } from "node:https";
 import { z } from "zod";
 import { jobDeadlineMs, jobParams } from "./job-host.ts";
 import { admitJob } from "./kill-switch.ts";
-import { type JobConfig } from "./manifest.ts";
+import { isProcessJob, type JobConfig, type ProcessJob } from "./manifest.ts";
 import { tokenMatches, type ServeOptions } from "./mcp-http.ts";
 import { WorkerDiagnosticsSchema, type WorkerDiagnostics } from "./job-diagnostics.ts";
 import { FinalJobOutputSchema, JobOutputEnvelopeSchema, JOB_STATUS_LIMIT_BYTES } from "./job-output.ts";
@@ -94,7 +94,7 @@ interface StoredRun {
   tokenHash?: string;
   claimed?: boolean;
   cleaned?: boolean;
-  job?: JobConfig;
+  job?: ProcessJob;
   profile?: WorkerProfiles[string];
 }
 
@@ -111,7 +111,8 @@ export class JobDispatcher {
     ObjectName.parse(opts.name);
     this.label = { "agent-toolkit/dispatcher": opts.name };
     opts.profiles = WorkerProfilesSchema.parse(opts.profiles);
-    for (const job of opts.jobs.filter((job) => job.worker)) {
+    for (const job of opts.jobs) {
+      if (!isProcessJob(job) || !job.worker) continue;
       const profile = opts.profiles[job.slug];
       if (!profile) throw new Error(`job ${job.slug} has no worker deployment profile`);
       for (const ref of Object.values({ ...job.run.secrets, ...job.run.jobSecrets })) {
@@ -141,7 +142,11 @@ export class JobDispatcher {
 
   async dispatch(raw: unknown): Promise<ExternalStatus> {
     const request = ExternalRequestSchema.parse(raw);
-    const job = this.opts.jobs.find((job) => job.slug === request.jobSlug);
+    // Narrowed at the lookup: a worker is always a `run` body, and a dispatcher that
+    // found a prompt job under this slug has nothing to deploy.
+    const job = this.opts.jobs.find(
+      (candidate): candidate is ProcessJob => candidate.slug === request.jobSlug && isProcessJob(candidate),
+    );
     if (!job?.worker || request.definition !== jobDefinition(job)) throw new KubeError(400);
     jobParams(job, request.parameters);
     const arms = request.trigger === "on-request" ? job.trigger.onRequest

@@ -820,13 +820,19 @@ A cron-based agent is fully supported — pick the tier by weight:
 | Runs in | the **gateway process** (Loop A machinery) | a **separate pod** (its own zone) |
 | Credentials | none (brain zone) | **write-scoped** |
 | Good for | daily summary, reminder, "check X and post it" | file issues, open PRs, multi-step write work |
-| Declared as | `schedules:` in the agent spec | `jobs:` in the agent spec |
+| Declared as | `jobs[].prompt` in the agent spec | `jobs[].run` in the agent spec |
 
 The key idea: **a cron tick is just another inbound event.** It enters the
 gateway as a synthetic `InboundEvent` (author = the internal clock), so it flows
 through the exact same brain → guard → egress path — no new machinery. It
 **skips the author gate** (there is no channel author) but is still subject to the
-guard, the rate/turn caps, and the kill switch. Both tiers are
+guard, the rate/turn caps, and the kill switch.
+
+The `schedules:` block this row once named was never built, and is withdrawn: the
+trigger, the switch, `suspend`, `report` and the work events it needed all already
+exist on `jobs[]`, so the tier is one field there rather than a second block
+duplicating that envelope. See
+[the job body contract](../job-contract.md#a-job-that-is-a-turn). Both tiers are
 **kill-switch-first** (a scheduled run has nobody watching, so "off" must cost one
 check and nothing else) and honor the fleet's **silence-is-the-message** rule (a
 run that finds nothing posts nothing).

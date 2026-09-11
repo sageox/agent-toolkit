@@ -23,7 +23,7 @@ import type { ActorRef, ChannelHistory, EventRef, ThreadReply } from "./events.t
 import { serveJobChannel } from "./job-channel.ts";
 import type { HostedMcp } from "./mcp-http.ts";
 import { withTimeout } from "./gateway.ts";
-import type { JobAnnounce, JobConfig } from "./manifest.ts";
+import { isProcessJob, type JobAnnounce, type JobConfig, type ProcessJob } from "./manifest.ts";
 import { resolveSecret } from "./secrets.ts";
 import {
   combineVerdicts,
@@ -427,7 +427,7 @@ export function jobParams(job: JobConfig, given: Readonly<Record<string, unknown
  */
 const SAY_GRACE_MS = 5_000;
 
-export function jobDeadlineMs(job: JobConfig): number {
+export function jobDeadlineMs(job: ProcessJob): number {
   return job.budget.wallClockMs + job.budget.deadlineHeadroomMs;
 }
 
@@ -499,7 +499,11 @@ export class JobHost {
 
   /** Only the standalone worker entrypoint calls this with a dispatcher-owned record. */
   async executeWorker(job: JobConfig, request: ExternalRequest): Promise<JobRun> {
-    if (!job.worker || jobDefinition(job) !== request.definition) throw new Error("worker definition mismatch");
+    // `isProcessJob` narrows for everything below: a worker is always a `run` body, so a
+    // prompt job reaching here is the same mismatch as a job with no worker at all.
+    if (!isProcessJob(job) || !job.worker || jobDefinition(job) !== request.definition) {
+      throw new Error("worker definition mismatch");
+    }
     jobParams(job, request.parameters);
     const remaining = request.startedAt + job.budget.wallClockMs - Date.now();
     if (remaining <= 0) {
@@ -742,7 +746,7 @@ export class JobHost {
 
   /** One abandoned run: the record, then the last thing its channel will hear about it. */
   private async giveUp(
-    job: JobConfig,
+    job: ProcessJob,
     base: RunBase,
     admission: JobAdmission,
     answer?: JobAnswer,
@@ -884,7 +888,9 @@ export class JobHost {
           bypassedSwitch: false,
           gates: [didNotRun],
           checks: [{ gate: jobGate(job), executed: false, exitCode: null }],
-          reason: `${job.slug} does not arm the ${trigger} trigger, so nothing may start it that way`,
+          reason: job.prompt
+            ? `${job.slug} has a prompt body, which only the gateway's own ticker runs`
+            : `${job.slug} does not arm the ${trigger} trigger, so nothing may start it that way`,
         }),
       );
     }
@@ -997,7 +1003,7 @@ export class JobHost {
 
   /** The body, the record it produced, and the post that says so — in that order. */
   private async finish(
-    job: JobConfig,
+    job: ProcessJob,
     base: RunBase,
     admission: JobAdmission,
     detached: boolean,
@@ -1021,7 +1027,7 @@ export class JobHost {
 
   /** Spawn the body, hold it to its wall clock, and read back what it says it ran. */
   private async execute(
-    job: JobConfig,
+    job: ProcessJob,
     base: RunBase,
   ): Promise<Pick<JobRun, "outcome" | "gates" | "reason" | "execution" | "work" | "checks" | "reportStatus">> {
     let verdictPath: string;
@@ -1131,7 +1137,7 @@ export class JobHost {
    * whose verdict would be minted from a channel it never spoke into. Unstarted gate,
    * UNKNOWN verdict, and a run record naming what was missing.
    */
-  private async openChannel(job: JobConfig): Promise<HostedMcp | undefined> {
+  private async openChannel(job: ProcessJob): Promise<HostedMcp | undefined> {
     if (!job.report?.probe) return undefined;
     if (!this.opts.post) {
       throw new Error(
@@ -1148,7 +1154,7 @@ export class JobHost {
     });
   }
 
-  private spawnBody(job: JobConfig, env: NodeJS.ProcessEnv, base: RunBase): Promise<Execution> {
+  private spawnBody(job: ProcessJob, env: NodeJS.ProcessEnv, base: RunBase): Promise<Execution> {
     return new Promise<Execution>((resolve) => {
       const knownSecrets = [...(this.opts.diagnosticSecrets ?? []), ...Object.keys({ ...job.run.secrets, ...job.run.jobSecrets })
         .map((name) => env[name]).filter((value): value is string => Boolean(value))];
@@ -1291,7 +1297,7 @@ export class JobHost {
    *    and so is `JOB_CHANNEL_*` when this run has a channel to talk through.
    */
   private envelope(
-    job: JobConfig,
+    job: ProcessJob,
     base: RunBase,
     verdictPath: string,
     channel?: HostedMcp,
@@ -1528,19 +1534,32 @@ export function describeJobRun(run: JobRun, proven?: ProvenVoice): string {
  * The two denied outcomes stay silent in every mode. They are a posture somebody chose, and
  * the run whose verdict these modes weigh never happened.
  */
-function announces(run: JobRun, detached: boolean, announce: JobAnnounce): boolean {
+export function announces(run: JobRun, detached: boolean, announce: JobAnnounce): boolean {
   if (run.outcome === "denied-switch" || run.outcome === "denied-suspend") return false;
   if (detached || announce === "always" || !isProven(run.verdict)) return true;
   return announce === "reported" && run.gates.some((gate) => gate.detail);
 }
 
-/** The host's own gate: did the process run, and what did it say on the way out. */
-function jobGate(job: JobConfig): string {
+/**
+ * The host's own gate: did the process run, and what did it say on the way out.
+ *
+ * Exported for the one other thing that mints a run record under a job's slug — the
+ * gateway's ticker, whose gate is the turn rather than a process. One spelling, so a
+ * channel reading both kinds of record reads one vocabulary.
+ */
+export function jobGate(job: JobConfig): string {
   return `job:${job.slug}`;
 }
 
-/** Whether this job declared that this door may open it. */
-function arms(job: JobConfig, trigger: JobTriggerKind): boolean {
+/**
+ * Whether this job declared that this door may open it.
+ *
+ * A prompt body arms none of them. Its schedules are the gateway ticker's, and every other
+ * trigger is refused at load — so this host, which only ever spawns a process, narrows the
+ * job here rather than re-testing for a `run` at each place that reads one.
+ */
+function arms(job: JobConfig, trigger: JobTriggerKind): job is ProcessJob {
+  if (!isProcessJob(job)) return false;
   if (trigger === "schedule") return job.trigger.schedules.length > 0;
   if (trigger === "on-request") return job.trigger.onRequest;
   return job.trigger.webhook;

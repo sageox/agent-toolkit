@@ -76,7 +76,8 @@ found=$(grep -oE 'https://github\.com/sageox/agent-toolkit/blob/[^/]+/docs/(job-
 [ "$found" = "$expected" ] || fail "pinned job documentation links in the copied chart README do not match the release:
 $(diff <(printf '%s\n' "$expected") <(printf '%s\n' "$found") | sed 's/^/  /')"
 
-# Three declared jobs across two agents: one scheduled, one on-request, one parked.
+# Four declared jobs across two agents: one scheduled, one on-request, one parked, and one
+# whose body is a prompt.
 render
 
 absent 'name: AGENT_WORK_EVENTS'
@@ -89,6 +90,18 @@ present "name: agents-harry-shift"
 present "name: agents-ida-sweep"
 # An on-request job declares no schedule and so renders no scheduled object.
 absent "inbox"
+# Neither does a job whose body is a prompt, and this one does declare a schedule: the
+# gateway holds that clock in its own process, and the CronJob this would otherwise render
+# would exec `job run daily-digest` against a job that has no command to run.
+absent "daily-digest"
+
+# The mirror still has to carry it — and refuse the two shapes that would make it a lie: a
+# prompt job stating a budget nothing here bounds, and a mirrored `prompt: false`, which
+# would read as a declaration that this job is not one.
+refuses 'a mirrored prompt job with a budget' 'budget' \
+  --set 'agents.harry.jobs[2].budget.wallClockMs=1000' \
+  --set 'agents.harry.jobs[2].budget.deadlineHeadroomMs=1000'
+refuses 'a mirrored prompt job marked false' 'prompt' --set 'agents.harry.jobs[2].prompt=false'
 
 present 'schedule: "0 */4 * * 1-5"'
 present 'timeZone: "America/New_York"'

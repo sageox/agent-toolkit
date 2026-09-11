@@ -401,6 +401,98 @@ here — count it, match it, tally it, and never splice it into a prompt or a co
 Deciding whether to post again by matching an identifier is a tally, in deterministic code,
 with no model in the path.
 
+## A job that is a turn
+
+Everything above describes a job whose body is a **process**: the host spawns an argv, hands
+it an envelope, and reads a file back. That body has no brain, no tool broker, and no second
+surface, and it is bounded to the one channel `report` names — which is the whole security
+argument for spawning it from a bundle at all.
+
+So it cannot do light work that only the brain can do. *Read the last day of one surface's
+channel, write a sentence about it, post that on another surface* is a few hundred tokens of
+brain work with no write credential anywhere in it, and a process body cannot express it.
+Neither can an ordinary turn, because a turn needs somebody to post a mention at 18:00.
+
+A job may declare `prompt` instead of `run`, and then its body is words:
+
+```yaml
+jobs:
+  - slug: daily-digest
+    archetype: watch
+    description: Summarize the last 24 hours of the status channel and post it on Slack.
+    trigger: { schedules: ["0 18 * * *"], timezone: America/Los_Angeles }
+    killSwitch: { key: mem/daily-digest/enabled, failDirection: closed }
+    prompt: { file: ./jobs/daily-digest.md }   # or an inline string, for a one-liner
+    report: { surface: slack, channel: "C0123456789" }
+```
+
+The prompt file is shaped like a skill — frontmatter, then the body the tick sends:
+
+```markdown
+---
+name: daily-digest
+description: One short post per day summarizing what the other agents did.
+---
+It is the scheduled daily digest. Read the last 24 hours of the status channel with
+read_channel. Write one line per agent that did something and keep the links those lines
+carry. Name agents with nothing as quiet. If `more` was true, say the window was busier
+than one read covers. Post nothing else.
+```
+
+The shape is fixed now because nothing in the runtime reads those two fields yet. When
+skills arrive, the same file can be offered to the chat face — so *run the digest now*,
+asked by a person, becomes this prompt invoked on request, with no second declaration and
+no edit to the file.
+
+**The tick runs in the gateway process, never in a pod.** The gateway holds an in-process
+clock: five cron fields plus `trigger.timezone`, with the next fire computed in that zone.
+A local time a spring-forward deletes does not run that day, and the hour a fall-back
+repeats fires once. Ticks that fall while the gateway is down are **not replayed** — a
+digest of yesterday posted at 06:00 because that is when the pod came back is worse than no
+digest — and the next tick's `run.started` event is the record that one was missed. The
+Helm chart renders no `CronJob` for a prompt job; [the chart README](../deploy/helm/README.md#jobs)
+has the mirror.
+
+Admission is this host's, in this order: the kill switch, then `suspend`, then the
+gateway's own turn caps. A refused tick is recorded exactly as a refused job tick is, and
+posts nothing. Then the tick enters the turn path as a **synthetic inbound event**: the
+surface and channel come from `report`, the author is `schedule:<slug>` — an id no surface
+issues, so nothing can be addressed to it and nothing can answer as it — and the text is
+the prompt body. The author gate is the one check skipped, because there is no channel
+author to weigh. The brain, the tool policy, the guard, the rate caps and `turnTimeoutMs`
+are the ones every other turn gets.
+
+The turn's reply is a **top-level post in `report.channel`**, through the same chokepoint
+the brain's own `post_message` clears: channel consent, the guard, and the leak scan all
+apply, and a channel the surface does not list is refused. Replies people leave under the
+post wake the agent as usual. An empty reply posts nothing — silence is the message here as
+everywhere else.
+
+`announce` keeps its meaning, with the turn standing in for the gate: `unproven` (the
+default) posts the host's own line only when the turn never spoke — a timeout, a brain
+failure, or a guard that refused everything it asked to send — and `always` posts after a
+clean tick too. `reported` is refused at load, because a turn writes no gate details for it
+to key on.
+
+**Provenance is unforgeable.** The prompt comes from the reviewed bundle and nowhere else.
+No channel text can start one of these turns, alter its prompt, or claim to be one, and the
+`trigger: "schedule"` on the work event is stamped by the ticker exactly as `JobHost` stamps
+a process job's.
+
+Each of these is refused at load on a prompt job, by name, because it belongs to a process
+body or opens a door this tier does not: `run`, `worker`, `parameters`, `model` (the turn
+runs on `brain.model`), `output`, `report.probe`, `report.history` (the brain has its own
+channel reads), `trigger.onRequest` and `trigger.webhook`. `budget` is optional and can only
+shorten the turn: `wallClockMs` below `limits.turnTimeoutMs` wins, and above it does
+nothing. A job declaring both bodies, or neither, is refused.
+
+`sageox-agent doctor` and `sageox-agent validate` list every prompt job with its resolved
+prompt file, that file's size, and its next fire time in the declared zone — a prompt that
+silently changed size is the kind of thing nobody notices until the 3am post reads wrong.
+`sageox-agent job run` refuses a prompt job: there is no process to spawn, and the gateway
+holds the clock. `sageox-agent job park <slug>` stops it without a deploy, as it stops any
+other job.
+
 ## Structured work events (schema 1)
 
 Set `AGENT_WORK_EVENTS=1` on `sageox-agent job run` or `sageox-agent run` to emit
