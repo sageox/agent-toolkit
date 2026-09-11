@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-11
+
+Everything below shipped after `v0.5.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.5.1` takes `:latest` and advances `:0.5`. Pin
+the digest recorded on the GitHub Release in production. A patch rather than a minor
+because nothing here asks a running deployment to act: an `agent.yaml` that declares no
+`prompt` job loads and behaves exactly as it did on 0.5.0, so `:0.5` moving forward onto
+this is safe to pick up.
+
+Helm chart 0.14.0 pairs with this release, and only in that direction. A 0.5.0 gateway
+refuses an `agent.yaml` that declares a `prompt` job — `jobs[]` required `run` there and
+rejects unknown keys — so an upgrade that mirrors one in values must take `imageRef` to
+0.5.1 in the same pass.
+
 - **A job's body may be a prompt, so an agent can do light scheduled work only its brain
   can do.** Work started in exactly two ways before this: a turn, when a message mentioned
   the agent, and a job, which spawns a process with no brain, no tool broker, and no second
