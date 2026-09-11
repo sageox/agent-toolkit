@@ -1433,9 +1433,17 @@ export type PromptJob = JobConfig & {
   report: NonNullable<JobConfig["report"]>;
 };
 
-/** Narrowing, not a test: `JobSchema` already refused a job with neither body or both. */
+/**
+ * Narrowing, not a test: `JobSchema` already refused a job with neither body or both, and
+ * a `run` body without a `budget`.
+ *
+ * Both fields are tested anyway, because the type claims both and not every job reaching
+ * these doors came through `loadManifest` — a hand-built one missing its budget would
+ * otherwise narrow here and throw in `jobDeadlineMs`, past the guard that was meant to
+ * catch it.
+ */
 export function isProcessJob(job: JobConfig): job is ProcessJob {
-  return job.run !== undefined;
+  return job.run !== undefined && job.budget !== undefined;
 }
 
 export function isPromptJob(job: JobConfig): job is PromptJob {

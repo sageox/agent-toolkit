@@ -237,6 +237,18 @@ export class Gateway {
     if (!admission.ok) return { ...tally, skipped: `limit:${admission.rule}` };
 
     return new Promise<TickOutcome>((resolve) => {
+      // The timeout releases the queue slot; it cannot cancel a brain suspended inside an
+      // `await`. So an abandoned turn can come back and yield a reply minutes later, and
+      // for a tick that reply would land at top level under the failure line the host has
+      // already posted about it — two answers to one tick, in the wrong order. A chat
+      // turn's late reply threads under the message it answers and contradicts nothing, so
+      // this is the scheduled path's to close and not the shared loop's.
+      let live = true;
+      const send: Send = async (msg) =>
+        live
+          ? this.egress.postReply(to.surface, to.channel, msg)
+          : { ok: false, rule: "turnEnded", reason: "this tick was recorded before the step arrived" };
+
       this.queue.submit(`${event.surface}:${event.channel.id}`, async () => {
         const started = Date.now();
         // Everything is inside the `try`, logging included: this promise is the only thing
@@ -247,13 +259,7 @@ export class Gateway {
             `tick_start surface=${event.surface} channel=${event.channel.id} author=${event.author.id}`,
           );
           const scheduled = true; // the prompt is the bundle's, so the turn is not fenced
-          await this.runTurn(
-            event,
-            (msg) => this.egress.postReply(to.surface, to.channel, msg),
-            tally,
-            timeoutMs,
-            scheduled,
-          );
+          await this.runTurn(event, send, tally, timeoutMs, scheduled);
           console.info(
             `tick_done surface=${event.surface} channel=${event.channel.id} ` +
               `author=${event.author.id} sent=${tally.sent} ms=${Date.now() - started}`,
@@ -267,6 +273,10 @@ export class Gateway {
               `author=${event.author.id} ms=${Date.now() - started}`,
           );
           resolve({ ...tally, error });
+        } finally {
+          // Closed on both paths and after the tally is read, so nothing this tick is about
+          // to be recorded for can still reach the channel.
+          live = false;
         }
       // Shed rather than run: the queue is full of live chat in this channel, which is the
       // `channelQueueLimit` cap doing its job. The tick is owed a record either way.

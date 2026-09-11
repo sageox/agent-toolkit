@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -78,6 +78,18 @@ describe("nextFire", () => {
     expect(nextFire(["30 2 31 2 *"], "UTC", new Date("2026-09-10T13:00:00Z"))).toBeUndefined();
   });
 
+  it("reaches a leap day, which is the sparsest a real schedule gets", () => {
+    // Two years out, so a one-year horizon would report this as never firing — and the
+    // ticker arms nothing for a schedule that comes back empty.
+    expect(wall(nextFire(["0 0 29 2 *"], "UTC", new Date("2026-03-01T00:00:00Z")), "UTC")).toBe(
+      "2028-02-29 00:00:00",
+    );
+    // And the eight-year gap a non-leap century opens between two of them.
+    expect(wall(nextFire(["0 0 29 2 *"], "UTC", new Date("2096-03-01T00:00:00Z")), "UTC")).toBe(
+      "2104-02-29 00:00:00",
+    );
+  });
+
   it("refuses an expression it cannot parse, rather than never firing", () => {
     expect(() => nextFire(["0 3 * *"], "UTC", new Date())).toThrow(/five cron fields/);
     expect(() => nextFire(["0 3 * * 1-"], "UTC", new Date())).toThrow(/not a value or a range/);
@@ -148,6 +160,21 @@ describe("readJobPrompt", () => {
     // the agent would post a prompt nobody wrote.
     await writeFile(join(dir, "digest.md"), Buffer.concat([Buffer.from(head), Buffer.from([0x80])]));
     expect(() => readJobPrompt(job, dir)).toThrow(/not valid UTF-8/);
+  });
+
+  it("refuses a prompt that is not inside the agent directory", async () => {
+    // The words go in as steering, and the argument for that is that they came out of the
+    // reviewed bundle. A path that leaves it reads a file no diff ever showed.
+    await writeFile(join(dir, "outside.md"), "---\nname: d\ndescription: d\n---\nelsewhere\n");
+    const inner = join(dir, "bundle");
+    await mkdir(inner);
+    for (const file of ["../outside.md", join(dir, "outside.md")]) {
+      expect(() => readJobPrompt(promptJob({ prompt: `{file: '${file}'}` }), inner), file).toThrow(
+        /outside the agent directory/,
+      );
+    }
+    await writeFile(join(inner, "digest.md"), "---\nname: d\ndescription: d\n---\ninside\n");
+    expect(readJobPrompt(promptJob({ prompt: "{file: ./digest.md}" }), inner).body).toBe("inside");
   });
 
   it("refuses a file that is not shaped like a skill", async () => {
@@ -385,6 +412,70 @@ describe("ScheduledTurns", () => {
       checks: [{ gate: "job:daily-digest", executed: true, exit_code: 0, source: "host" }],
       partial: false,
     });
+  });
+
+  it("refuses a tick that was still being admitted when it was told to stop", async () => {
+    const gw = fakeGateway();
+    const runs: JobRun[] = [];
+    // A switch read that has not answered yet is where a shutdown lands: the timer has
+    // fired, so `stop()` has nothing left to clear, and without the check inside `fire` the
+    // tick would submit a turn into surfaces that are closing.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const turns = ticker(promptJob(), {
+      gateway: gw.gateway,
+      switchSource: async () => {
+        await held;
+        return { origin: "set", state: "on", value: "arming" };
+      },
+      onRun: (run) => runs.push(run),
+    });
+
+    vi.setSystemTime(new Date("2026-09-10T17:59:30Z"));
+    turns.start();
+    await vi.advanceTimersByTimeAsync(31_000);
+    turns.stop();
+    release();
+    await turns.drained();
+
+    expect(gw.ticks).toHaveLength(0);
+    expect(runs[0]).toMatchObject({ outcome: "abandoned" });
+    expect(runs[0]!.reason).toContain("never started");
+  });
+
+  it("waits out a tick that had already reached the gateway", async () => {
+    const runs: JobRun[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const turns = ticker(promptJob(), {
+      gateway: {
+        tick: async () => {
+          await held;
+          return { asked: 1, sent: 1 };
+        },
+      },
+      switchSource: armed,
+      onRun: (run) => runs.push(run),
+    });
+
+    vi.setSystemTime(new Date("2026-09-10T17:59:30Z"));
+    turns.start();
+    await vi.advanceTimersByTimeAsync(31_000);
+    turns.stop();
+
+    let settled = false;
+    const drained = turns.drained().then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false); // the turn is still going, so the record is still owed
+    release();
+    await drained;
+    expect(runs[0]).toMatchObject({ outcome: "completed" });
   });
 
   it("arms nothing after it is stopped", async () => {

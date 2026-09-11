@@ -195,6 +195,23 @@ describe("sageox-agent validate", () => {
     expect(stdout).toMatch(/\(\d+ bytes\), next \d{4}-\d{2}-\d{2} 18:00:00 America\/Los_Angeles/);
   });
 
+  it("fails on a report channel the gateway would refuse to start on", async () => {
+    mkdirSync(join(dir, "jobs"));
+    writeFileSync(
+      join(dir, "jobs", "digest.md"),
+      "---\nname: daily-digest\ndescription: One short post per day.\n---\nSummarize the day.\n",
+    );
+    const path = write(
+      "agent.yaml",
+      withChannel(AGENT_YAML("demo")) + PROMPT_JOB.replace("channel: local", "channel: nowhere"),
+    );
+
+    const { code, stdout } = await validate([path]);
+
+    expect(code).not.toBe(0);
+    expect(stdout).toContain("does not list as a channel");
+  });
+
   it("fails on a prompt file the gateway would refuse to start on", async () => {
     const path = write("agent.yaml", withChannel(AGENT_YAML("demo")) + PROMPT_JOB);
 

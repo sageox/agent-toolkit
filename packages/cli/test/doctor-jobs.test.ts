@@ -161,7 +161,12 @@ describe("doctor and the job tool", () => {
   it("fails on a prompt file that is not there, rather than at 18:00", async () => {
     declarePrompt("{file: ./jobs/digest.md}");
 
-    expect(await doctor(home)).toContain("jobs/digest.md");
+    const report = await doctor(home);
+
+    // `doctorReport` hands back stdout either way, so the path alone would pass on a run
+    // that merely mentioned the file. The verdict is what says `run` would refuse.
+    expect(report).toContain("FAIL");
+    expect(report).toContain("jobs/digest.md");
   });
 
   it("fails when the turn would have nowhere to post", async () => {

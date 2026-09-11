@@ -1046,35 +1046,47 @@ describe("Gateway.tick", () => {
 
   it("waits behind a live turn in the same channel rather than interleaving with it", async () => {
     const f = postingAdapter([HIVE]);
-    const order: string[] = [];
+    const entered: string[] = [];
     let release!: () => void;
+    let chatStarted!: () => void;
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
+    // Signalled from inside the brain rather than waited out on a clock: a sleep long
+    // enough on this machine is a sleep that, on a loaded runner, asserts an empty list
+    // because nothing had started yet — and then the test passes without proving anything.
+    const started = new Promise<void>((resolve) => {
+      chatStarted = resolve;
+    });
     const brain: Brain = {
       async *runTurn(event: InboundEvent): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
-        if (event.author.id === "u1") await held;
-        order.push(event.author.id);
+        entered.push(event.author.id);
+        if (event.author.id === "u1") {
+          chatStarted();
+          await held;
+        }
         yield { type: "reply", msg: { text: `done ${event.author.id}` } };
       },
     };
-    const gw = new Gateway({
-      manifest: ticking("", "anyone"),
-      adapters: [f.adapter],
-      brain,
-    });
+    const gw = new Gateway({ manifest: ticking("", "anyone"), adapters: [f.adapter], brain });
     await gw.start();
 
     f.inject({ ...tickEv("a message"), author: { surface: "slack", id: "u1", isSelf: false, isAgent: false } });
-    await new Promise((r) => setTimeout(r, 5));
+    await started; // the chat turn is inside the brain and holding the channel
+
     const ticked = gw.tick(tickEv("the digest"), { surface: "slack", channel: "C01" });
-    await new Promise((r) => setTimeout(r, 5));
-    // The chat turn is still holding the channel, so nothing of the tick has happened.
-    expect(order).toEqual([]);
+    // Drained rather than slept on: every microtask the tick could have run on has run, and
+    // it still has not entered the brain.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(entered).toEqual(["u1"]);
 
     release();
     await ticked;
-    expect(order).toEqual(["u1", "schedule:digest"]);
+    expect(entered).toEqual(["u1", "schedule:digest"]);
+    // Only the tick's answer is here: the chat turn replies through `send`, which this
+    // adapter refuses on purpose — see `postingAdapter`.
+    expect(f.posts.map((post) => post.msg.text)).toEqual(["done schedule:digest"]);
   });
 
   it("counts what the guard refused, and posts none of it", async () => {
@@ -1088,6 +1100,41 @@ describe("Gateway.tick", () => {
       asked: 1,
       sent: 0,
     });
+    expect(f.posts).toHaveLength(0);
+  });
+
+  it("refuses a step that arrives after the tick was already recorded", async () => {
+    const f = postingAdapter([HIVE]);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let resumed = false;
+    // Suspended inside an `await` when the timeout wins, then coming back with a reply.
+    // `withTimeout` releases the queue slot and cannot cancel this — so the send has to.
+    const brain: Brain = {
+      async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        await held;
+        resumed = true;
+        yield { type: "reply", msg: { text: "late" } };
+      },
+    };
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain,
+    });
+    await gw.start();
+
+    const outcome = await gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" });
+    expect((outcome.error as Error).message).toMatch(/turn timed out/);
+
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    // The brain came back and asked to post, and nothing reached the channel: the host has
+    // already said this tick proved nothing, and a second, contradicting post at top level
+    // is what this closes.
+    expect(resumed).toBe(true);
     expect(f.posts).toHaveLength(0);
   });
 

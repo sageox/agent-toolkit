@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { errorLine, errorText } from "./errors.ts";
@@ -78,6 +78,21 @@ export function readJobPrompt(job: PromptJob, agentDir: string): JobPrompt {
 
   const source = resolve(agentDir, job.prompt.file);
   const named = `job "${job.slug}" prompt ${source}`;
+  // The words go to the brain as steering rather than inside the untrusted fence, and the
+  // whole argument for that is that they came out of the same reviewed bundle the persona
+  // did. A path that leaves the agent directory breaks it: `/mnt/shared/digest.md` is
+  // mutable by whoever mounted it and appears in no bundle diff. Refused at load so the
+  // provenance claim is one the code keeps rather than one the manifest asserts.
+  //
+  // Lexical, and only lexical. A symlink inside the bundle can still point out, and that is
+  // a line in the reviewed diff like any other — the same standing `run.command` has. What
+  // this closes is the case nobody reviews: a path in `agent.yaml` that plainly points away.
+  if (!source.startsWith(resolve(agentDir) + sep)) {
+    throw new Error(
+      `${named} is outside the agent directory — a prompt is read as steering, so it comes ` +
+        "from the bundle and nowhere a review would not see it",
+    );
+  }
   let raw: Buffer;
   try {
     raw = readFileSync(source);
@@ -166,6 +181,17 @@ export class ScheduledTurns {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
 
+  /**
+   * Ticks past their timer and not yet settled, which {@link drained} waits out.
+   *
+   * A tick spends its first moments reading a kill switch, and a shutdown lands inside that
+   * await as readily as before it. Without this, `stop()` would clear the timers, the
+   * gateway's own `drain()` would see an idle queue, and the tick would then submit a turn
+   * into surfaces that were closing — with `process.exit` some milliseconds behind it and
+   * no record of the run anywhere.
+   */
+  private firing = new Set<Promise<void>>();
+
   constructor(private opts: ScheduledTurnsOptions) {}
 
   /** The jobs this clock holds, for a caller printing the roster. */
@@ -178,11 +204,31 @@ export class ScheduledTurns {
     for (const turn of this.opts.turns) this.arm(turn, new Date());
   }
 
-  /** Disarms every schedule. A tick already in flight finishes on its own. */
+  /**
+   * Disarms every schedule, and refuses any tick that has not yet reached the gateway.
+   *
+   * A **state**, not an event, for the reason {@link JobHost.abandon} is one: a pass that
+   * only cleared the timers would miss every tick whose switch was still being read when it
+   * ran. {@link drained} is the other half.
+   */
   stop(): void {
     this.stopped = true;
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
+  }
+
+  /**
+   * Resolves once every tick that was in flight at {@link stop} has settled.
+   *
+   * Bounded by what a shutdown already waits for: a tick past the gateway is a turn
+   * `Gateway.drain` is waiting on anyway, and one that has not reached it refuses in
+   * microseconds. So awaiting this alongside the drain costs the grace period nothing, and
+   * buys the record — and the status post, through surfaces that are still up.
+   */
+  async drained(): Promise<void> {
+    // In a loop rather than once: a tick settling during the pass can still be adding its
+    // status post. It terminates because `stop` has already closed the door.
+    while (this.firing.size > 0) await Promise.all([...this.firing]);
   }
 
   /**
@@ -219,7 +265,8 @@ export class ScheduledTurns {
         // minutes does not move the next fire — and a tick can never re-arm itself onto
         // the one it just ran.
         this.arm(turn, at);
-        void this.fire(turn, at);
+        const firing = this.fire(turn, at).finally(() => this.firing.delete(firing));
+        this.firing.add(firing);
       },
       hop ? MAX_TIMEOUT_MS : Math.max(0, delay),
     );
@@ -260,9 +307,29 @@ export class ScheduledTurns {
         return;
       }
 
+      // Checked here rather than at the top, because reading the switch is the slowest thing
+      // this does and a shutdown lands inside that await as readily as before it. A turn
+      // started now would reach surfaces that are closing, and the record of it would be
+      // lost at the exit some milliseconds behind. The same call `JobHost.begin` makes at
+      // the same moment, in the same words.
+      if (this.stopped) {
+        this.record({
+          ...base,
+          outcome: "abandoned",
+          switch: admission.switch,
+          bypassedSwitch: admission.bypassedSwitch,
+          gates: [verdictFromGate(didNotRun)],
+          checks: [didNotRun],
+          reason:
+            `this gateway was asked to stop while ${job.slug} was still being admitted, ` +
+            "so the tick was never started",
+        });
+        return;
+      }
+
       // A turn is already held to `turnTimeoutMs`; a declared budget can only shorten it.
       const deadlineMs = Math.min(this.opts.turnTimeoutMs, job.budget?.wallClockMs ?? Infinity);
-      this.opts.onStart?.({ ...base, admittedAt: Date.now(), deadlineMs });
+      this.observe(() => this.opts.onStart?.({ ...base, admittedAt: Date.now(), deadlineMs }));
 
       const outcome = await this.opts.gateway.tick(
         tickEvent(job, prompt, channel, runId, at),
@@ -324,12 +391,23 @@ export class ScheduledTurns {
     // documented as exactly `combineVerdicts(gates)` — a record whose sum a reader cannot
     // check is a record they have to take on trust.
     const complete: JobRun = { ...run, endedAt: Date.now(), verdict: combineVerdicts(run.gates) };
-    try {
-      Promise.resolve(this.opts.onRun?.(complete)).catch(() => {});
-    } catch {
-      /* Observers cannot change what a tick did. */
-    }
+    this.observe(() => this.opts.onRun?.(complete));
     return complete;
+  }
+
+  /**
+   * Both observers, held to the same rule: they cannot change what a tick did.
+   *
+   * An `onStart` that threw would take the turn *and* the record with it — a work-event
+   * stream that failed to write during a shutdown is the realistic way that happens — and
+   * "every tick's record, refusals included" would stop being true where it matters most.
+   */
+  private observe(publish: () => unknown): void {
+    try {
+      Promise.resolve(publish()).catch(() => {});
+    } catch {
+      /* An observer cannot change what a tick did. */
+    }
   }
 }
 
@@ -390,8 +468,15 @@ function tickEvent(
 /** `setTimeout`'s 32-bit range — about 24.8 days. Longer waits are taken in hops. */
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
-/** How far ahead {@link nextFire} will look before answering "never". */
-const SEARCH_DAYS = 366;
+/**
+ * How far ahead {@link nextFire} will look before answering "never".
+ *
+ * Eight years, because that is the longest gap any five-field expression can have: `0 0 29
+ * 2 *` matches only on a leap day, and a century that is not a leap year puts eight years
+ * between two of them (2096 to 2104). A shorter horizon would report that schedule as one
+ * that never fires, and the ticker would arm nothing for it — silently, and permanently.
+ */
+const SEARCH_DAYS = 8 * 366;
 
 /** The fixed descriptors, as the five fields they stand for. `@every` names no clock time. */
 const DESCRIPTORS: Record<string, string> = {

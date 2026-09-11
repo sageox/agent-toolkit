@@ -68,6 +68,7 @@ import {
   requestableJobs,
   isPromptJob,
   readJobPrompt,
+  type PromptJob,
   resolveTarget,
   ScheduledTurns,
   nextFire,
@@ -1513,13 +1514,19 @@ async function runCmd(argv: string[]): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(ticker);
-    // Before the turns are drained: a tick admitted after this would be a turn `drain`
-    // already waited for. One still in flight keeps its turn and its run record; what can
-    // be lost is the host's status line, to a surface closed underneath it below.
+    // Closes the door before anything waits: a tick admitted after this would be a turn
+    // `drain` has already gone past.
     scheduled?.stop();
     process.stdout.write("\nshutting down…\n");
     // A turn may be waiting for a ledger refresh. Cancel Git before waiting for turns.
-    await Promise.all([team?.stopSync().catch(() => {}), gw.drain().catch(() => {})]);
+    // `drained` is in the same pass rather than before it, for that reason: a tick's turn
+    // can be the one blocked on the ledger, and waiting for it first would hold the whole
+    // shutdown behind a refresh nothing had cancelled yet.
+    await Promise.all([
+      team?.stopSync().catch(() => {}),
+      gw.drain().catch(() => {}),
+      scheduled?.drained().catch(() => {}),
+    ]);
     // After the turns and before the surfaces close, which is the only window where both
     // are true: a job started inside a turn was just waited for by `drain`, while a
     // detached one never was and is owed a last word through a channel that is still up.
@@ -1612,9 +1619,39 @@ function scheduledTurns(
   return clock;
 }
 
-/** A next fire time, in the zone the job declared it in. `never` is a legal cron answer. */
+/**
+ * Why a prompt job's `report` destination is not a channel it can post into, or nothing.
+ *
+ * Read off the manifest rather than off the live surfaces, so `validate` can ask it with no
+ * agent home, no credential and no relay — which is the whole point of that command. `run`
+ * asks the surfaces themselves, where the answer is narrower still: a listed channel on a
+ * surface that carries no top-level post is refused there and cannot be here.
+ */
+function unreachableReport(manifest: AgentManifest, job: PromptJob): string | undefined {
+  const surface = manifest.surfaces.find((declared) => declared.kind === job.report.surface);
+  const targets = (surface?.channels ?? []).map((channel) => ({
+    surface: job.report.surface,
+    id: channel.id,
+    isPublic: channel.reply === "public",
+    name: channel.name,
+  }));
+  if (resolveTarget(targets, job.report.surface, job.report.channel)) return undefined;
+  return (
+    `job "${job.slug}" reports to ${job.report.surface}:${job.report.channel}, which that ` +
+    "surface does not list as a channel — its scheduled turn would have nowhere to post, " +
+    "and `run` refuses to start"
+  );
+}
+
+/**
+ * A next fire time, in the zone the job declared it in.
+ *
+ * `never` is a legal answer and a final one — `0 0 31 2 *` parses and names no day — so it
+ * is said plainly rather than hedged: the search horizon is long enough to reach the
+ * sparsest real schedule, and the ticker arms nothing for a job that comes back empty.
+ */
 function describeFire(at: Date | undefined, timezone: string): string {
-  if (!at) return `never within a year (timezone ${timezone})`;
+  if (!at) return `never — no expression matches any day (timezone ${timezone})`;
   return `${at.toLocaleString("sv-SE", { timeZone: timezone })} ${timezone}`;
 }
 
@@ -2311,6 +2348,13 @@ function validateCmd(argv: string[]): boolean {
       const scheduled = manifest.jobs
         .filter(isPromptJob)
         .map((job) => ({ job, prompt: readJobPrompt(job, dirname(resolve(path))) }));
+      // The other thing `run` refuses to start on. Asked here for the same reason the
+      // prompt file is read: a CI step that passed would be green about a bundle that
+      // cannot boot.
+      const unreachable = scheduled
+        .map(({ job }) => unreachableReport(manifest, job))
+        .filter((why): why is string => why !== undefined);
+      if (unreachable.length) throw new Error(unreachable.join("\n"));
       process.stdout.write(
         `  ok    ${path} — ${manifest.name}, ${manifest.surfaces.length} surface(s), ` +
           `${manifest.jobs.length} job(s)\n`,
@@ -2669,29 +2713,20 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
         // parser may still refuse, and that refusal is a finding rather than a crash.
         const at = nextFire(job.trigger.schedules, job.trigger.timezone, new Date());
         const prompt = readJobPrompt(job, agent.dir);
-        ok.push(
+        const line =
           `job "${job.slug}" is a scheduled turn — prompt ${prompt.source} ` +
-            `(${prompt.bytes} bytes), next ${describeFire(at, job.trigger.timezone)}`,
-        );
+          `(${prompt.bytes} bytes), next ${describeFire(at, job.trigger.timezone)}`;
+        // A schedule that matches no day loads, deploys, and is never heard from. Reported
+        // rather than refused: it is a legal expression, and the operator chose it.
+        if (at) ok.push(line);
+        else warnings.push(line);
       } catch (error) {
         problems.push(errorText(error));
       }
       // `loadManifest` checks that `report.surface` is declared; the channel is checked
       // here, against the same list and the same resolution a post is admitted through.
-      const surface = manifest.surfaces.find((s) => s.kind === job.report.surface);
-      const targets = (surface?.channels ?? []).map((channel) => ({
-        surface: job.report.surface,
-        id: channel.id,
-        isPublic: channel.reply === "public",
-        name: channel.name,
-      }));
-      if (!resolveTarget(targets, job.report.surface, job.report.channel)) {
-        problems.push(
-          `job "${job.slug}" reports to ${job.report.surface}:${job.report.channel}, which that ` +
-            "surface does not list as a channel — its turn would have nowhere to post, and " +
-            "`run` refuses to start",
-        );
-      }
+      const unreachable = unreachableReport(manifest, job);
+      if (unreachable) problems.push(unreachable);
     }
 
     if (manifest.tools) {
