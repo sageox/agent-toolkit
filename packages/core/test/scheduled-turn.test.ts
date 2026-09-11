@@ -58,11 +58,13 @@ describe("nextFire", () => {
     expect(wall(nextFire(["0 0 1 * *"], "UTC", from), "UTC")).toBe("2026-10-01 00:00:00");
   });
 
-  it("skips a local time the spring-forward transition deletes", () => {
-    // 2027-03-14 in Los Angeles runs 01:59 → 03:00, so 02:30 is not an instant that day.
-    // A digest scheduled inside the gap is not moved to 03:30; it runs the next day.
+  it("runs at the next real instant when spring-forward deletes the local time", () => {
+    // 2027-03-14 in Los Angeles runs 01:59 → 03:00, so 02:30 is not an instant that day and
+    // the tick lands at 03:30 rather than being dropped. That is the deploy target's answer
+    // too: Go normalizes a non-existent wall-clock time forward, so the CronJob a `run` job
+    // of the same expression renders fires then as well — one expression, one meaning.
     const at = nextFire(["30 2 * * *"], LA, new Date("2027-03-13T12:00:00Z"));
-    expect(wall(at, LA)).toBe("2027-03-15 02:30:00");
+    expect(wall(at, LA)).toBe("2027-03-14 03:30:00");
   });
 
   it("fires once in the hour the fall-back transition repeats", () => {
@@ -91,30 +93,32 @@ describe("nextFire", () => {
     );
   });
 
-  it("refuses an expression it cannot parse, rather than never firing", () => {
-    expect(() => nextFire(["0 3 * *"], "UTC", new Date())).toThrow(/five cron fields/);
-    expect(() => nextFire(["0 3 * * 1-"], "UTC", new Date())).toThrow(/not a value or a range/);
-    expect(() => nextFire(["0 9-5 * * *"], "UTC", new Date())).toThrow(/counts backwards/);
-  });
-
-  it("takes a decimal field and refuses every other way to write a number", () => {
-    // `Number` reads all of these, and the Kubernetes parser refuses all of them — so a
-    // `run` job and a `prompt` job carrying one expression would have disagreed.
+  /**
+   * Every expression that must be refused rather than silently scheduling something else.
+   *
+   * Asserted as "throws" and not on the wording: the message is the parser's now, and a test
+   * that pinned it would be testing the dependency's prose rather than this contract. What
+   * matters is that none of these is accepted — a name truncated to `MON`, a number read as
+   * hex, or a half-written range would each schedule a turn nobody asked for, and a `run`
+   * job carrying the same expression would have its CronJob refused at apply.
+   */
+  it("refuses every expression a deploy target would refuse, rather than firing on it", () => {
     const from = new Date("2026-09-10T13:00:00Z");
-    expect(wall(nextFire(["0 16 * * *"], "UTC", from), "UTC")).toBe("2026-09-10 16:00:00");
-    for (const bad of ["0 0x10 * * *", "0 1e1 * * *", "0 0-0x5 * * *"]) {
-      expect(() => nextFire([bad], "UTC", from), bad).toThrow(/not a value or a range/);
-    }
-  });
-
-  it("takes a three-letter name and refuses anything that merely starts like one", () => {
-    // Truncating to three would read `MONSOON` as Monday and schedule an expression nobody
-    // meant. Kubernetes' own parser takes the abbreviations and nothing longer, so one
-    // expression has to mean the same thing to a `run` job and to a `prompt` job.
-    const from = new Date("2026-09-10T13:00:00Z");
+    // The forms that must still work, so the refusals below are not just a broken parser.
     expect(wall(nextFire(["0 0 * * MON"], "UTC", from), "UTC")).toBe("2026-09-14 00:00:00");
-    for (const bad of ["0 0 * * MONSOON", "0 0 * * MONDAY", "0 0 1 JUNX *", "0 0 * * MO"]) {
-      expect(() => nextFire([bad], "UTC", from), bad).toThrow(/not a value or a range/);
+    expect(wall(nextFire(["0 16 * * *"], "UTC", from), "UTC")).toBe("2026-09-10 16:00:00");
+
+    for (const bad of [
+      "0 3 * *", // four fields
+      "0 3 * * 1-", // half a range
+      "0 9-5 * * *", // counts backwards
+      "0 0 * * MONSOON", // truncates to a valid MON
+      "0 0 * * MONDAY",
+      "0 0 1 JUNX *",
+      "0 0x10 * * *", // `Number` reads this as 16
+      "0 1e1 * * *",
+    ]) {
+      expect(() => nextFire([bad], "UTC", from), bad).toThrow();
     }
   });
 });

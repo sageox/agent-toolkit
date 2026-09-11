@@ -475,11 +475,13 @@ chart fails the render for a `sharedVolumes` claim at or under `/agents/<name>`.
 
 **The tick runs in the gateway process, never in a pod.** The gateway holds an in-process
 clock: five cron fields — or one of the fixed descriptors, `@daily` and its siblings —
-resolved against `trigger.timezone`. `@every 5m` is refused at load, since an interval
-names no wall-clock time for a zone to resolve.
+resolved against `trigger.timezone` by [`croner`](https://www.npmjs.com/package/croner),
+the same shape of parser a deploy target runs. `@every 5m` is refused at load, since an
+interval names no wall-clock time for a zone to resolve.
 
-A local time a spring-forward deletes does not run that day, and the hour a fall-back
-repeats fires once. Ticks that fall while the gateway is down are **not replayed** — a
+A local time a spring-forward deletes runs at the next real instant instead — `02:30` on a
+day that has no `02:30` fires at `03:30`, which is what the CronJob a `run` job of the same
+expression renders does too — and the hour a fall-back repeats fires once. Ticks that fall while the gateway is down are **not replayed** — a
 digest of yesterday posted at 06:00 because that is when the pod came back is worse than no
 digest — and the gap in the work events is where a missed one is visible. The Helm chart
 renders no `CronJob` for a prompt job; [the chart README](../deploy/helm/README.md#jobs)

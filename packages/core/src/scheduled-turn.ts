@@ -10,6 +10,7 @@ import {
   type Stats,
 } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { Cron } from "croner";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { errorLine, errorText } from "./errors.ts";
@@ -573,218 +574,29 @@ function tickEvent(
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 /**
- * How far ahead {@link nextFire} will look before answering "never".
- *
- * Eight years, because that is the longest gap any five-field expression can have: `0 0 29
- * 2 *` matches only on a leap day, and a century that is not a leap year puts eight years
- * between two of them (2096 to 2104). A shorter horizon would report that schedule as one
- * that never fires, and the ticker would arm nothing for it — silently, and permanently.
- */
-const SEARCH_DAYS = 8 * 366;
-
-/** The fixed descriptors, as the five fields they stand for. `@every` names no clock time. */
-const DESCRIPTORS: Record<string, string> = {
-  "@yearly": "0 0 1 1 *",
-  "@annually": "0 0 1 1 *",
-  "@monthly": "0 0 1 * *",
-  "@weekly": "0 0 * * 0",
-  "@daily": "0 0 * * *",
-  "@midnight": "0 0 * * *",
-  "@hourly": "0 * * * *",
-};
-
-const MONTH_NAMES = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-
-/** One compiled expression: which values each field admits, and whether it was restricted. */
-interface Schedule {
-  minute: Set<number>;
-  hour: Set<number>;
-  day: Set<number>;
-  month: Set<number>;
-  weekday: Set<number>;
-  /** Vixie's rule below needs to know which of the two day fields narrowed anything. */
-  anyDay: boolean;
-  anyWeekday: boolean;
-}
-
-/** A wall-clock instant as one zone renders it. */
-interface WallClock {
-  minute: number;
-  hour: number;
-  day: number;
-  month: number;
-  weekday: number;
-  /** `YYYY-MM-DDTHH:MM` in the zone — what tells one side of a fall-back from the other. */
-  key: string;
-}
-
-/**
  * The next instant strictly after `after` that one of these expressions names in `timeZone`.
  *
- * **A repeated local minute fires once.** The hour an autumn fall-back replays is two real
- * instants with one wall-clock reading, and a daily digest does not want to be posted
- * twice on one evening — so a candidate whose local minute is the one `after` was already
- * at is passed over. Spring forward needs no rule: a local time that does not exist is
- * never produced by formatting a real instant, so a job scheduled inside the gap simply
- * does not run that day, which is what every cron in a zone does.
+ * Delegated, and the delegation is the point: a cron field grammar plus wall-clock
+ * arithmetic across DST is a solved problem with sharp edges, and the hand-rolled version
+ * this replaced earned three review findings in one pull request — a leap day read as "never
+ * fires", `MONSOON` parsed as Monday, and `0x10` parsed as 16. `croner` refuses all three,
+ * has no dependencies of its own, and is the same shape of parser a deploy target runs.
  *
- * `undefined` means nothing matches inside {@link SEARCH_DAYS} — a `30 2 31 2 *`, which is
- * legal, parses, and names no day.
+ * The array is the only thing left to do here: a job may declare several schedules, and the
+ * next fire is the earliest any of them names. `undefined` means none of them names a day —
+ * `30 2 31 2 *` parses and matches nothing — and the ticker arms nothing for it.
+ *
+ * Throws on an expression it cannot parse, which is `looksLikeCron`'s under-check arriving
+ * at its definitive parser: the manifest checks the shape and leaves the grammar to whatever
+ * runs the job.
  */
 export function nextFire(
   schedules: readonly string[],
   timeZone: string,
   after: Date,
 ): Date | undefined {
-  const compiled = schedules.map(compileSchedule);
-  if (!compiled.length) return undefined;
-  const format = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    weekday: "short",
-  });
-
-  const alreadyAt = wallClock(after, format).key;
-  let at = Math.floor(after.getTime() / 60_000) * 60_000 + 60_000;
-  const limit = at + SEARCH_DAYS * 24 * 60 * 60_000;
-  while (at <= limit) {
-    const wall = wallClock(new Date(at), format);
-    const onDate = compiled.filter((schedule) => matchesDate(schedule, wall));
-    if (wall.key !== alreadyAt && onDate.some((schedule) => matchesTime(schedule, wall))) {
-      return new Date(at);
-    }
-    // Nothing in the rest of this local day can match a date that does not, so step to the
-    // next local hour instead of the next minute — local midnight is an hour boundary, so
-    // this can never step over the start of a day that does match. It takes the worst case
-    // (a yearly expression) from half a million wall-clock formats to about ten thousand.
-    at += (onDate.length ? 1 : 60 - wall.minute) * 60_000;
-  }
-  return undefined;
-}
-
-function wallClock(at: Date, format: Intl.DateTimeFormat): WallClock {
-  const parts: Record<string, string> = {};
-  for (const part of format.formatToParts(at)) parts[part.type] = part.value;
-  return {
-    minute: Number(parts.minute),
-    hour: Number(parts.hour),
-    day: Number(parts.day),
-    month: Number(parts.month),
-    weekday: DAY_NAMES.indexOf(parts.weekday!.slice(0, 3).toLowerCase()),
-    key: `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`,
-  };
-}
-
-/**
- * Vixie cron's day rule, which Kubernetes' own parser also implements: when **both** day
- * fields are restricted the expression matches if **either** does, and otherwise the one
- * that was written governs. `0 0 1 * 1` is the first of the month *and* every Monday.
- */
-function matchesDate(schedule: Schedule, wall: WallClock): boolean {
-  if (!schedule.month.has(wall.month)) return false;
-  const day = schedule.day.has(wall.day);
-  const weekday = schedule.weekday.has(wall.weekday);
-  if (schedule.anyDay) return weekday;
-  if (schedule.anyWeekday) return day;
-  return day || weekday;
-}
-
-function matchesTime(schedule: Schedule, wall: WallClock): boolean {
-  return schedule.hour.has(wall.hour) && schedule.minute.has(wall.minute);
-}
-
-/**
- * Five fields into five sets.
- *
- * Throws on anything it cannot read. `looksLikeCron` in the manifest admits a wider
- * grammar than this deliberately — it checks the shape and leaves the definitive parse to
- * whatever runs the job — so a prompt job's expression is parsed here at load, where the
- * failure is a launch that refuses rather than a schedule that silently never fires.
- */
-function compileSchedule(expression: string): Schedule {
-  const source = DESCRIPTORS[expression.trim().toLowerCase()] ?? expression.trim();
-  const fields = source.split(/\s+/);
-  if (fields.length !== 5) {
-    throw new Error(`\`${expression}\` is not five cron fields`);
-  }
-  const [minute, hour, day, month, weekday] = fields as [string, string, string, string, string];
-  return {
-    minute: fieldValues(expression, minute, 0, 59),
-    hour: fieldValues(expression, hour, 0, 23),
-    day: fieldValues(expression, day, 1, 31),
-    month: fieldValues(expression, month, 1, 12, MONTH_NAMES),
-    // 7 and 0 are both Sunday, so the set is folded to 0..6 after the numbers are read.
-    weekday: new Set([...fieldValues(expression, weekday, 0, 7, DAY_NAMES)].map((d) => d % 7)),
-    anyDay: unrestricted(day),
-    anyWeekday: unrestricted(weekday),
-  };
-}
-
-/** `*` and `?` both mean "this field does not narrow anything". A step does narrow. */
-function unrestricted(field: string): boolean {
-  return field === "*" || field === "?";
-}
-
-function fieldValues(
-  expression: string,
-  field: string,
-  min: number,
-  max: number,
-  names?: readonly string[],
-): Set<number> {
-  const values = new Set<number>();
-  for (const term of field.split(",")) {
-    const [range, stride = "1"] = term.split("/");
-    const step = Number(stride);
-    if (!Number.isInteger(step) || step < 1) {
-      throw new Error(`\`${expression}\`: \`${term}\` has no usable step`);
-    }
-    let from: number;
-    let to: number;
-    if (unrestricted(range ?? "")) {
-      [from, to] = [min, max];
-    } else {
-      const ends = (range ?? "").split("-").map((end) => named(end, names, min, max));
-      if (ends.length > 2 || ends.some((end) => end === undefined)) {
-        throw new Error(`\`${expression}\`: \`${term}\` is not a value or a range`);
-      }
-      from = ends[0]!;
-      // `5/2` is "from 5, every 2" — a range with no end, which is the field's own end.
-      to = ends.length === 2 ? ends[1]! : term.includes("/") ? max : from;
-    }
-    if (from > to) throw new Error(`\`${expression}\`: \`${term}\` counts backwards`);
-    for (let value = from; value <= to; value += step) values.add(value);
-  }
-  return values;
-}
-
-/** One end of a range: a number in the field's own bounds, or a three-letter name. */
-function named(
-  end: string,
-  names: readonly string[] | undefined,
-  min: number,
-  max: number,
-): number | undefined {
-  const written = end.trim();
-  // `Number("")` is 0, so a blank end would read as a legal value and `1-` would refuse
-  // for counting backwards rather than for being half a range.
-  if (!written) return undefined;
-  // Exactly three, never a prefix of what was written. `MONSOON` truncates to a valid
-  // `MON` and would schedule Mondays for an expression nobody meant — and Kubernetes'
-  // own parser takes the three-letter abbreviations and nothing longer, so a `run` job
-  // and a `prompt` job carrying one expression have to refuse it the same way.
-  const byName = written.length === 3 ? names?.indexOf(written.toLowerCase()) : -1;
-  if (byName !== undefined && byName >= 0) return byName + min;
-  // Digits only. `Number` also reads `0x10` as 16, `+5` as 5 and `1e1` as 10, and every one
-  // of those is a field the Kubernetes parser refuses for a `run` job — the same invariant
-  // the three-letter rule above keeps: one expression means one thing to both bodies.
-  if (!/^\d+$/.test(written)) return undefined;
-  const value = Number(written);
-  return value >= min && value <= max ? value : undefined;
+  const fires = schedules
+    .map((expression) => new Cron(expression, { timezone: timeZone }).nextRun(after))
+    .filter((at): at is Date => at !== null);
+  return fires.length ? new Date(Math.min(...fires.map((at) => at.getTime()))) : undefined;
 }
