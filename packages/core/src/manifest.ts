@@ -863,9 +863,10 @@ export const JobSchema = z
      * A one-liner may be written inline. Anything longer is a file, root-relative to the
      * agent directory exactly as `persona` is, because a page of prompt inside a YAML block
      * scalar is a page nobody reviews. The file is read at load and refused there if it is
-     * missing, is not UTF-8, or is larger than a verdict artifact may be — a schedule that
-     * discovers its own prompt is unreadable at 18:00 has nothing to say and nowhere to say
-     * it.
+     * missing, is not UTF-8, is larger than a verdict artifact may be, or resolves outside
+     * the agent directory — a schedule that discovers its own prompt is unreadable at 18:00
+     * has nothing to say and nowhere to say it, and one reading a file from outside the
+     * bundle is not the reviewed steering the tier below claims it is.
      *
      * It is shaped like a skill — `name` and `description` in frontmatter, then the body
      * the tick sends — and that shape is the whole of what this fixes now. The runtime has

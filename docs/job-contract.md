@@ -444,6 +444,15 @@ skills arrive, the same file can be offered to the chat face — so *run the dig
 asked by a person, becomes this prompt invoked on request, with no second declaration and
 no edit to the file.
 
+The path resolves against the agent directory, as `persona` does, and is **refused at load
+if it resolves outside it** — along with a file that is missing, is not UTF-8, or is larger
+than a verdict artifact may be. The containment is what makes the rest of this section
+true: these words go to the brain as steering rather than as fenced data, and the reason
+they may is that they came out of the same reviewed bundle the persona did. A prompt read
+off a mounted path appears in no bundle diff. The check is lexical, so a symlink inside the
+bundle can still point out — that symlink is a reviewed line like `run.command`, and
+anyone who can write one can write the prompt file instead.
+
 **The tick runs in the gateway process, never in a pod.** The gateway holds an in-process
 clock: five cron fields — or one of the fixed descriptors, `@daily` and its siblings —
 resolved against `trigger.timezone`. `@every 5m` is refused at load, since an interval
