@@ -1,5 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+  statSync,
+  type Stats,
+} from "node:fs";
 import { resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -74,14 +83,28 @@ function within(path: string, root: string): boolean {
  * OOM or a silent hang, where every other bad prompt in this function is a named refusal.
  *
  * `O_NONBLOCK` is what keeps the *open* from being the thing that blocks — opening a FIFO
- * for reading waits for a writer otherwise — and the kind is then checked on the descriptor
- * rather than on the path, so nothing swapped in between is what gets read.
+ * for reading waits for a writer otherwise.
+ *
+ * Both checks are made on the descriptor rather than on the path: the kind, and the
+ * identity `admitted` pinned from the path containment already passed. Without the second
+ * one this reads *a* file at a path that was checked, rather than *the* file that was
+ * checked, and a swap in the window between them would put bytes nothing admitted in front
+ * of the brain as trusted words.
+ *
+ * It does not make the bundle safe against something that can write inside it while the
+ * gateway starts. Nothing here could: Node exposes no per-component no-follow traversal,
+ * and anything able to swap a path in the bundle can write that path's contents instead.
+ * What it does is make the containment check mean what it says.
  */
-function readBounded(path: string): Buffer {
+function readBounded(path: string, admitted: Stats): Buffer {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
-    if (!fstatSync(fd).isFile()) {
+    const opened = fstatSync(fd);
+    if (!opened.isFile()) {
       throw new Error("not a regular file — a prompt is a file in the bundle");
+    }
+    if (opened.dev !== admitted.dev || opened.ino !== admitted.ino) {
+      throw new Error("changed between the check that admitted it and the read");
     }
     // One past the limit: enough for the caller to refuse, and never the whole of something
     // that should have been refused.
@@ -148,7 +171,9 @@ export function readJobPrompt(job: PromptJob, agentDir: string): JobPrompt {
 
   let raw: Buffer;
   try {
-    raw = readBounded(real);
+    // The identity of what containment admitted, pinned here and compared against the
+    // descriptor that gets read — see {@link readBounded}.
+    raw = readBounded(real, statSync(real));
   } catch (error) {
     throw new Error(`${named}: ${errorText(error)}`);
   }
