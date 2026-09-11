@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { loadManifest } from "@sageox/agent-toolkit-core";
 import { SlackAdapter } from "@sageox/agent-toolkit-adapter-slack";
+import { generateKeypair } from "@sageox/agent-toolkit-adapter-buzz";
 import { buildAdapters, carriesTopLevelPosts } from "../src/surfaces.ts";
 
 const slackConfig = (channels: string) => `
@@ -68,14 +69,24 @@ describe("carriesTopLevelPosts", () => {
   afterEach(() => {
     delete process.env.TEST_SLACK_BOT_TOKEN;
     delete process.env.TEST_SLACK_APP_TOKEN;
+    delete process.env.TEST_BUZZ_NSEC;
   });
 
   it("agrees with the adapter each kind is actually built into", async () => {
     process.env.TEST_SLACK_BOT_TOKEN = "xoxb-test";
     process.env.TEST_SLACK_APP_TOKEN = "xapp-test";
+    // Every kind `ADAPTERS` registers, so the table cannot claim a capability for one the
+    // CLI never checks. Buzz builds offline — the adapter opens its relay in `start()`.
+    process.env.TEST_BUZZ_NSEC = generateKeypair().nsec;
     for (const [kind, yaml] of [
       ["console", "name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: console}]"],
       ["slack", slackConfig("{ id: GENG, reply: private }")],
+      [
+        "buzz",
+        "name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces:\n  - kind: buzz\n" +
+          "    relayUrl: wss://relay.example\n    identity: TEST_BUZZ_NSEC\n" +
+          "    channels: [{id: hive, reply: private}]",
+      ],
     ] as const) {
       const [adapter] = await buildAdapters(loadManifest(yaml));
       const built = typeof adapter!.post === "function" && typeof adapter!.postTargets === "function";

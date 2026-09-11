@@ -445,13 +445,20 @@ asked by a person, becomes this prompt invoked on request, with no second declar
 no edit to the file.
 
 The path resolves against the agent directory, as `persona` does, and is **refused at load
-if it resolves outside it** — along with a file that is missing, is not UTF-8, or is larger
+if it lands outside it** — along with a file that is missing, is not UTF-8, or is larger
 than a verdict artifact may be. The containment is what makes the rest of this section
 true: these words go to the brain as steering rather than as fenced data, and the reason
 they may is that they came out of the same reviewed bundle the persona did. A prompt read
-off a mounted path appears in no bundle diff. The check is lexical, so a symlink inside the
-bundle can still point out — that symlink is a reviewed line like `run.command`, and
-anyone who can write one can write the prompt file instead.
+off a mounted path appears in no bundle diff.
+
+Both the declared path and its real path are checked, because they fail differently. A
+symlink committed into the bundle is the one a path check cannot see, and it is the worse
+of the two: the diff shows a path and never the content, the content can change after the
+review that approved it, and what it resolves to reaches the brain as trusted words inside
+the process holding this agent's credentials. Writing the prompt file directly is not the
+same act — that puts the words themselves in front of a reviewer. A link that stays inside
+the bundle is fine, and so is a bundle reached through a symlinked home, which is how a
+mount usually arrives.
 
 **The tick runs in the gateway process, never in a pod.** The gateway holds an in-process
 clock: five cron fields — or one of the fixed descriptors, `@daily` and its siblings —

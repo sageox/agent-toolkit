@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list and not a second block. `prompt` takes an inline string for a one-liner or
   `{ file: ./path.md }` for anything longer, resolved against the agent directory exactly as
   `persona` is, read at load and refused there if it is missing, over 64 KiB, not UTF-8, or
-  resolves outside that directory — the words reach the brain as steering rather than as
-  fenced data, and the reason they may is that they came out of the reviewed bundle.
+  lands outside that directory by path or through a symlink — the words reach the brain as
+  steering rather than as fenced data, and the reason they may is that they came out of the
+  reviewed bundle.
   The file is shaped like a skill (frontmatter `name` and `description`, then the body the
   tick sends), so the day a skill can be offered to the chat face, "run the digest now"
   asked by a person is this prompt invoked on request with no second declaration.

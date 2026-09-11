@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -175,6 +175,40 @@ describe("readJobPrompt", () => {
     }
     await writeFile(join(inner, "digest.md"), "---\nname: d\ndescription: d\n---\ninside\n");
     expect(readJobPrompt(promptJob({ prompt: "{file: ./digest.md}" }), inner).body).toBe("inside");
+  });
+
+  it("refuses a symlink out of the bundle, which a reviewed diff never shows the content of", async () => {
+    // The case a path check cannot see. `jobs/digest.md -> /mnt/secrets/TOKEN` reviews as
+    // one short line, its content is never in the diff, and the content can change after
+    // the review that approved it — and it would reach the brain as trusted words.
+    const inner = join(dir, "bundle");
+    await mkdir(inner);
+    await writeFile(join(dir, "outside.md"), "---\nname: d\ndescription: d\n---\nelsewhere\n");
+    await symlink(join(dir, "outside.md"), join(inner, "digest.md"));
+
+    expect(() => readJobPrompt(promptJob({ prompt: "{file: ./digest.md}" }), inner)).toThrow(
+      /is a link to .*outside\.md, which is outside the agent directory/,
+    );
+  });
+
+  it("follows a link that stays inside the bundle, and an agent directory that is itself one", async () => {
+    // The containment is real-path on both sides, so a bundle reached through a symlinked
+    // home — which is how a mount usually arrives — is not mistaken for an escape.
+    const inner = join(dir, "bundle");
+    await mkdir(join(inner, "prompts"), { recursive: true });
+    await writeFile(
+      join(inner, "prompts", "shared.md"),
+      "---\nname: d\ndescription: d\n---\ninside\n",
+    );
+    await symlink(join(inner, "prompts", "shared.md"), join(inner, "digest.md"));
+    const linkedHome = join(dir, "home");
+    await symlink(inner, linkedHome);
+
+    for (const home of [inner, linkedHome]) {
+      expect(readJobPrompt(promptJob({ prompt: "{file: ./digest.md}" }), home).body, home).toBe(
+        "inside",
+      );
+    }
   });
 
   it("refuses a file that is not shaped like a skill", async () => {

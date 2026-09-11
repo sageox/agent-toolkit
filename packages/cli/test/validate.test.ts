@@ -215,6 +215,28 @@ describe("sageox-agent validate", () => {
     expect(stdout).toContain("does not list as a channel");
   });
 
+  it("fails on a report surface that carries no top-level post at all", async () => {
+    // The half a channel list cannot answer: console lists the channel and still has no way
+    // to publish a new top-level message in it, which is how a scheduled turn answers.
+    mkdirSync(join(dir, "jobs"));
+    writeFileSync(
+      join(dir, "jobs", "digest.md"),
+      "---\nname: daily-digest\ndescription: One short post per day.\n---\nSummarize the day.\n",
+    );
+    const path = write(
+      "agent.yaml",
+      AGENT_YAML("demo").replace(
+        "surfaces:\n  - kind: console\n",
+        "surfaces:\n  - kind: console\n    channels: [{id: local, reply: private}]\n",
+      ) + PROMPT_JOB.replace("{surface: slack, channel: C01}", "{surface: console, channel: local}"),
+    );
+
+    const { code, stdout } = await validate([path]);
+
+    expect(code).not.toBe(0);
+    expect(stdout).toContain("carries no top-level posts");
+  });
+
   it("fails on a prompt file the gateway would refuse to start on", async () => {
     const path = write("agent.yaml", withChannel(AGENT_YAML("demo")) + PROMPT_JOB);
 

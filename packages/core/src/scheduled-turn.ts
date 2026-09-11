@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -60,6 +60,11 @@ const Frontmatter = z.object({
 
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
+/** Whether `path` is `root` itself or sits beneath it. Both must already be resolved. */
+function within(path: string, root: string): boolean {
+  return path === root || path.startsWith(root + sep);
+}
+
 /**
  * Reads a prompt job's words, at load and once.
  *
@@ -78,24 +83,40 @@ export function readJobPrompt(job: PromptJob, agentDir: string): JobPrompt {
 
   const source = resolve(agentDir, job.prompt.file);
   const named = `job "${job.slug}" prompt ${source}`;
+  const steering =
+    "a prompt is read as steering, so it comes from the bundle and nowhere a review would " +
+    "not see it";
+
   // The words go to the brain as steering rather than inside the untrusted fence, and the
   // whole argument for that is that they came out of the same reviewed bundle the persona
-  // did. A path that leaves the agent directory breaks it: `/mnt/shared/digest.md` is
-  // mutable by whoever mounted it and appears in no bundle diff. Refused at load so the
-  // provenance claim is one the code keeps rather than one the manifest asserts.
+  // did. Both halves of that are checked here, because they fail differently.
   //
-  // Lexical, and only lexical. A symlink inside the bundle can still point out, and that is
-  // a line in the reviewed diff like any other — the same standing `run.command` has. What
-  // this closes is the case nobody reviews: a path in `agent.yaml` that plainly points away.
-  if (!source.startsWith(resolve(agentDir) + sep)) {
-    throw new Error(
-      `${named} is outside the agent directory — a prompt is read as steering, so it comes ` +
-        "from the bundle and nowhere a review would not see it",
-    );
+  // The path as written: `/mnt/shared/digest.md` is mutable by whoever mounted it and
+  // appears in no bundle diff.
+  if (!within(source, resolve(agentDir))) {
+    throw new Error(`${named} is outside the agent directory — ${steering}`);
   }
+
+  // And what the filesystem says it really is. A symlink committed into the bundle is the
+  // case the first check cannot see, and it is the worse one: the diff shows a path and
+  // never the content, the content can change after the review that approved it, and what
+  // it resolves to reaches the brain as trusted words in the process that holds this
+  // agent's credentials. Writing the prompt file directly is not the same act — that puts
+  // the words themselves in front of a reviewer.
+  let real: string;
+  try {
+    real = realpathSync(source);
+  } catch (error) {
+    // Missing, or unreadable on the way down. Same sentence the read below would give.
+    throw new Error(`${named}: ${errorText(error)}`);
+  }
+  if (!within(real, realpathSync(resolve(agentDir)))) {
+    throw new Error(`${named} is a link to ${real}, which is outside the agent directory — ${steering}`);
+  }
+
   let raw: Buffer;
   try {
-    raw = readFileSync(source);
+    raw = readFileSync(real);
   } catch (error) {
     throw new Error(`${named}: ${errorText(error)}`);
   }
