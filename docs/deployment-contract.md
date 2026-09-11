@@ -14,7 +14,7 @@ around it. A deployment target must preserve this contract instead of translatin
 | Identity | Run exactly one replica for an agent identity. Two replicas would answer twice and race on one cursor. |
 | Shutdown | Allow longer than `limits.turnTimeoutMs` between `SIGTERM` and `SIGKILL`. |
 | Warmup | Connect first. Repository clone/fetch, indexing, cache fills, and other recoverable warmup never gate the agent process. The runtime enforces its half: only a precondition decides whether `run` starts, and no capability health ever does. See [Startup and readiness](startup-and-readiness.md). |
-| Jobs | Run every entry in `jobs[]` on its declared schedule, under a deadline derived from its budget, without overlap and without retry. An agent whose declared jobs render nothing deploys looking healthy with no scheduled work. See [Jobs](#jobs). |
+| Jobs | Run every `jobs[]` entry that declares a `run` body on its declared schedule, under a deadline derived from its budget, without overlap and without retry. An entry declaring a `prompt` body is a turn on the agent's own clock: no scheduled object, no deadline to derive, and rendering nothing for one is correct rather than a symptom. A `run` job left unrendered is the symptom — it deploys looking healthy with no scheduled work, and nothing at the target can tell that from an agent that declared none. See [Jobs](#jobs). |
 
 The runtime does not need an inbound port: Buzz and Slack use outbound connections. A target
 therefore should not create a Service or Ingress unless a future surface explicitly needs
@@ -51,8 +51,9 @@ the runtime will refuse.
 
 ## Jobs
 
-`jobs[]` declares an agent's scheduled work — a trigger, a hard switch, a bound, and the
-process to run ([the jobs RFC](design/2026-08-19-jobs-rfc.md)). It lives in `agent.yaml`
+`jobs[]` declares an agent's scheduled work — a trigger, a hard switch, and a body: either
+a process to run and the bound to run it under, or a prompt the agent's own gateway runs as
+a turn ([the jobs RFC](design/2026-08-19-jobs-rfc.md)). It lives in `agent.yaml`
 for the reason at the top of this file: a job declared in a target's own values is the
 second configuration model, and that is how a fleet arrives at twelve jobs described in six
 different charts.
@@ -63,7 +64,7 @@ renders a job with no clause to implement decides the deadline, the retry policy
 overlap rule inside its own template, which is the second configuration model this contract
 exists to prevent.
 
-A target that supports jobs owes each declared job:
+A target that supports jobs owes each job that declares a **`run`** body:
 
 | Per declared job | From |
 |---|---|
@@ -74,14 +75,28 @@ A target that supports jobs owes each declared job:
 | No platform retry — a failed run is a failed run | — |
 | A writable bundle directory and somewhere the verdict artifact lands — durable between runs is not owed | `Agent definition`, above |
 
+A job that declares a **`prompt`** body instead is owed nothing here, and a target must
+render no scheduled object for one. Its body is a brain turn, held on a clock inside the
+agent process the target already deploys — there is no command to run, no budget to derive
+a deadline from, and a scheduled object would exec `job run` against a job with no argv.
+Mirroring it is still the target's to do where a target mirrors jobs at all, so that a job
+left out of the mirror stays distinguishable from one the mirror says renders nothing; the
+chart's marker is `prompt: true`. See
+[the job body contract](job-contract.md#a-job-that-is-a-turn).
+
 `run.command` and `run.args` are a list, and the list is the whole interface: no shell
 string, so nothing can be word-split or interpolated into one.
 
-`suspend` parks the clock, not the job. A human may still start a parked job on request,
-and that run is the runtime's to admit — it arrives through the agent process the target
-already deploys, never through a scheduled object
-([RFC §6.3](design/2026-08-19-jobs-rfc.md#63-the-switch-parks-automation-not-the-job)). What
-a target owes is that the schedule itself does not fire.
+`suspend` parks the clock, not the job. A human may still start a parked **`run`** job on
+request, and that run is the runtime's to admit — it arrives through the agent process the
+target already deploys, never through a scheduled object
+([RFC §6.3](design/2026-08-19-jobs-rfc.md#63-the-switch-parks-automation-not-the-job)). A
+parked `prompt` job has no such door: nothing may ask for one, so it stays parked until the
+switch is armed. What a target owes either way is that the schedule itself does not fire.
+
+The two paragraphs below are a `run` body's. A `prompt` body has no budget to derive a
+deadline from and no scheduled object to hold single-flight over — the gateway's own clock
+runs it, one turn at a time, inside the process the target already deploys.
 
 The deadline is derived, never a setting of its own. An operator who can set it independently
 will eventually set it below the budget, and the job is then SIGKILLed inside the window
@@ -173,15 +188,24 @@ ServiceAccount with token automount disabled, file-mounted secrets, and its own
 `ReadWriteOnce` PVC. One release may contain many such workloads. Configuration changes
 restart only the affected identity.
 
-Jobs render as one `CronJob` per declared schedule, carrying the schedule, the zone, the
-hard switch, the derived deadline, single-flight, and no retry — the whole of the clause
-above and nothing beyond it. Each Job execs `sageox-agent job run <slug> --trigger schedule`
-against the bundle the Deployment already runs, so the rest of the envelope stays where the
-clause puts it: the host reads the job's own argv, admits it past both switches, bows out at
-the budget, and mints the verdict. The declaration reaches the chart as a mirror of `jobs[]`
-in that agent's values, because Helm cannot read an operator-supplied bundle at render
-time; the mirror carries the clock and the bound only — not the argv, not the switch —
-so it cannot become a second place a job is decided.
+A **`run`** job renders as one `CronJob` per declared schedule, carrying the schedule, the
+zone, the hard switch, the derived deadline, single-flight, and no retry — the whole of the
+clause above and nothing beyond it. Each Job execs `sageox-agent job run <slug> --trigger
+schedule` against the bundle the Deployment already runs, so the rest of the envelope stays
+where the clause puts it: the host reads the job's own argv, admits it past both switches,
+bows out at the budget, and mints the verdict. The declaration reaches the chart as a mirror
+of `jobs[]` in that agent's values, because Helm cannot read an operator-supplied bundle at
+render time; the mirror carries the clock and the bound only — not the argv, not the switch
+— so it cannot become a second place a job is decided.
+
+A **`prompt`** job renders no `CronJob`, because the Deployment already runs its clock. It
+is mirrored as `{slug, suspend, trigger, prompt: true}` and states no budget — the chart
+refuses one, since nothing there would bound it — and the marker is what keeps a job left
+out of the mirror distinguishable from one the mirror says renders nothing. The chart also
+refuses a `sharedVolumes` claim mounted inside `/agents/<name>`: a prompt job's words are
+read from `skills/<name>/SKILL.md` under that directory and reach the brain as steering, so a
+mount that could supply them from somewhere else is refused where it is made. The runtime cannot catch that one — a
+mount point is an ordinary directory to `realpath`.
 [The chart's README](../deploy/helm/README.md#jobs) has the rendered shape and what a job
 Pod does not share by default — the agent's `ReadWriteOnce` claim, which ties its placement
 to the agent's node. It stages its bundle onto an `emptyDir` of its own instead.

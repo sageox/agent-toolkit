@@ -952,3 +952,219 @@ describe("answers come home", () => {
     expect(slack.sent.at(-1)?.msg.text).toBe("ida (buzz · hive): and again"); // "one more" never came
   });
 });
+
+/**
+ * A surface that can create a top-level post, which is what a scheduled turn answers with.
+ *
+ * `send` throws here on purpose. It is the reply path, and every real adapter needs an
+ * inbound event to thread onto — a synthetic tick has none, so a tick that reached `send`
+ * would be publishing under an id no surface ever issued.
+ */
+function postingAdapter(channels: ChannelRef[]) {
+  let emit!: (e: InboundEvent) => void;
+  const posts: { channel: ChannelRef; msg: GuardedMessage }[] = [];
+  const adapter: SurfaceAdapter = {
+    kind: "slack",
+    start: async (onEvent) => {
+      if (onEvent) emit = onEvent;
+    },
+    send: async () => {
+      throw new Error("a scheduled turn must not reply through the inbound path");
+    },
+    postTargets: () => channels,
+    post: async (channel, msg) => {
+      posts.push({ channel, msg });
+      return { surface: "slack", nativeId: `p${posts.length}` };
+    },
+    stop: async () => {},
+  };
+  return { adapter, posts, inject: (e: InboundEvent) => emit(e) };
+}
+
+const HIVE: ChannelRef = { surface: "slack", id: "C01", isPublic: false, name: "hive" };
+
+/** A clock tick as `ScheduledTurns` builds one: no author a surface could resolve. */
+const tickEv = (text: string): InboundEvent => ({
+  id: { surface: "slack", nativeId: "schedule:digest:run1" },
+  surface: "slack",
+  channel: HIVE,
+  author: { surface: "slack", id: "schedule:digest", isSelf: false, isAgent: false },
+  text,
+  mentionsMe: true,
+  ts: "2026-09-10T18:00:00Z",
+  raw: null,
+});
+
+describe("Gateway.tick", () => {
+  const ticking = (extra = "", respondTo = "owner-only\nowner: [U08NOBODY]") =>
+    loadManifest(
+      `name: t\nbrain: {provider: mock}\nrespondTo: ${respondTo}\n` +
+        "surfaces: [{kind: slack, channels: [{id: C01, name: hive, reply: private}]}]\n" +
+        extra,
+    );
+
+  it("skips the author gate and answers with a top-level post", async () => {
+    const f = postingAdapter([HIVE]);
+    // `owner-only`, and the clock is not the owner: every other inbound event here would
+    // be refused, and the tick is admitted because there is no channel author to weigh.
+    const gw = new Gateway({ manifest: ticking(), adapters: [f.adapter], brain: new MockBrain() });
+    await gw.start();
+
+    const outcome = await gw.tick(tickEv("summarize the day"), { surface: "slack", channel: "C01" });
+
+    expect(outcome).toEqual({ asked: 1, sent: 1 });
+    expect(f.posts).toHaveLength(1);
+    expect(f.posts[0].msg.text).toBe("echo: summarize the day");
+    expect(f.posts[0].channel.id).toBe("C01");
+  });
+
+  it("stops at the kill switch and at the rate cap, and never starts a turn", async () => {
+    const f = postingAdapter([HIVE]);
+    const gw = new Gateway({
+      manifest: ticking("limits: {perChannelPerMinute: 1}\n"),
+      adapters: [f.adapter],
+      brain: new MockBrain(),
+    });
+    await gw.start();
+
+    gw.stopServing("operator halted the agent");
+    expect(await gw.tick(tickEv("one"), { surface: "slack", channel: "C01" })).toEqual({
+      asked: 0,
+      sent: 0,
+      skipped: "kill_switch",
+    });
+    gw.resumeServing();
+
+    expect(await gw.tick(tickEv("two"), { surface: "slack", channel: "C01" })).toMatchObject({ sent: 1 });
+    expect(await gw.tick(tickEv("three"), { surface: "slack", channel: "C01" })).toEqual({
+      asked: 0,
+      sent: 0,
+      skipped: "limit:perChannelPerMinute",
+    });
+    expect(f.posts).toHaveLength(1);
+  });
+
+  it("waits behind a live turn in the same channel rather than interleaving with it", async () => {
+    const f = postingAdapter([HIVE]);
+    const entered: string[] = [];
+    let release!: () => void;
+    let chatStarted!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Signalled from inside the brain rather than waited out on a clock: a sleep long
+    // enough on this machine is a sleep that, on a loaded runner, asserts an empty list
+    // because nothing had started yet — and then the test passes without proving anything.
+    const started = new Promise<void>((resolve) => {
+      chatStarted = resolve;
+    });
+    const brain: Brain = {
+      async *runTurn(event: InboundEvent): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        entered.push(event.author.id);
+        if (event.author.id === "u1") {
+          chatStarted();
+          await held;
+        }
+        yield { type: "reply", msg: { text: `done ${event.author.id}` } };
+      },
+    };
+    const gw = new Gateway({ manifest: ticking("", "anyone"), adapters: [f.adapter], brain });
+    await gw.start();
+
+    f.inject({ ...tickEv("a message"), author: { surface: "slack", id: "u1", isSelf: false, isAgent: false } });
+    await started; // the chat turn is inside the brain and holding the channel
+
+    const ticked = gw.tick(tickEv("the digest"), { surface: "slack", channel: "C01" });
+    // Asserted with nothing awaited in between, and that is the point: `ChannelQueue.submit`
+    // pumps synchronously, so if the tick could overtake a running turn in its channel it
+    // would already have entered the brain by this line.
+    expect(entered).toEqual(["u1"]);
+
+    release();
+    await ticked;
+    expect(entered).toEqual(["u1", "schedule:digest"]);
+    // Only the tick's answer is here: the chat turn replies through `send`, which this
+    // adapter refuses on purpose — see `postingAdapter`.
+    expect(f.posts.map((post) => post.msg.text)).toEqual(["done schedule:digest"]);
+  });
+
+  it("counts what the guard refused, and posts none of it", async () => {
+    const f = postingAdapter([{ ...HIVE, isPublic: true }]);
+    // A public channel the manifest never consented to: `reply: private` above, so the
+    // guard refuses every post into it and the brain's one ask reaches nobody.
+    const gw = new Gateway({ manifest: ticking(), adapters: [f.adapter], brain: new MockBrain() });
+    await gw.start();
+
+    expect(await gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" })).toEqual({
+      asked: 1,
+      sent: 0,
+    });
+    expect(f.posts).toHaveLength(0);
+  });
+
+  it("refuses a step that arrives after the tick was already recorded", async () => {
+    const f = postingAdapter([HIVE]);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let resumed = false;
+    let stepTaken!: () => void;
+    // The completion point, and it is a real one rather than a guess: this `finally` runs
+    // when the abandoned generator is returned, which cannot happen before `drive` has
+    // taken the late step off the `yield` and offered it to the send.
+    const taken = new Promise<void>((resolve) => {
+      stepTaken = resolve;
+    });
+    // Suspended inside an `await` when the timeout wins, then coming back with a reply.
+    // `withTimeout` releases the queue slot and cannot cancel this — so the send has to.
+    const brain: Brain = {
+      async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        try {
+          await held;
+          resumed = true;
+          yield { type: "reply", msg: { text: "late" } };
+        } finally {
+          stepTaken();
+        }
+      },
+    };
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain,
+    });
+    await gw.start();
+
+    const outcome = await gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" });
+    expect((outcome.error as Error).message).toMatch(/turn timed out/);
+
+    release();
+    await taken;
+    // The brain came back and asked to post, and nothing reached the channel: the host has
+    // already said this tick proved nothing, and a second, contradicting post at top level
+    // is what this closes.
+    expect(resumed).toBe(true);
+    expect(f.posts).toHaveLength(0);
+  });
+
+  it("answers a turn that never finished with the tally and the failure", async () => {
+    const f = postingAdapter([HIVE]);
+    const brain: Brain = {
+      // eslint-disable-next-line require-yield
+      async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        await new Promise(() => {}); // hangs until the turn's own clock gives up
+      },
+    };
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain,
+    });
+    await gw.start();
+
+    const outcome = await gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" });
+    expect(outcome.sent).toBe(0);
+    expect((outcome.error as Error).message).toMatch(/turn timed out/);
+  });
+});

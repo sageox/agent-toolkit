@@ -106,6 +106,44 @@ and an operator running `sageox-agent job run` at the host all still can.
 `memory add` and `mcp add` write these for you. Reach for this table only when editing a
 policy by hand — and `doctor` will tell you if you get it wrong.
 
+## A job that is a scheduled turn
+
+A `jobs[]` entry declares exactly one body. `run: {command, args}` is a process the host
+spawns in a pod of its own, with a scrubbed environment and whatever credentials it
+declared. `prompt:` is the other one: words, run as an ordinary guarded brain turn inside
+`sageox-agent run`, on a clock the gateway holds itself.
+
+```yaml
+jobs:
+  - slug: daily-digest
+    archetype: watch
+    description: Summarize the last 24 hours of the status channel and post it on Slack.
+    trigger: { schedules: ["0 18 * * *"], timezone: America/Los_Angeles }
+    killSwitch: { failDirection: closed }
+    prompt: { skill: daily-digest }           # or an inline string, for a one-liner
+    report: { surface: slack, channel: "C0123456789" }
+```
+
+Reach for it when the work needs the brain and no write credential — a daily digest of one
+surface's channel posted on another, a reminder into a channel, *check X with your tools
+and post what you find*. Reach for `run:` when the work is deterministic, needs a
+credential, or is long.
+
+The tick posts at top level in `report.channel`, through the same guard the brain's own
+`post_message` clears; an empty reply posts nothing. The kill switch, `suspend`, `doctor`,
+`job park` and the work events are the ones every other job has — which is the point of
+declaring it here rather than scheduling a bot message on the platform: a clock outside the
+agent is a clock none of those can see. `prompt` refuses `run`, `worker`, `parameters`,
+`model`, `output`, `report.probe`, `report.history`, `trigger.onRequest` and
+`trigger.webhook`; `budget` is optional and can only shorten the turn.
+
+The words live at `skills/<name>/SKILL.md` in the bundle — the layout every agent runtime
+uses for a page of instructions an agent reads and follows — and the manifest names the
+skill rather than pointing at a path, so the same name is what a person will later say to
+invoke it. It is read when the gateway starts, so editing it needs a restart, and `doctor`
+prints the resolved file, its size, and the next fire time in the declared zone. The full
+contract is in [the job body contract](../job-contract.md#a-job-that-is-a-turn).
+
 ## What the log says about tool calls
 
 Every MCP tool call writes one line, whether it ran or not:

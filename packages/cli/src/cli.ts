@@ -66,6 +66,13 @@ import {
   describeJobRun,
   serveJobs,
   requestableJobs,
+  isPromptJob,
+  readJobPrompt,
+  type PromptJob,
+  resolveTarget,
+  ScheduledTurns,
+  nextFire,
+  type ScheduledTurn,
   JOB_SERVER,
   JOB_RUN_TOOL,
   JOB_RUN_TOOL_NAME,
@@ -93,7 +100,7 @@ import {
   servePrivateBrain,
   toHexPubkey,
 } from "@sageox/agent-toolkit-adapter-buzz";
-import { buildAdapters, buzzSurface, buzzTarget, type BuzzTarget } from "./surfaces.ts";
+import { buildAdapters, buzzSurface, buzzTarget, carriesTopLevelPosts, type BuzzTarget } from "./surfaces.ts";
 import { normalizeActorId } from "./identity.ts";
 import {
   createCmd,
@@ -277,6 +284,7 @@ async function buildBrain(
   egress?: SurfaceEgress,
   codeWorkspace?: RepoWorkspace,
   policy?: ToolPolicy,
+  switchSource?: SwitchSource,
 ): Promise<{
   brain: Brain;
   closeHosted: () => Promise<void>;
@@ -415,7 +423,7 @@ async function buildBrain(
     jobs = new JobHost({
       external: externalJobs(),
       ...jobWorkEvents(manifest.name),
-      switchSource: await jobSwitchSource(manifest, secretsDir),
+      switchSource,
       secretOpts: { dir: secretsDir },
       // A job started from chat announces itself exactly as a scheduled one does. The
       // gateway already holds the adapters and the guarded path through them, so this
@@ -1429,6 +1437,9 @@ async function runCmd(argv: string[]): Promise<void> {
   const state = loadState(statePath);
   const adapters = await buildAdapters(manifest, { secretsDir, since: state.since });
   const egress = new SurfaceEgress({ manifest, adapters });
+  // One reader for both things that admit a job here — the chat door and the ticker below
+  // — so a parked switch means the same thing to each.
+  const switchSource = await jobSwitchSource(manifest, secretsDir);
   const { brain, closeHosted, postMessage, react, jobs, team } = await buildBrain(
     manifest,
     agent.dir,
@@ -1436,6 +1447,7 @@ async function runCmd(argv: string[]): Promise<void> {
     egress,
     codeWorkspace,
     policy,
+    switchSource,
   );
 
   // One lookup, so a credential that was already dead at deploy time is not first noticed
@@ -1481,6 +1493,11 @@ async function runCmd(argv: string[]): Promise<void> {
     capabilities: () => [...(codeWorkspace?.readings() ?? []), ...(team?.readings() ?? [])],
   });
 
+  // Read before anything starts listening: a schedule whose prompt file is missing,
+  // oversized, or not UTF-8 refuses the launch here rather than discovering it at 18:00,
+  // with nothing to say and no turn to say it in.
+  const scheduled = scheduledTurns(manifest, agent.dir, egress, gw, switchSource);
+
   // Persist the resume cursor periodically and on exit, so a restart does not reopen a
   // deaf window over the messages that arrived while the process was down.
   const persist = () => {
@@ -1497,9 +1514,19 @@ async function runCmd(argv: string[]): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(ticker);
+    // Closes the door before anything waits: a tick admitted after this would be a turn
+    // `drain` has already gone past.
+    scheduled?.stop();
     process.stdout.write("\nshutting down…\n");
     // A turn may be waiting for a ledger refresh. Cancel Git before waiting for turns.
-    await Promise.all([team?.stopSync().catch(() => {}), gw.drain().catch(() => {})]);
+    // `drained` is in the same pass rather than before it, for that reason: a tick's turn
+    // can be the one blocked on the ledger, and waiting for it first would hold the whole
+    // shutdown behind a refresh nothing had cancelled yet.
+    await Promise.all([
+      team?.stopSync().catch(() => {}),
+      gw.drain().catch(() => {}),
+      scheduled?.drained().catch(() => {}),
+    ]);
     // After the turns and before the surfaces close, which is the only window where both
     // are true: a job started inside a turn was just waited for by `drain`, while a
     // detached one never was and is owed a last word through a channel that is still up.
@@ -1520,11 +1547,117 @@ async function runCmd(argv: string[]): Promise<void> {
 
   await gw.start();
   await starting; // report a brain that never came up, now that we are listening
+  // After the surfaces are up: a tick whose turn landed before them would post through an
+  // adapter that has not connected.
+  scheduled?.start();
   const surfaces = manifest.surfaces.map((s) => s.kind).join(", ");
   const model = manifest.brain.model ? ` model=${manifest.brain.model}` : "";
   process.stdout.write(
     `sageox-agent "${manifest.name}" is live — brain=${manifest.brain.provider}${model} surfaces=[${surfaces}] respondTo=${manifest.respondTo}\n`,
   );
+}
+
+/**
+ * The gateway's own clock, or nothing when no job declares a prompt body.
+ *
+ * Everything it needs is resolved here, at startup, where a failure is a launch that
+ * refuses: the words each tick sends, and the configured channel each one is addressed
+ * to. A prompt job that reports to a channel no surface carries has nowhere to run at all
+ * — its turn answers there and nowhere else — so that is a refusal rather than a note.
+ */
+function scheduledTurns(
+  manifest: AgentManifest,
+  agentDir: string,
+  egress: SurfaceEgress,
+  gateway: Gateway,
+  switchSource?: SwitchSource,
+): ScheduledTurns | undefined {
+  const declared = manifest.jobs.filter(isPromptJob);
+  if (!declared.length) return undefined;
+
+  const turns: ScheduledTurn[] = declared.map((job) => {
+    // The declared question first, in the same words `doctor` and `validate` use — a
+    // bundle that reaches here having passed either of those should fail for something
+    // they could not have seen, not for something they could.
+    const unreachable = unreachableReport(manifest, job);
+    if (unreachable) throw new Error(unreachable);
+
+    // Then the live one, which is a different fact: the surface is configured to post and
+    // lists this channel, and the adapter it was built into offers no such target.
+    const targets = egress.targets().filter((target) => target.surface === job.report.surface);
+    const channel = resolveTarget(targets, job.report.surface, job.report.channel);
+    if (!channel) {
+      throw new Error(
+        `job "${job.slug}" reports to ${job.report.surface}:${job.report.channel}, which the ` +
+          "surface this agent built offers no post target for",
+      );
+    }
+    return { job, prompt: readJobPrompt(job, agentDir), channel };
+  });
+
+  // The same work-event records a process job writes, under the same schema. A prompt job
+  // that went quiet has to be diagnosable from the same place every other job is.
+  const { onStart, onRun } = jobWorkEvents(manifest.name);
+  const clock = new ScheduledTurns({
+    turns,
+    gateway,
+    turnTimeoutMs: manifest.limits.turnTimeoutMs,
+    switchSource,
+    post: jobPoster(egress),
+    onStart,
+    onRun,
+  });
+
+  // Printing the roster is also what parses every expression, and that is why it happens
+  // here rather than beside `start()`: `looksLikeCron` checks the shape in the manifest and
+  // leaves the parse to whatever runs the job, so this is the definitive one — and a throw
+  // at the first fire would take down a gateway that was already live and answering.
+  for (const turn of clock.turns) {
+    process.stdout.write(
+      `  scheduled turn "${turn.job.slug}" next fires ` +
+        `${describeFire(clock.next(turn), turn.job.trigger.timezone)}\n`,
+    );
+  }
+  return clock;
+}
+
+/**
+ * Why a prompt job's `report` destination is not a channel it can post into, or nothing.
+ *
+ * Read off the manifest rather than off the live surfaces, so `validate` can ask it with no
+ * agent home, no credential and no relay — which is the whole point of that command. `run`
+ * asks the surfaces themselves, where the answer is narrower still: a listed channel on a
+ * surface that carries no top-level post is refused there and cannot be here.
+ */
+function unreachableReport(manifest: AgentManifest, job: PromptJob): string | undefined {
+  const named = `job "${job.slug}" reports to ${job.report.surface}:${job.report.channel}`;
+  const nowhere = "its scheduled turn answers there and nowhere else, so `run` refuses to start";
+  // Asked first, because it is the one a channel list cannot answer: a console surface may
+  // list the channel and still have no way to publish a new top-level message in it.
+  if (!carriesTopLevelPosts(job.report.surface)) {
+    return `${named}, but the ${job.report.surface} surface carries no top-level posts — ${nowhere}`;
+  }
+  const surface = manifest.surfaces.find((declared) => declared.kind === job.report.surface);
+  const targets = (surface?.channels ?? []).map((channel) => ({
+    surface: job.report.surface,
+    id: channel.id,
+    isPublic: channel.reply === "public",
+    name: channel.name,
+  }));
+  if (resolveTarget(targets, job.report.surface, job.report.channel)) return undefined;
+  return `${named}, which that surface does not list as a channel — ${nowhere}`;
+}
+
+/**
+ * A next fire time, in the zone the job declared it in.
+ *
+ * `never` is a legal answer and a final one — `0 0 31 2 *` parses and names no day — so it
+ * is said plainly rather than hedged: the search horizon is long enough to reach the
+ * sparsest real schedule, and the ticker arms nothing for a job that comes back empty.
+ */
+function describeFire(at: Date | undefined, timezone: string): string {
+  if (!at) return `never — no expression matches any day (timezone ${timezone})`;
+  return `${at.toLocaleString("sv-SE", { timeZone: timezone })} ${timezone}`;
 }
 
 /**
@@ -1847,6 +1980,17 @@ async function jobCmd(argv: string[]): Promise<void> {
     return;
   }
   if (sub === "arm" || sub === "park") return jobSwitchCmd(manifest, job, sub, secretsDir);
+
+  // `arm` and `park` are above, because a prompt job's kill switch is an ordinary one and
+  // parking it is exactly what an operator reaches for. Running one is what this cannot do:
+  // its body is words, and the only thing that can send them is a gateway with a brain.
+  if (isPromptJob(job)) {
+    throw new Error(
+      `job "${job.slug}" is a scheduled turn — its body is a prompt, run by the gateway in ` +
+        "its own process on its own clock, so there is no process here to spawn. " +
+        `\`sageox-agent run\` holds that clock; \`sageox-agent job park ${job.slug}\` stops it`,
+    );
+  }
 
   // Before anything is opened: a mistyped flag is a refusal at the terminal, not a relay
   // connection and a chdir that a throw would leave behind.
@@ -2203,10 +2347,30 @@ function validateCmd(argv: string[]): boolean {
       // strings, so validating one rung below the runtime would pass a file the runtime
       // refuses at startup — this command's own failure mode.
       const manifest = readManifest(path);
+      // Read here and not only reported: `run` refuses to start on a prompt file it cannot
+      // read, so a CI step that passed on one would be green about a bundle that will not
+      // boot. Resolved against the manifest's own directory, exactly as `run` resolves it.
+      const scheduled = manifest.jobs
+        .filter(isPromptJob)
+        .map((job) => ({ job, prompt: readJobPrompt(job, dirname(resolve(path))) }));
+      // The other thing `run` refuses to start on. Asked here for the same reason the
+      // prompt file is read: a CI step that passed would be green about a bundle that
+      // cannot boot.
+      const unreachable = scheduled
+        .map(({ job }) => unreachableReport(manifest, job))
+        .filter((why): why is string => why !== undefined);
+      if (unreachable.length) throw new Error(unreachable.join("\n"));
       process.stdout.write(
         `  ok    ${path} — ${manifest.name}, ${manifest.surfaces.length} surface(s), ` +
           `${manifest.jobs.length} job(s)\n`,
       );
+      for (const { job, prompt } of scheduled) {
+        const at = nextFire(job.trigger.schedules, job.trigger.timezone, new Date());
+        process.stdout.write(
+          `        ${job.slug}: scheduled turn, prompt ${prompt.source} (${prompt.bytes} bytes), ` +
+            `next ${describeFire(at, job.trigger.timezone)}\n`,
+        );
+      }
     } catch (error) {
       invalid++;
       // Zod's own rendering, because its default `message` is the whole issue list as JSON:
@@ -2543,6 +2707,31 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
           "rather than waiting — but they declare no `report`, so the verdict would reach " +
           "no channel; give each one a report destination",
       );
+    }
+
+    // A prompt job runs in this process on a clock, so `run` reads its words at startup and
+    // refuses the launch if it cannot. Reported here for the same reason every secretRef is:
+    // a clean doctor must not precede a launch that dies on a file.
+    for (const job of manifest.jobs.filter(isPromptJob)) {
+      try {
+        // Inside the `try` with the file read: `looksLikeCron` admits an expression this
+        // parser may still refuse, and that refusal is a finding rather than a crash.
+        const at = nextFire(job.trigger.schedules, job.trigger.timezone, new Date());
+        const prompt = readJobPrompt(job, agent.dir);
+        const line =
+          `job "${job.slug}" is a scheduled turn — prompt ${prompt.source} ` +
+          `(${prompt.bytes} bytes), next ${describeFire(at, job.trigger.timezone)}`;
+        // A schedule that matches no day loads, deploys, and is never heard from. Reported
+        // rather than refused: it is a legal expression, and the operator chose it.
+        if (at) ok.push(line);
+        else warnings.push(line);
+      } catch (error) {
+        problems.push(errorText(error));
+      }
+      // `loadManifest` checks that `report.surface` is declared; the channel is checked
+      // here, against the same list and the same resolution a post is admitted through.
+      const unreachable = unreachableReport(manifest, job);
+      if (unreachable) problems.push(unreachable);
     }
 
     if (manifest.tools) {

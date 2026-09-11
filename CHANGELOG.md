@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A job's body may be a prompt, so an agent can do light scheduled work only its brain
+  can do.** Work started in exactly two ways before this: a turn, when a message mentioned
+  the agent, and a job, which spawns a process with no brain, no tool broker, and no second
+  surface. So nothing could read channel A on surface X, summarize it, and post to channel B
+  on surface Y — and nothing could happen at 18:00 unless somebody posted a mention at
+  18:00. Every workaround put the clock outside the agent, where its kill switch, `suspend`,
+  `doctor` and work events cannot see it. A `jobs[]` entry now declares exactly one body:
+  `run` for a process in a pod of its own, or the new `prompt` for a brain turn in the
+  gateway process. Everything around it is the envelope that was already there — `slug`,
+  `archetype`, `trigger.schedules` and `trigger.timezone`, `killSwitch`, `suspend`,
+  `report`, `announce`, the work events, `doctor` and `validate` — which is why this is one
+  list and not a second block. `prompt` takes either an inline string or
+  `{ skill: <name> }` — **a skill**, at `skills/<name>/SKILL.md` in the bundle, which is the
+  layout every agent runtime already uses for a page of instructions an agent reads and
+  follows. Inline is for something short and the schema does not enforce that; a page of
+  prompt inside a YAML block scalar is a page nobody reviews. Named rather than pointed at, because a name is what a person
+  says and what a tool argument carries: the day a skill can be invoked from the chat face,
+  "run the digest now" resolves the same name through the same lookup, with no second
+  declaration and no file moved. The frontmatter `name` must match the directory. The root
+  is the bundle's own `skills/` rather than a harness's discovery directory, which is
+  `docs/naming.md` applied to a layout. Read at load and refused there if the skill is
+  missing, over 64 KiB, not UTF-8, not a regular file, or really lands outside the bundle's
+  `skills/` tree — the words reach the brain as steering rather than as fenced data, and the
+  reason they may is that they came out of the reviewed bundle. A name cannot be absolute,
+  cannot traverse, and cannot reach the runtime's own `workspace/`, so those are not doors
+  this closes one at a time.
+
+  The tick admits in the job host's order — kill switch, `suspend`, then the gateway's own
+  turn caps — and a refused tick is recorded and posts nothing. It then enters the turn path
+  as a synthetic inbound event: the author is `schedule:<slug>`, an id no surface issues, so
+  the author gate is skipped because there is nobody to weigh, and nothing else about the
+  turn changes. The reply is a top-level post in `report.channel` through the same guarded
+  chokepoint the brain's own `post_message` clears; an empty reply posts nothing. The prompt
+  comes from the reviewed bundle and nowhere else — no channel text can start one of these
+  turns, edit its prompt, or claim to be one. Ticks that fall while the gateway is down are
+  not replayed, and the in-process clock computes the next fire in `trigger.timezone`: a
+  local time a spring-forward deletes runs at the next real instant, and the hour a
+  fall-back repeats fires once. `doctor` and `validate` print where each prompt job's words came from
+  — a resolved path for a file-backed prompt, `inline` for a one-liner — their size, and
+  its next fire time; `job run` refuses one, and `job park` still stops it. Chart
+  0.14.0 mirrors a prompt job as `{slug, suspend, trigger, prompt: true}` with no `budget`,
+  renders no CronJob for it, and refuses a `sharedVolumes` claim mounted inside
+  `/agents/<name>` — the runtime cannot tell a mount point from a directory, so a target
+  that can place one over the bundle owes that refusal. See
+  [the job body contract](docs/job-contract.md#a-job-that-is-a-turn).
+
 - **An external worker deploys on a managed Kubernetes cluster again.** The 1.34 floor
   chart 0.13.0 introduced compared the server's version against `>=1.34.0`, and every
   managed distribution reports a GitVersion carrying a build suffix — `v1.34.9-eks-bca9cf6`,

@@ -285,7 +285,8 @@ export class SurfaceEgress {
     // checks would both wake someone — and kept whatever the send does: a rejection from a
     // surface can come after the message is out, and a second wake is worse than a lost
     // retry.
-    const target = this.admit(surface, channelId, msg);
+    const { target, verdict } = this.admit(surface, channelId, msg);
+    if (!verdict.ok) throw new Error(`post refused by ${verdict.rule}: ${verdict.reason}`);
     turn.addressed = true;
     const ref = await this.publish(target, msg, undefined, [principal.id]);
     // The resolved id, on its own line: the tool audit records what the brain asked for,
@@ -453,14 +454,39 @@ export class SurfaceEgress {
     threadRoot?: EventRef,
     mentions?: readonly string[],
   ): Promise<EventRef | undefined> {
-    return this.publish(this.admit(surface, channelId, msg), msg, threadRoot, mentions);
+    const { target, verdict } = this.admit(surface, channelId, msg);
+    if (!verdict.ok) throw new Error(`post refused by ${verdict.rule}: ${verdict.reason}`);
+    return this.publish(target, msg, threadRoot, mentions);
+  }
+
+  /**
+   * {@link post}, answering the guard's refusal instead of throwing it.
+   *
+   * The one caller is a turn whose answer is a top-level post rather than a reply — a
+   * scheduled turn — and the turn loop hands a refusal back to the brain as the result of
+   * its own yield so it can rephrase without the turn ending. A thrown string cannot carry
+   * the rule and the reason as separate fields, and a loop that had to parse one back out
+   * would be reading its own error message.
+   *
+   * Only the guard answers this way. A surface that cannot post at all and a channel that
+   * is not a configured target still throw, because no rewording fixes either.
+   */
+  async postReply(surface: string, channelId: string, msg: GuardedMessage): Promise<GuardVerdict> {
+    const { target, verdict } = this.admit(surface, channelId, msg);
+    if (verdict.ok) await this.publish(target, msg);
+    return verdict;
   }
 
   /**
    * Everything a post decides before anything is sent: the adapter, the configured channel
-   * the request resolves to, and the guard's verdict on it. Throws with nothing on the wire.
+   * the request resolves to, and the guard's verdict on it. Nothing reaches the wire here,
+   * whichever way the verdict goes.
    */
-  private admit(surface: string, channelId: string, msg: GuardedMessage): PostTarget {
+  private admit(
+    surface: string,
+    channelId: string,
+    msg: GuardedMessage,
+  ): { target: PostTarget; verdict: GuardVerdict } {
     const adapter = this.byKind.get(surface);
     if (!adapter?.post || !adapter.postTargets) {
       throw new Error("the target surface does not support top-level posts");
@@ -486,9 +512,8 @@ export class SurfaceEgress {
         `post_message surface=${surface} channel=${channel.id} result=refused ` +
           `rule=${verdict.rule} reason="${verdict.reason}"`,
       );
-      throw new Error(`post refused by ${verdict.rule}: ${verdict.reason}`);
     }
-    return { adapter, channel };
+    return { target: { adapter, channel }, verdict };
   }
 
   /**
@@ -643,7 +668,7 @@ export function resolveTarget(
   return named.length === 1 ? named[0] : undefined;
 }
 
-/** What {@link SurfaceEgress.admit} hands to the send: the adapter and its own channel ref. */
+/** What {@link SurfaceEgress.admit} resolves for the send: the adapter and its own channel ref. */
 interface PostTarget {
   adapter: SurfaceAdapter;
   channel: ChannelRef;

@@ -593,7 +593,7 @@ describe("jobs", () => {
     // the convention — and `mcpServers[].env` had always accepted these.
     const run =
       "{command: node, env: {'MY-CONFIG': on, 'my.config': on, 'MY CONFIG': on}, passthrough: ['MY-CONFIG']}";
-    expect(Object.keys(loadManifest(withJob({ run })).jobs[0].run.env)).toEqual([
+    expect(Object.keys(loadManifest(withJob({ run })).jobs[0]!.run!.env)).toEqual([
       "MY-CONFIG",
       "my.config",
       "MY CONFIG",
@@ -607,13 +607,13 @@ describe("jobs", () => {
       loadManifest(withJob({ run: "{command: node, secrets: {GH_TOKEN: '../TOKEN'}}" })),
     ).toThrow(/secretRef/);
     expect(
-      loadManifest(withJob({ run: "{command: node, secrets: {GH_TOKEN: GH_TOKEN}}" })).jobs[0].run
+      loadManifest(withJob({ run: "{command: node, secrets: {GH_TOKEN: GH_TOKEN}}" })).jobs[0]!.run!
         .secrets,
     ).toEqual({ GH_TOKEN: "GH_TOKEN" });
   });
 
   it("defaults the four environment fields to empty, so a job declares its way out of nothing", () => {
-    expect(loadManifest(withJob()).jobs[0].run).toEqual({
+    expect(loadManifest(withJob()).jobs[0]!.run).toEqual({
       command: "node",
       args: ["runner/src/sweep.ts"],
       env: {},
@@ -635,7 +635,7 @@ describe("jobs", () => {
     // Every trigger but `onRequest` enters through `job run`, which takes the directory.
     expect(
       loadManifest(withJob({ run: "{command: node, jobSecrets: {GH_APP_PEM: GH_APP_PEM}}" }))
-        .jobs[0].run.jobSecrets,
+        .jobs[0]!.run!.jobSecrets,
     ).toEqual({ GH_APP_PEM: "GH_APP_PEM" });
     expect(() =>
       loadManifest(
@@ -690,10 +690,10 @@ describe("jobs", () => {
       run: { command: "node", args: ["runner/src/sweep.ts"] },
     });
     // Nothing implies a spend cap, a model tier, or a place to report.
-    expect(job.budget.maxSpendUsd).toBeUndefined();
+    expect(job!.budget!.maxSpendUsd).toBeUndefined();
     expect(job.model).toBeUndefined();
     expect(job.report).toBeUndefined();
-    expect(loadManifest(withJob({ run: "{command: node}" })).jobs[0].run.args).toEqual([]);
+    expect(loadManifest(withJob({ run: "{command: node}" })).jobs[0]!.run!.args).toEqual([]);
   });
 
   it("derives the switch key from the slug, so the two cannot name different jobs", () => {
@@ -963,7 +963,6 @@ describe("jobs", () => {
       surface: "console",
       channel: "hive",
       announce: "unproven",
-      proven: "labelled",
       probe: false,
       history: false,
     });
@@ -1009,7 +1008,10 @@ describe("jobs", () => {
     // The default is the rendering every job had before the field existed. Presentation
     // only, and over PASS alone — `verdict.test.ts` holds the half that matters.
     const declared = (report: string) => loadManifest(withJob({ report })).jobs[0].report?.proven;
-    expect(declared("{surface: console, channel: hive}")).toBe("labelled");
+    // Absent rather than defaulted here: the rendering default lives in `jobStatus`, which
+    // is the one place that has to know it, and leaving it absent is what lets a prompt
+    // job tell "omitted" from "asked for `labelled`".
+    expect(declared("{surface: console, channel: hive}")).toBeUndefined();
     expect(declared("{surface: console, channel: hive, proven: verbatim}")).toBe("verbatim");
 
     // A word nobody implements is refused rather than read as `verbatim`: a job asking for
@@ -1036,5 +1038,135 @@ describe("jobs", () => {
     expect(() =>
       loadManifest(withJob({ budget: "{wallClockMs: 3600000, maxOpenPrs: 2}" })),
     ).toThrow(/unrecognized/i);
+  });
+});
+describe("a job whose body is a prompt", () => {
+  const base =
+    "name: x\nbrain: {provider: mock}\nrespondTo: anyone\nbrains: [{preset: local}]\n" +
+    "killSwitchParkBy: []\n" +
+    "surfaces: [{kind: slack, channels: [{id: C01, name: hive, reply: private}]}]\n";
+
+  const declared: Record<string, string> = {
+    slug: "daily-digest",
+    archetype: "watch",
+    description: "'One short post per day.'",
+    trigger: '{schedules: ["0 18 * * *"], timezone: America/Los_Angeles}',
+    killSwitch: "{failDirection: closed}",
+    prompt: "'Summarize the day.'",
+    report: "{surface: slack, channel: C01}",
+  };
+
+  const withJob = (over: Record<string, string | undefined> = {}) =>
+    `${base}jobs: [{${Object.entries({ ...declared, ...over })
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => `${key}: ${value}`)
+      .join(", ")}}]\n`;
+
+  it("takes a one-liner inline and a page as a named skill, and never both", () => {
+    expect(loadManifest(withJob()).jobs[0]!.prompt).toBe("Summarize the day.");
+    expect(loadManifest(withJob({ prompt: "{skill: daily-digest}" })).jobs[0]!.prompt).toEqual({
+      skill: "daily-digest",
+    });
+    expect(() =>
+      loadManifest(withJob({ prompt: "{skill: daily-digest, text: inline}" })),
+    ).toThrow(/unrecognized/i);
+  });
+
+  it("takes a name rather than a path, so there is nothing to traverse with", () => {
+    // The narrowing that removes a category rather than closing a door: a slug cannot be
+    // absolute, cannot climb out, and cannot name the runtime's own `workspace/`.
+    for (const bad of ["./jobs/digest.md", "../secrets/token", "/etc/motd", "Daily-Digest", "1st"]) {
+      expect(() => loadManifest(withJob({ prompt: `{skill: '${bad}'}` })), bad).toThrow(
+        /a skill name is lower-case letters/,
+      );
+    }
+    expect(() => loadManifest(withJob({ prompt: "{file: ./jobs/digest.md}" }))).toThrow(
+      /unrecognized/i,
+    );
+  });
+
+  it("needs exactly one body, because two bodies is two jobs", () => {
+    expect(() =>
+      loadManifest(withJob({ run: "{command: node}", budget: "{wallClockMs: 1000}" })),
+    ).toThrow(/both `run` and `prompt`/);
+    expect(() => loadManifest(withJob({ prompt: undefined }))).toThrow(/neither `run` nor `prompt`/);
+  });
+
+  it("says nothing about the body when the body's own value is what failed", () => {
+    // `prompt: "   "` trims to nothing and is refused for that. It is then absent from the
+    // object the body rule reads, and "declares neither" would be a false claim about a
+    // manifest that plainly declares one.
+    let message = "";
+    try {
+      loadManifest(withJob({ prompt: "'   '" }));
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/prompt/);
+    expect(message).not.toMatch(/neither `run` nor `prompt`/);
+  });
+
+  it("needs no budget, while a process body still does", () => {
+    expect(loadManifest(withJob()).jobs[0]!.budget).toBeUndefined();
+    expect(() =>
+      loadManifest(
+        withJob({ prompt: undefined, run: "{command: node}", report: undefined, budget: undefined }),
+      ),
+    ).toThrow(/`run` body but no `budget`/);
+  });
+
+  it("refuses every field that belongs to a process body, by name", () => {
+    for (const [field, over] of [
+      ["worker", { worker: `{image: "example/w@sha256:${"a".repeat(64)}", directory: /app}` }],
+      ["parameters", { parameters: "{issue: {type: integer, description: 'Which issue.'}}" }],
+      ["model", { model: "claude-sonnet-5" }],
+      ["output", { output: "{format: json}" }],
+      ["report.probe", { report: "{surface: slack, channel: C01, probe: true}" }],
+      ["report.history", { report: "{surface: slack, channel: C01, probe: true, history: true}" }],
+      // Detectable only because `proven` is no longer defaulted in the schema: omitting it
+      // and asking for `labelled` would otherwise be the same value here.
+      ["report.proven", { report: "{surface: slack, channel: C01, proven: labelled}" }],
+      ["report.proven", { report: "{surface: slack, channel: C01, proven: verbatim}" }],
+    ] as const) {
+      expect(() => loadManifest(withJob(over)), field).toThrow(
+        new RegExp(`declares a .prompt. body, so it declares no .${field.replace(".", "\\.")}.`),
+      );
+    }
+  });
+
+  it("takes the clock and no other door, since nothing serves one yet", () => {
+    for (const trigger of [
+      '{schedules: ["0 18 * * *"], onRequest: true}',
+      '{schedules: ["0 18 * * *"], webhook: true}',
+    ]) {
+      expect(() => loadManifest(withJob({ trigger })), trigger).toThrow(/declares no `trigger\./);
+    }
+    // And the clock still has to be stoppable without a deploy, which is the rule every
+    // unattended job already has.
+    expect(() => loadManifest(withJob({ killSwitch: undefined }))).toThrow(/must declare a killSwitch/);
+  });
+
+  it("needs somewhere to be addressed and to answer", () => {
+    expect(() => loadManifest(withJob({ report: undefined }))).toThrow(/no `report`/);
+  });
+
+  it("takes a report that omits `proven`, which is every prompt job", () => {
+    expect(loadManifest(withJob()).jobs[0]!.report?.proven).toBeUndefined();
+  });
+
+  it("refuses the announce mode that keys on something a turn never writes", () => {
+    expect(() =>
+      loadManifest(withJob({ report: "{surface: slack, channel: C01, announce: reported}" })),
+    ).toThrow(/report\.announce: reported/);
+    expect(() =>
+      loadManifest(withJob({ report: "{surface: slack, channel: C01, announce: always}" })),
+    ).not.toThrow();
+  });
+
+  it("refuses an interval descriptor, which names no time in the declared zone", () => {
+    expect(() => loadManifest(withJob({ trigger: '{schedules: ["@every 5m"]}' }))).toThrow(
+      /wall-clock time in/,
+    );
+    expect(() => loadManifest(withJob({ trigger: '{schedules: ["@daily"]}' }))).not.toThrow();
   });
 });

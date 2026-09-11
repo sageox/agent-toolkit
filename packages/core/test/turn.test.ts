@@ -237,4 +237,24 @@ describe("capability status", () => {
     );
     expect(p).not.toContain("TRUSTED CAPABILITY STATUS");
   });
+
+  it("hands a scheduled turn's prompt over as steering, not as fenced data", () => {
+    // The words came off disk, out of the same reviewed bundle the persona above them did.
+    // Fencing them would brief the agent never to obey the one thing it was woken to do.
+    const prompt = "Read the last 24 hours of the status channel and post one line per agent.";
+    const p = assembleTurnPrompt(
+      { ...ev(prompt), author: { surface: "buzz", id: "schedule:daily-digest", isSelf: false, isAgent: false } },
+      { agentName: "inkslinger", persona: "You are inkslinger.", scheduled: true },
+    );
+    expect(p).toContain(prompt);
+    expect(p).not.toContain(UNTRUSTED_OPEN);
+    expect(p).toContain("You are inkslinger.");
+    expect(p).toContain("[scheduled turn · buzz · channel hive · from schedule:daily-digest]");
+  });
+
+  it("fences the same text when it arrived as a message", () => {
+    const prompt = "Read the last 24 hours of the status channel.";
+    const p = assembleTurnPrompt(ev(prompt), { agentName: "inkslinger" });
+    expect(fenced(p)).toContain(prompt);
+  });
 });

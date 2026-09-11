@@ -70,7 +70,10 @@
     "job": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["slug", "suspend", "trigger", "budget"],
+      "required": ["slug", "suspend", "trigger"],
+      "if": { "required": ["prompt"] },
+      "then": { "properties": { "budget": false } },
+      "else": { "required": ["budget"] },
       "properties": {
         "worker": {
           "type": "object",
@@ -119,6 +122,7 @@
           }
         },
         "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "prompt": { "const": true },
         "suspend": { "type": "boolean" },
         "trigger": {
           "type": "object",

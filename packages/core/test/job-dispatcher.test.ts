@@ -635,7 +635,7 @@ it.each([false, true])("uses the same host contract for Python and a compiled ex
     execFileSync("cc", [join(dir, "task.c"), "-o", join(dir, "task")]);
     for (const [command, args] of [["python3", [join(dir, "task.py")]], [join(dir, "task"), []]] as const) {
       const original = manifest(enabled ? "output: {format: json}" : "").jobs[0]!;
-      const job = { ...original, run: { ...original.run, command, args: [...args] } };
+      const job = { ...original, run: { ...original.run!, command, args: [...args] } };
       const output = vi.fn();
       const host = new JobHost({ workDir: dir, secretOpts: { dir, env: { TASK_TOKEN: "worker-secret" } }, onOutput: output });
       const run = await host.executeWorker(JobSchema.parse(job), request(job));
@@ -677,7 +677,7 @@ it.each(["buzz", "slack"])("automatically explains an uncaught script error in t
   const dir = await mkdtemp(join(tmpdir(), "worker-failure-"));
   const original = manifest().jobs[0]!;
   const job: JobConfig = { ...original,
-    run: { ...original.run, command: process.execPath, args: ["-e", 'console.log("step: connecting"); throw new Error("synthetic worker exception: " + process.env.API_TOKEN)'] },
+    run: { ...original.run!, command: process.execPath, args: ["-e", 'console.log("step: connecting"); throw new Error("synthetic worker exception: " + process.env.API_TOKEN)'] },
     report: { surface, channel: "operations", announce: "unproven", proven: "labelled", probe: false, history: false },
   };
   const api = new Cluster(), dispatch = dispatcher(api, [job]);

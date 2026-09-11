@@ -14,7 +14,7 @@ import {
 } from "../src/job-host.ts";
 import type { EventRef } from "../src/events.ts";
 import { interpretSwitchValue, type SwitchLookup, type SwitchSource } from "../src/kill-switch.ts";
-import { loadManifest, type JobAnnounce, type JobConfig } from "../src/manifest.ts";
+import { isProcessJob, loadManifest, type JobAnnounce, type JobConfig, type ProcessJob } from "../src/manifest.ts";
 import { combineVerdicts, describeVerdict, type ProvenVoice } from "../src/verdict.ts";
 import { collectJobOutput, JOB_OUTPUT_LIMIT_BYTES, type FinalJobOutput } from "../src/job-output.ts";
 
@@ -33,19 +33,24 @@ const declared = {
 };
 
 /** One declared job, through the real schema so the bounds and the switch key are derived. */
-const job = (over: Record<string, string | undefined> = {}): JobConfig =>
-  loadManifest(
+const job = (over: Record<string, string | undefined> = {}): ProcessJob => {
+  const [parsed] = loadManifest(
     `${base}jobs: [{${Object.entries({ ...declared, ...over })
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => `${key}: ${value}`)
       .join(", ")}}]\n`,
-  ).jobs[0];
+  ).jobs;
+  // Narrowed rather than cast: an `over` that dropped `run` would otherwise reach the host
+  // as a job with no body and fail somewhere further down than the line that caused it.
+  if (!parsed || !isProcessJob(parsed)) throw new Error("this fixture declares no run body");
+  return parsed;
+};
 
 /**
  * A real job body: a node process this host knows nothing about beyond its argv, its exit
  * code, and the file it writes. Every test below drives the envelope through one.
  */
-const body = (script: string, over: Record<string, string | undefined> = {}): JobConfig => {
+const body = (script: string, over: Record<string, string | undefined> = {}): ProcessJob => {
   const declared = job(over);
   return {
     ...declared,
@@ -718,7 +723,7 @@ describe("the status post", () => {
   const feed = (
     id: (n: number) => EventRef | undefined = named,
     announce: JobAnnounce = "unproven",
-    proven: ProvenVoice = "labelled",
+    proven?: ProvenVoice,
   ) => {
     const posts: Array<{ text: string; threadRoot?: EventRef; mentions?: readonly string[] }> = [];
     const post: JobPoster = async (report, text, threadRoot, mentions) => {
@@ -733,7 +738,9 @@ describe("the status post", () => {
         surface: "console",
         channel: "hive",
         announce,
-        proven,
+        // Absent unless the job asked for one: `proven` carries no schema default, so that
+        // the difference between omitting it and choosing `labelled` survives to the load.
+        ...(proven ? { proven } : {}),
         probe: false,
         history: false,
       });

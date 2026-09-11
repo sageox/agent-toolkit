@@ -36,6 +36,15 @@ agents:
         suspend: false
         trigger: { schedules: [], timezone: UTC }
         budget: { wallClockMs: 600000, deadlineHeadroomMs: 300000 }
+      # A job whose body is a prompt: the gateway runs its turn in process on its own
+      # clock, so it renders no CronJob and states no budget. Mirrored anyway, by the same
+      # rule as `inbox` above.
+      - slug: daily-digest
+        suspend: false
+        prompt: true
+        trigger:
+          schedules: ["0 18 * * *"]
+          timezone: America/New_York
     terminationGracePeriodSeconds: 130
     resources:
       requests:

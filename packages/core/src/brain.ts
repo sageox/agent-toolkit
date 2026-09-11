@@ -12,6 +12,15 @@ export interface BrainContext {
   /** A gateway-hosted, explicitly allowlisted reaction tool is available. */
   react?: boolean;
   /**
+   * This turn is a clock tick, so `event.text` is the bundle's own prompt rather than
+   * something somebody sent — see {@link assembleTurnPrompt}, which renders it as steering
+   * instead of fencing it as untrusted data.
+   *
+   * Set by `Gateway.tick` and by nothing else. No adapter produces an event that reaches
+   * that door, so no channel message can claim to be one.
+   */
+  scheduled?: boolean;
+  /**
    * How every capability the agent has is doing, right now. Trusted runtime data, not chat
    * content: each reading is built from a closed vocabulary by whoever probed it.
    *

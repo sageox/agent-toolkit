@@ -321,10 +321,10 @@ describe("a job body that probes", () => {
   const body = (declared: JobConfig, script: string): JobConfig => ({
     ...declared,
     run: {
-      ...declared.run,
+      ...declared.run!,
       command: process.execPath,
       args: ["-e", `const fs=require("fs");${script}`],
-      passthrough: [...declared.run.passthrough, "MARKER"],
+      passthrough: [...declared.run!.passthrough, "MARKER"],
     },
   });
 
