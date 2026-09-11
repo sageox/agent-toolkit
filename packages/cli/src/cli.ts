@@ -1514,7 +1514,8 @@ async function runCmd(argv: string[]): Promise<void> {
     shuttingDown = true;
     clearInterval(ticker);
     // Before the turns are drained: a tick admitted after this would be a turn `drain`
-    // already waited for.
+    // already waited for. One still in flight keeps its turn and its run record; what can
+    // be lost is the host's status line, to a surface closed underneath it below.
     scheduled?.stop();
     process.stdout.write("\nshutting down…\n");
     // A turn may be waiting for a ledger refresh. Cancel Git before waiting for turns.

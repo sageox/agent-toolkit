@@ -414,7 +414,7 @@ interface Schedule {
   day: Set<number>;
   month: Set<number>;
   weekday: Set<number>;
-  /** Vixie's rule below needs to know which of the two day fields were written as `*`. */
+  /** Vixie's rule below needs to know which of the two day fields narrowed anything. */
   anyDay: boolean;
   anyWeekday: boolean;
 }
