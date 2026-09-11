@@ -51,8 +51,9 @@ the runtime will refuse.
 
 ## Jobs
 
-`jobs[]` declares an agent's scheduled work — a trigger, a hard switch, a bound, and the
-process to run ([the jobs RFC](design/2026-08-19-jobs-rfc.md)). It lives in `agent.yaml`
+`jobs[]` declares an agent's scheduled work — a trigger, a hard switch, and a body: either
+a process to run and the bound to run it under, or a prompt the agent's own gateway runs as
+a turn ([the jobs RFC](design/2026-08-19-jobs-rfc.md)). It lives in `agent.yaml`
 for the reason at the top of this file: a job declared in a target's own values is the
 second configuration model, and that is how a fleet arrives at twelve jobs described in six
 different charts.
@@ -86,11 +87,12 @@ chart's marker is `prompt: true`. See
 `run.command` and `run.args` are a list, and the list is the whole interface: no shell
 string, so nothing can be word-split or interpolated into one.
 
-`suspend` parks the clock, not the job. A human may still start a parked job on request,
-and that run is the runtime's to admit — it arrives through the agent process the target
-already deploys, never through a scheduled object
-([RFC §6.3](design/2026-08-19-jobs-rfc.md#63-the-switch-parks-automation-not-the-job)). What
-a target owes is that the schedule itself does not fire.
+`suspend` parks the clock, not the job. A human may still start a parked **`run`** job on
+request, and that run is the runtime's to admit — it arrives through the agent process the
+target already deploys, never through a scheduled object
+([RFC §6.3](design/2026-08-19-jobs-rfc.md#63-the-switch-parks-automation-not-the-job)). A
+parked `prompt` job has no such door: nothing may ask for one, so it stays parked until the
+switch is armed. What a target owes either way is that the schedule itself does not fire.
 
 The deadline is derived, never a setting of its own. An operator who can set it independently
 will eventually set it below the budget, and the job is then SIGKILLed inside the window
