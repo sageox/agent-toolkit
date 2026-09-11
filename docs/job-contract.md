@@ -460,6 +460,16 @@ same act — that puts the words themselves in front of a reviewer. A link that 
 the bundle is fine, and so is a bundle reached through a symlinked home, which is how a
 mount usually arrives.
 
+`workspace/` is refused too, and it is inside the agent directory: the runtime owns that
+subtree, repository checkouts land there, and they are refreshed from their remotes on
+every start. A prompt read out of one is words whoever can merge to that repository chose.
+The gateway already refuses to make a checkout the brain's working directory for the same
+reason; this is that rule at the other door.
+
+What the runtime cannot see is a **mount** placed inside the bundle — a mount point is an
+ordinary directory to `realpath` — so the target that can create one owes the refusal. The
+chart fails the render for a `sharedVolumes` claim at or under `/agents/<name>`.
+
 **The tick runs in the gateway process, never in a pod.** The gateway holds an in-process
 clock: five cron fields — or one of the fixed descriptors, `@daily` and its siblings —
 resolved against `trigger.timezone`. `@every 5m` is refused at load, since an interval

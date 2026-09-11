@@ -211,6 +211,28 @@ describe("readJobPrompt", () => {
     expect(readJobPrompt(promptJob({ prompt: "{file: ./digest.md}" }), inner).body).toBe("inside");
   });
 
+  it("refuses a prompt out of the repository checkouts, which are not the bundle", async () => {
+    // `workspace/` holds clones refreshed from their remotes on every start, so a prompt
+    // read from one is words whoever can merge to that repository chose. The gateway
+    // already refuses to make a checkout the brain's cwd for the same reason.
+    await mkdir(join(dir, "workspace", "repos", "acme"), { recursive: true });
+    await writeFile(
+      join(dir, "workspace", "repos", "acme", "digest.md"),
+      "---\nname: d\ndescription: d\n---\nfrom a clone\n",
+    );
+    expect(() =>
+      readJobPrompt(promptJob({ prompt: "{file: ./workspace/repos/acme/digest.md}" }), dir),
+    ).toThrow(/under workspace\/, which the runtime writes/);
+
+    // And a symlink into it, which the path check alone would admit.
+    await writeFile(join(dir, "ok.md"), "---\nname: d\ndescription: d\n---\nbundled\n");
+    await symlink(join(dir, "workspace", "repos", "acme", "digest.md"), join(dir, "linked.md"));
+    expect(() => readJobPrompt(promptJob({ prompt: "{file: ./linked.md}" }), dir)).toThrow(
+      /under workspace\//,
+    );
+    expect(readJobPrompt(promptJob({ prompt: "{file: ./ok.md}" }), dir).body).toBe("bundled");
+  });
+
   it("refuses a symlink out of the bundle, which a reviewed diff never shows the content of", async () => {
     // The case a path check cannot see. `jobs/digest.md -> /mnt/secrets/TOKEN` reviews as
     // one short line, its content is never in the diff, and the content can change after

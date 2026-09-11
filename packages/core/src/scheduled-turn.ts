@@ -9,7 +9,7 @@ import {
   statSync,
   type Stats,
 } from "node:fs";
-import { resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { errorLine, errorText } from "./errors.ts";
@@ -68,6 +68,12 @@ const Frontmatter = z.object({
 });
 
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+
+/**
+ * The subtree of an agent directory the runtime owns rather than the bundle: repository
+ * checkouts and the indexes over them. See `createRepoWorkspace`, which roots them here.
+ */
+const RUNTIME_STATE = "workspace";
 
 /** Whether `path` is `root` itself or sits beneath it. Both must already be resolved. */
 function within(path: string, root: string): boolean {
@@ -169,8 +175,25 @@ export function readJobPrompt(job: PromptJob, agentDir: string): JobPrompt {
     // Missing, or unreadable on the way down. Same sentence the read below would give.
     throw new Error(`${named}: ${errorText(error)}`);
   }
-  if (!within(real, realpathSync(resolve(agentDir)))) {
+  // One resolved root for every test below it: on a host where the agent directory is
+  // reached through a link — `/var` on macOS, a mounted bundle anywhere — comparing a real
+  // path against an unresolved root silently matches nothing.
+  const root = realpathSync(resolve(agentDir));
+  if (!within(real, root)) {
     throw new Error(`${named} is a link to ${real}, which is outside the agent directory — ${steering}`);
+  }
+
+  // `workspace/` is the runtime's, not the bundle's: repository checkouts land there and are
+  // refreshed from their remotes on every start, so a prompt read out of one is words
+  // whoever can merge to that repository chose — arriving as steering, in the process that
+  // holds this agent's credentials. The gateway already refuses to make a checkout the
+  // brain's working directory for this exact reason; this is the same rule at the other
+  // door. Unlike a mount, the runtime can see this one, because the directory is its own.
+  if (within(real, join(root, RUNTIME_STATE))) {
+    throw new Error(
+      `${named} is under ${RUNTIME_STATE}/, which the runtime writes and refreshes from ` +
+        `remotes — ${steering}`,
+    );
   }
 
   let raw: Buffer;
