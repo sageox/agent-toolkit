@@ -63,7 +63,7 @@ renders a job with no clause to implement decides the deadline, the retry policy
 overlap rule inside its own template, which is the second configuration model this contract
 exists to prevent.
 
-A target that supports jobs owes each declared job:
+A target that supports jobs owes each job that declares a **`run`** body:
 
 | Per declared job | From |
 |---|---|
@@ -73,6 +73,15 @@ A target that supports jobs owes each declared job:
 | Single-flight — a run that would overlap a running one is refused, never queued | — |
 | No platform retry — a failed run is a failed run | — |
 | A writable bundle directory and somewhere the verdict artifact lands — durable between runs is not owed | `Agent definition`, above |
+
+A job that declares a **`prompt`** body instead is owed nothing here, and a target must
+render no scheduled object for one. Its body is a brain turn, held on a clock inside the
+agent process the target already deploys — there is no command to run, no budget to derive
+a deadline from, and a scheduled object would exec `job run` against a job with no argv.
+Mirroring it is still the target's to do where a target mirrors jobs at all, so that a job
+left out of the mirror stays distinguishable from one the mirror says renders nothing; the
+chart's marker is `prompt: true`. See
+[the job body contract](job-contract.md#a-job-that-is-a-turn).
 
 `run.command` and `run.args` are a list, and the list is the whole interface: no shell
 string, so nothing can be word-split or interpolated into one.
