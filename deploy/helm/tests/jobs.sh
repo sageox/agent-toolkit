@@ -62,7 +62,7 @@ fi
 # linked twice, so a count alone still passes when one of those two is replaced by a copy
 # of another pinned link. Matched at any tag rather than at this release's, so a link left
 # behind on the previous one is reported as the stale link it is.
-release_docs='https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs'
+release_docs='https://github.com/sageox/agent-toolkit/blob/v0.5.1/docs'
 expected=$(printf '%s\n' \
   "$release_docs/external-jobs.md" \
   "$release_docs/external-jobs.md" \
