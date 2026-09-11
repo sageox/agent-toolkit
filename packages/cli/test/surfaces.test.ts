@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { loadManifest } from "@sageox/agent-toolkit-core";
 import { SlackAdapter } from "@sageox/agent-toolkit-adapter-slack";
-import { buildAdapters } from "../src/surfaces.ts";
+import { buildAdapters, carriesTopLevelPosts } from "../src/surfaces.ts";
 
 const slackConfig = (channels: string) => `
 name: slack-test
@@ -54,5 +54,38 @@ describe("buildAdapters Slack wiring", () => {
 
     expect(adapters[0]).toBeInstanceOf(SlackAdapter);
     expect((adapters[0] as SlackAdapter).postTargets()).toEqual([]);
+  });
+});
+/**
+ * The capability `validate` and `doctor` answer without building anything, held against the
+ * adapters that answer it at runtime.
+ *
+ * A scheduled turn answers with a top-level post, so a surface that cannot make one is a
+ * bundle `run` refuses to start — and both pre-flight commands have to refuse it first,
+ * with no credential, no relay, and no agent home to build an adapter from.
+ */
+describe("carriesTopLevelPosts", () => {
+  afterEach(() => {
+    delete process.env.TEST_SLACK_BOT_TOKEN;
+    delete process.env.TEST_SLACK_APP_TOKEN;
+  });
+
+  it("agrees with the adapter each kind is actually built into", async () => {
+    process.env.TEST_SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.TEST_SLACK_APP_TOKEN = "xapp-test";
+    for (const [kind, yaml] of [
+      ["console", "name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: console}]"],
+      ["slack", slackConfig("{ id: GENG, reply: private }")],
+    ] as const) {
+      const [adapter] = await buildAdapters(loadManifest(yaml));
+      const built = typeof adapter!.post === "function" && typeof adapter!.postTargets === "function";
+      expect(carriesTopLevelPosts(kind), kind).toBe(built);
+    }
+  });
+
+  it("says no for a kind nothing builds, rather than guessing", () => {
+    // `buildAdapters` refuses such a surface anyway; what matters is that the answer here
+    // is never an optimistic yes for something that will not exist.
+    expect(carriesTopLevelPosts("discord")).toBe(false);
   });
 });

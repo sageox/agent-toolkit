@@ -100,7 +100,7 @@ import {
   servePrivateBrain,
   toHexPubkey,
 } from "@sageox/agent-toolkit-adapter-buzz";
-import { buildAdapters, buzzSurface, buzzTarget, type BuzzTarget } from "./surfaces.ts";
+import { buildAdapters, buzzSurface, buzzTarget, carriesTopLevelPosts, type BuzzTarget } from "./surfaces.ts";
 import { normalizeActorId } from "./identity.ts";
 import {
   createCmd,
@@ -1576,18 +1576,20 @@ function scheduledTurns(
   if (!declared.length) return undefined;
 
   const turns: ScheduledTurn[] = declared.map((job) => {
-    // Resolved from the surfaces themselves rather than from the manifest, because a
-    // scheduled turn answers with a top-level post and not every surface can make one.
+    // The declared question first, in the same words `doctor` and `validate` use — a
+    // bundle that reaches here having passed either of those should fail for something
+    // they could not have seen, not for something they could.
+    const unreachable = unreachableReport(manifest, job);
+    if (unreachable) throw new Error(unreachable);
+
+    // Then the live one, which is a different fact: the surface is configured to post and
+    // lists this channel, and the adapter it was built into offers no such target.
     const targets = egress.targets().filter((target) => target.surface === job.report.surface);
     const channel = resolveTarget(targets, job.report.surface, job.report.channel);
     if (!channel) {
       throw new Error(
-        `job "${job.slug}" is a scheduled turn reporting to ${job.report.surface}:` +
-          `${job.report.channel}, ` +
-          (targets.length
-            ? "which that surface does not list as a channel it can post into"
-            : `but the ${job.report.surface} surface carries no top-level posts`) +
-          " — the turn answers there and nowhere else",
+        `job "${job.slug}" reports to ${job.report.surface}:${job.report.channel}, which the ` +
+          "surface this agent built offers no post target for",
       );
     }
     return { job, prompt: readJobPrompt(job, agentDir), channel };
@@ -1628,6 +1630,13 @@ function scheduledTurns(
  * surface that carries no top-level post is refused there and cannot be here.
  */
 function unreachableReport(manifest: AgentManifest, job: PromptJob): string | undefined {
+  const named = `job "${job.slug}" reports to ${job.report.surface}:${job.report.channel}`;
+  const nowhere = "its scheduled turn answers there and nowhere else, so `run` refuses to start";
+  // Asked first, because it is the one a channel list cannot answer: a console surface may
+  // list the channel and still have no way to publish a new top-level message in it.
+  if (!carriesTopLevelPosts(job.report.surface)) {
+    return `${named}, but the ${job.report.surface} surface carries no top-level posts — ${nowhere}`;
+  }
   const surface = manifest.surfaces.find((declared) => declared.kind === job.report.surface);
   const targets = (surface?.channels ?? []).map((channel) => ({
     surface: job.report.surface,
@@ -1636,11 +1645,7 @@ function unreachableReport(manifest: AgentManifest, job: PromptJob): string | un
     name: channel.name,
   }));
   if (resolveTarget(targets, job.report.surface, job.report.channel)) return undefined;
-  return (
-    `job "${job.slug}" reports to ${job.report.surface}:${job.report.channel}, which that ` +
-    "surface does not list as a channel — its scheduled turn would have nowhere to post, " +
-    "and `run` refuses to start"
-  );
+  return `${named}, which that surface does not list as a channel — ${nowhere}`;
 }
 
 /**

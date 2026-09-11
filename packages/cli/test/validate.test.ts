@@ -162,7 +162,6 @@ describe("sageox-agent validate", () => {
    */
   const PROMPT_JOB =
     "brains:\n  - preset: local\n" +
-    "# A channel on the surface the job reports to, which is where the turn answers.\n" +
     "killSwitchParkBy: []\n" +
     "jobs:\n" +
     "  - slug: daily-digest\n" +
@@ -171,13 +170,17 @@ describe("sageox-agent validate", () => {
     "    trigger: {schedules: ['0 18 * * *'], timezone: America/Los_Angeles}\n" +
     "    killSwitch: {failDirection: closed}\n" +
     "    prompt: {file: ./jobs/digest.md}\n" +
-    "    report: {surface: console, channel: local}\n";
+    "    report: {surface: slack, channel: C01}\n";
 
-  /** The console surface gains the channel the job above answers in. */
+  /**
+   * Slack rather than the scaffold's console surface, and the channel the job answers in:
+   * a scheduled turn posts at top level, which console cannot do at all.
+   */
   const withChannel = (yaml: string) =>
     yaml.replace(
       "surfaces:\n  - kind: console\n",
-      "surfaces:\n  - kind: console\n    channels: [{id: local, reply: private}]\n",
+      "surfaces:\n  - kind: slack\n    identity: TEST_SLACK_BOT_TOKEN\n" +
+        "    appToken: TEST_SLACK_APP_TOKEN\n    channels: [{id: C01, reply: private}]\n",
     );
 
   it("lists a prompt job with its file, its size, and its next fire time", async () => {
@@ -203,7 +206,7 @@ describe("sageox-agent validate", () => {
     );
     const path = write(
       "agent.yaml",
-      withChannel(AGENT_YAML("demo")) + PROMPT_JOB.replace("channel: local", "channel: nowhere"),
+      withChannel(AGENT_YAML("demo")) + PROMPT_JOB.replace("channel: C01", "channel: nowhere"),
     );
 
     const { code, stdout } = await validate([path]);

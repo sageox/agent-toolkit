@@ -476,7 +476,9 @@ are the ones every other turn gets.
 
 The turn's reply is a **top-level post in `report.channel`**, through the same chokepoint
 the brain's own `post_message` clears: channel consent, the guard, and the leak scan all
-apply, and a channel the surface does not list is refused. A reply left under the post
+apply, and a channel the surface does not list is refused. So is a surface that carries no
+top-level post at all — the console surface is one — which is why `doctor` and `validate`
+check both before a deploy rather than leaving `run` to refuse at startup. A reply left under the post
 reaches the agent exactly as any other message does, by mentioning it — the tick changes
 nothing about what wakes a turn. An empty reply posts nothing: silence is the message here
 as everywhere else.
