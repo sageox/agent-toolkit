@@ -188,15 +188,24 @@ ServiceAccount with token automount disabled, file-mounted secrets, and its own
 `ReadWriteOnce` PVC. One release may contain many such workloads. Configuration changes
 restart only the affected identity.
 
-Jobs render as one `CronJob` per declared schedule, carrying the schedule, the zone, the
-hard switch, the derived deadline, single-flight, and no retry — the whole of the clause
-above and nothing beyond it. Each Job execs `sageox-agent job run <slug> --trigger schedule`
-against the bundle the Deployment already runs, so the rest of the envelope stays where the
-clause puts it: the host reads the job's own argv, admits it past both switches, bows out at
-the budget, and mints the verdict. The declaration reaches the chart as a mirror of `jobs[]`
-in that agent's values, because Helm cannot read an operator-supplied bundle at render
-time; the mirror carries the clock and the bound only — not the argv, not the switch —
-so it cannot become a second place a job is decided.
+A **`run`** job renders as one `CronJob` per declared schedule, carrying the schedule, the
+zone, the hard switch, the derived deadline, single-flight, and no retry — the whole of the
+clause above and nothing beyond it. Each Job execs `sageox-agent job run <slug> --trigger
+schedule` against the bundle the Deployment already runs, so the rest of the envelope stays
+where the clause puts it: the host reads the job's own argv, admits it past both switches,
+bows out at the budget, and mints the verdict. The declaration reaches the chart as a mirror
+of `jobs[]` in that agent's values, because Helm cannot read an operator-supplied bundle at
+render time; the mirror carries the clock and the bound only — not the argv, not the switch
+— so it cannot become a second place a job is decided.
+
+A **`prompt`** job renders no `CronJob`, because the Deployment already runs its clock. It
+is mirrored as `{slug, suspend, trigger, prompt: true}` and states no budget — the chart
+refuses one, since nothing there would bound it — and the marker is what keeps a job left
+out of the mirror distinguishable from one the mirror says renders nothing. The chart also
+refuses a `sharedVolumes` claim mounted inside `/agents/<name>`: a prompt job's words are
+read from the bundle directory and reach the brain as steering, so a mount that could supply
+them from somewhere else is refused where it is made. The runtime cannot catch that one — a
+mount point is an ordinary directory to `realpath`.
 [The chart's README](../deploy/helm/README.md#jobs) has the rendered shape and what a job
 Pod does not share by default — the agent's `ReadWriteOnce` claim, which ties its placement
 to the agent's node. It stages its bundle onto an `emptyDir` of its own instead.

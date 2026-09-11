@@ -41,8 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repeats fires once. `doctor` and `validate` print where each prompt job's words came from
   — a resolved path for a file-backed prompt, `inline` for a one-liner — their size, and
   its next fire time; `job run` refuses one, and `job park` still stops it. Chart
-  0.14.0 mirrors a prompt job as `{slug, suspend, trigger, prompt: true}` with no `budget`
-  and renders no CronJob for it. See
+  0.14.0 mirrors a prompt job as `{slug, suspend, trigger, prompt: true}` with no `budget`,
+  renders no CronJob for it, and refuses a `sharedVolumes` claim mounted inside
+  `/agents/<name>` — the runtime cannot tell a mount point from a directory, so a target
+  that can place one over the bundle owes that refusal. See
   [the job body contract](docs/job-contract.md#a-job-that-is-a-turn).
 
 - **An external worker deploys on a managed Kubernetes cluster again.** The 1.34 floor

@@ -102,6 +102,30 @@ scheduled run is lost.
     {{- end }}
 {{- end -}}
 
+{{/*
+Refuses a shared claim mounted inside an agent's own bundle directory.
+
+A `prompt` job's words are read from `/agents/<name>` and handed to the brain as steering
+rather than as fenced data, and the whole argument for that is that they came out of the
+reviewed bundle. A claim mounted under that path breaks it without tripping any check the
+runtime can make: the file is genuinely inside the agent directory, and its content is
+another workload's to change after the bundle was reviewed.
+
+Refused here because this is where the mount is made. The runtime cannot see it — a mount
+point is an ordinary directory to `realpath` — so the target that creates one owes the
+refusal. Mount shared claims anywhere else; nothing about them needs to live under the
+bundle.
+*/}}
+{{- define "agent.assertSharedVolumes" -}}
+{{- $root := printf "/agents/%s" .name -}}
+{{- range $volume := .agent.sharedVolumes }}
+{{- $path := $volume.mountPath | trimSuffix "/" }}
+{{- if or (eq $path $root) (hasPrefix (printf "%s/" $root) $path) }}
+{{- fail (printf "agents.%s.sharedVolumes[%s].mountPath is %s, inside that agent's own bundle directory %s. A prompt job reads its words from there and they reach the brain as steering, so the bundle is the only thing allowed to supply them. Mount the claim outside %s." $.name $volume.name $volume.mountPath $root $root) }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
 {{- define "agent.agentVolumeMounts" -}}
 - name: agent-data
   mountPath: /agents

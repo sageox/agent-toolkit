@@ -152,6 +152,10 @@ export function readJobPrompt(job: PromptJob, agentDir: string): JobPrompt {
     throw new Error(`${named} is outside the agent directory — ${steering}`);
   }
 
+  // Neither check can see a *mount* inside the bundle — a mount point is an ordinary
+  // directory to `realpath` — so a target that can place one owes that refusal itself. The
+  // chart refuses a `sharedVolumes` claim under `/agents/<name>` for this reason.
+  //
   // And what the filesystem says it really is. A symlink committed into the bundle is the
   // case the first check cannot see, and it is the worse one: the diff shows a path and
   // never the content, the content can change after the review that approved it, and what
