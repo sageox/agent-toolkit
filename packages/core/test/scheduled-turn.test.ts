@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -160,6 +161,28 @@ describe("readJobPrompt", () => {
     // the agent would post a prompt nobody wrote.
     await writeFile(join(dir, "digest.md"), Buffer.concat([Buffer.from(head), Buffer.from([0x80])]));
     expect(() => readJobPrompt(job, dir)).toThrow(/not valid UTF-8/);
+  });
+
+  it("refuses a path that is not a regular file, rather than blocking the load on it", async () => {
+    // A FIFO would hang `readFileSync` forever, and the load path this runs on is `run`,
+    // `doctor` and `validate` — a startup that never returns and never says why.
+    const job = promptJob({ prompt: "{file: ./digest.md}" });
+    execFileSync("mkfifo", [join(dir, "digest.md")]);
+    expect(() => readJobPrompt(job, dir)).toThrow(/not a regular file/);
+
+    await rm(join(dir, "digest.md"));
+    await mkdir(join(dir, "digest.md"));
+    expect(() => readJobPrompt(job, dir)).toThrow(/not a regular file|EISDIR/);
+  });
+
+  it("stops reading an oversized file instead of taking the whole of it in", async () => {
+    const job = promptJob({ prompt: "{file: ./digest.md}" });
+    const head = "---\nname: d\ndescription: d\n---\n";
+    // Well past the bound, so a read that allocated the file would be plain in the timing.
+    await writeFile(join(dir, "digest.md"), head + "x".repeat(JOB_ARTIFACT_LIMIT_BYTES * 40));
+    expect(() => readJobPrompt(job, dir)).toThrow(
+      new RegExp(`over the ${JOB_ARTIFACT_LIMIT_BYTES}-byte limit`),
+    );
   });
 
   it("refuses a prompt that is not inside the agent directory", async () => {

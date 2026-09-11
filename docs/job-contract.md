@@ -508,9 +508,10 @@ channel reads), `trigger.onRequest` and `trigger.webhook`. `budget` is optional 
 shorten the turn: `wallClockMs` below `limits.turnTimeoutMs` wins, and above it does
 nothing. A job declaring both bodies, or neither, is refused.
 
-`sageox-agent doctor` and `sageox-agent validate` list every prompt job with its resolved
-prompt file, that file's size, and its next fire time in the declared zone — a prompt that
-silently changed size is the kind of thing nobody notices until the 3am post reads wrong.
+`sageox-agent doctor` and `sageox-agent validate` list every prompt job with where its
+words came from, their size, and its next fire time in the declared zone — a resolved path
+for a file-backed prompt, `inline` for a one-liner. A prompt that silently changed size is
+the kind of thing nobody notices until the 3am post reads wrong.
 `sageox-agent job run` refuses a prompt job: there is no process to spawn, and the gateway
 holds the clock. `sageox-agent job park <slug>` stops it without a deploy, as it stops any
 other job.

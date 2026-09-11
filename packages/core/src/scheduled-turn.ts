@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -66,6 +66,38 @@ function within(path: string, root: string): boolean {
 }
 
 /**
+ * One regular file, read no further than one byte past the bound its caller enforces.
+ *
+ * `readFileSync` weighs nothing before it allocates: pointed at a large file it takes the
+ * whole of it into memory to be told afterwards that it was too big, and pointed at a FIFO
+ * it never returns at all. Both would turn a `run`, `doctor` or `validate` load into an
+ * OOM or a silent hang, where every other bad prompt in this function is a named refusal.
+ *
+ * `O_NONBLOCK` is what keeps the *open* from being the thing that blocks — opening a FIFO
+ * for reading waits for a writer otherwise — and the kind is then checked on the descriptor
+ * rather than on the path, so nothing swapped in between is what gets read.
+ */
+function readBounded(path: string): Buffer {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    if (!fstatSync(fd).isFile()) {
+      throw new Error("not a regular file — a prompt is a file in the bundle");
+    }
+    // One past the limit: enough for the caller to refuse, and never the whole of something
+    // that should have been refused.
+    const buffer = Buffer.alloc(JOB_ARTIFACT_LIMIT_BYTES + 1);
+    let read = 0;
+    // A short read is legal even for a regular file, so this fills rather than assumes.
+    for (let chunk = -1; chunk !== 0 && read < buffer.byteLength; read += chunk) {
+      chunk = readSync(fd, buffer, read, buffer.byteLength - read, read);
+    }
+    return buffer.subarray(0, read);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Reads a prompt job's words, at load and once.
  *
  * Everything here throws rather than degrades. A schedule that discovers at 18:00 that its
@@ -116,16 +148,15 @@ export function readJobPrompt(job: PromptJob, agentDir: string): JobPrompt {
 
   let raw: Buffer;
   try {
-    raw = readFileSync(real);
+    raw = readBounded(real);
   } catch (error) {
     throw new Error(`${named}: ${errorText(error)}`);
   }
   // The same ceiling a verdict artifact has. A prompt is a page; anything approaching this
-  // is a document that was pointed at the wrong field.
+  // is a document that was pointed at the wrong field. The read above stops one byte past
+  // the limit, so this says the bound rather than a size it did not measure.
   if (raw.byteLength > JOB_ARTIFACT_LIMIT_BYTES) {
-    throw new Error(
-      `${named} is ${raw.byteLength} bytes, over the ${JOB_ARTIFACT_LIMIT_BYTES}-byte limit`,
-    );
+    throw new Error(`${named} is over the ${JOB_ARTIFACT_LIMIT_BYTES}-byte limit`);
   }
   let text: string;
   try {

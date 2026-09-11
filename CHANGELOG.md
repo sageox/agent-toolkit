@@ -38,8 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turns, edit its prompt, or claim to be one. Ticks that fall while the gateway is down are
   not replayed, and the in-process clock computes the next fire in `trigger.timezone`: a
   local time a spring-forward deletes does not run that day, and the hour a fall-back
-  repeats fires once. `doctor` and `validate` print each prompt job's resolved file, its
-  size, and its next fire time; `job run` refuses one, and `job park` still stops it. Chart
+  repeats fires once. `doctor` and `validate` print where each prompt job's words came from
+  — a resolved path for a file-backed prompt, `inline` for a one-liner — their size, and
+  its next fire time; `job run` refuses one, and `job park` still stops it. Chart
   0.14.0 mirrors a prompt job as `{slug, suspend, trigger, prompt: true}` with no `budget`
   and renders no CronJob for it. See
   [the job body contract](docs/job-contract.md#a-job-that-is-a-turn).
