@@ -14,7 +14,7 @@ around it. A deployment target must preserve this contract instead of translatin
 | Identity | Run exactly one replica for an agent identity. Two replicas would answer twice and race on one cursor. |
 | Shutdown | Allow longer than `limits.turnTimeoutMs` between `SIGTERM` and `SIGKILL`. |
 | Warmup | Connect first. Repository clone/fetch, indexing, cache fills, and other recoverable warmup never gate the agent process. The runtime enforces its half: only a precondition decides whether `run` starts, and no capability health ever does. See [Startup and readiness](startup-and-readiness.md). |
-| Jobs | Run every `jobs[]` entry that declares a `run` body on its declared schedule, under a deadline derived from its budget, without overlap and without retry. An entry declaring a `prompt` body is a turn on the agent's own clock: no scheduled object, no deadline to derive. An agent whose declared jobs render nothing deploys looking healthy with no scheduled work. See [Jobs](#jobs). |
+| Jobs | Run every `jobs[]` entry that declares a `run` body on its declared schedule, under a deadline derived from its budget, without overlap and without retry. An entry declaring a `prompt` body is a turn on the agent's own clock: no scheduled object, no deadline to derive, and rendering nothing for one is correct rather than a symptom. A `run` job left unrendered is the symptom — it deploys looking healthy with no scheduled work, and nothing at the target can tell that from an agent that declared none. See [Jobs](#jobs). |
 
 The runtime does not need an inbound port: Buzz and Slack use outbound connections. A target
 therefore should not create a Service or Ingress unless a future surface explicitly needs
