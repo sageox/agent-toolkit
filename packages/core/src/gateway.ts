@@ -239,10 +239,13 @@ export class Gateway {
     return new Promise<TickOutcome>((resolve) => {
       this.queue.submit(`${event.surface}:${event.channel.id}`, async () => {
         const started = Date.now();
-        console.info(
-          `tick_start surface=${event.surface} channel=${event.channel.id} author=${event.author.id}`,
-        );
+        // Everything is inside the `try`, logging included: this promise is the only thing
+        // the ticker is waiting on, and a throw that escaped would leave it pending for the
+        // life of the process rather than reporting a failed tick.
         try {
+          console.info(
+            `tick_start surface=${event.surface} channel=${event.channel.id} author=${event.author.id}`,
+          );
           const scheduled = true; // the prompt is the bundle's, so the turn is not fenced
           await this.runTurn(
             event,

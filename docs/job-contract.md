@@ -445,12 +445,15 @@ asked by a person, becomes this prompt invoked on request, with no second declar
 no edit to the file.
 
 **The tick runs in the gateway process, never in a pod.** The gateway holds an in-process
-clock: five cron fields plus `trigger.timezone`, with the next fire computed in that zone.
+clock: five cron fields — or one of the fixed descriptors, `@daily` and its siblings —
+resolved against `trigger.timezone`. `@every 5m` is refused at load, since an interval
+names no wall-clock time for a zone to resolve.
+
 A local time a spring-forward deletes does not run that day, and the hour a fall-back
 repeats fires once. Ticks that fall while the gateway is down are **not replayed** — a
 digest of yesterday posted at 06:00 because that is when the pod came back is worse than no
-digest — and the next tick's `run.started` event is the record that one was missed. The
-Helm chart renders no `CronJob` for a prompt job; [the chart README](../deploy/helm/README.md#jobs)
+digest — and the gap in the work events is where a missed one is visible. The Helm chart
+renders no `CronJob` for a prompt job; [the chart README](../deploy/helm/README.md#jobs)
 has the mirror.
 
 Admission is this host's, in this order: the kill switch, then `suspend`, then the
@@ -464,9 +467,10 @@ are the ones every other turn gets.
 
 The turn's reply is a **top-level post in `report.channel`**, through the same chokepoint
 the brain's own `post_message` clears: channel consent, the guard, and the leak scan all
-apply, and a channel the surface does not list is refused. Replies people leave under the
-post wake the agent as usual. An empty reply posts nothing — silence is the message here as
-everywhere else.
+apply, and a channel the surface does not list is refused. A reply left under the post
+reaches the agent exactly as any other message does, by mentioning it — the tick changes
+nothing about what wakes a turn. An empty reply posts nothing: silence is the message here
+as everywhere else.
 
 `announce` keeps its meaning, with the turn standing in for the gate: `unproven` (the
 default) posts the host's own line only when the turn never spoke — a timeout, a brain
