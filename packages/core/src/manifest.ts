@@ -860,10 +860,14 @@ export const JobSchema = z
      * a tick enters the turn path as a synthetic inbound event and comes out as a post in
      * the channel `report` names.
      *
-     * A one-liner may be written inline. Anything longer **is a skill**, named here and
-     * found at `skills/<name>/SKILL.md` in the bundle — a page of prompt inside a YAML
-     * block scalar is a page nobody reviews, and a skill is what the rest of the world
-     * already calls a page of instructions an agent reads and follows.
+     * Two forms, and the schema takes either at any length: a string written inline, or the
+     * name of a skill found at `skills/<name>/SKILL.md` in the bundle.
+     *
+     * Inline is for something short. Nothing here enforces that — a bound on lines or
+     * characters would refuse a perfectly readable three-line prompt to catch the case it
+     * is aimed at — but a page of prompt inside a YAML block scalar is a page nobody
+     * reviews, and a skill is what the rest of the world already calls a page of
+     * instructions an agent reads and follows.
      *
      * Named rather than pointed at, and that is the whole of the difference. A name is what
      * a person says and what a tool argument carries, so the day a skill can be invoked
@@ -966,7 +970,15 @@ export const JobSchema = z
          * is still minted from what the body ran, and the headline stays host-phrased —
          * a combined verdict carries none of the body's words.
          */
-        proven: z.enum(["labelled", "verbatim"]).default("labelled"),
+        /**
+         * Left undefined rather than defaulted, because the default already lives where it
+         * is used: `jobStatus` and `describeJobRun` both take `proven?: ProvenVoice` and
+         * render `labelled` for an absent one. Defaulting here as well would be the same
+         * decision written twice — and it would erase the difference between a job that
+         * omitted the field and one that asked for `labelled`, which is the difference a
+         * prompt job's refusal below is made of.
+         */
+        proven: z.enum(["labelled", "verbatim"]).optional(),
         /**
          * Whether this job's body may talk through this channel while it runs, rather than
          * only being reported into it when it is over.
@@ -1081,6 +1093,12 @@ export const JobSchema = z
         "report.history",
         job.report?.history,
         "the brain reads the channel with its own read tools",
+      ],
+      [
+        "report.proven",
+        job.report?.proven !== undefined,
+        "it renders the threaded gate lines, and a tick mints one gate — so there is no " +
+          "thread and nothing for this to phrase",
       ],
     ] as const) {
       if (declared) {

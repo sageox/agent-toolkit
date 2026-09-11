@@ -97,6 +97,16 @@ describe("nextFire", () => {
     expect(() => nextFire(["0 9-5 * * *"], "UTC", new Date())).toThrow(/counts backwards/);
   });
 
+  it("takes a decimal field and refuses every other way to write a number", () => {
+    // `Number` reads all of these, and the Kubernetes parser refuses all of them — so a
+    // `run` job and a `prompt` job carrying one expression would have disagreed.
+    const from = new Date("2026-09-10T13:00:00Z");
+    expect(wall(nextFire(["0 16 * * *"], "UTC", from), "UTC")).toBe("2026-09-10 16:00:00");
+    for (const bad of ["0 0x10 * * *", "0 1e1 * * *", "0 0-0x5 * * *"]) {
+      expect(() => nextFire([bad], "UTC", from), bad).toThrow(/not a value or a range/);
+    }
+  });
+
   it("takes a three-letter name and refuses anything that merely starts like one", () => {
     // Truncating to three would read `MONSOON` as Monday and schedule an expression nobody
     // meant. Kubernetes' own parser takes the abbreviations and nothing longer, so one

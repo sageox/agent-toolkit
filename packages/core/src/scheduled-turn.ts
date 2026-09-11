@@ -781,6 +781,10 @@ function named(
   // and a `prompt` job carrying one expression have to refuse it the same way.
   const byName = written.length === 3 ? names?.indexOf(written.toLowerCase()) : -1;
   if (byName !== undefined && byName >= 0) return byName + min;
+  // Digits only. `Number` also reads `0x10` as 16, `+5` as 5 and `1e1` as 10, and every one
+  // of those is a field the Kubernetes parser refuses for a `run` job — the same invariant
+  // the three-letter rule above keeps: one expression means one thing to both bodies.
+  if (!/^\d+$/.test(written)) return undefined;
   const value = Number(written);
-  return Number.isInteger(value) && value >= min && value <= max ? value : undefined;
+  return value >= min && value <= max ? value : undefined;
 }

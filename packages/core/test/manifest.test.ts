@@ -963,7 +963,6 @@ describe("jobs", () => {
       surface: "console",
       channel: "hive",
       announce: "unproven",
-      proven: "labelled",
       probe: false,
       history: false,
     });
@@ -1009,7 +1008,10 @@ describe("jobs", () => {
     // The default is the rendering every job had before the field existed. Presentation
     // only, and over PASS alone — `verdict.test.ts` holds the half that matters.
     const declared = (report: string) => loadManifest(withJob({ report })).jobs[0].report?.proven;
-    expect(declared("{surface: console, channel: hive}")).toBe("labelled");
+    // Absent rather than defaulted here: the rendering default lives in `jobStatus`, which
+    // is the one place that has to know it, and leaving it absent is what lets a prompt
+    // job tell "omitted" from "asked for `labelled`".
+    expect(declared("{surface: console, channel: hive}")).toBeUndefined();
     expect(declared("{surface: console, channel: hive, proven: verbatim}")).toBe("verbatim");
 
     // A word nobody implements is refused rather than read as `verbatim`: a job asking for
@@ -1121,6 +1123,10 @@ describe("a job whose body is a prompt", () => {
       ["output", { output: "{format: json}" }],
       ["report.probe", { report: "{surface: slack, channel: C01, probe: true}" }],
       ["report.history", { report: "{surface: slack, channel: C01, probe: true, history: true}" }],
+      // Detectable only because `proven` is no longer defaulted in the schema: omitting it
+      // and asking for `labelled` would otherwise be the same value here.
+      ["report.proven", { report: "{surface: slack, channel: C01, proven: labelled}" }],
+      ["report.proven", { report: "{surface: slack, channel: C01, proven: verbatim}" }],
     ] as const) {
       expect(() => loadManifest(withJob(over)), field).toThrow(
         new RegExp(`declares a .prompt. body, so it declares no .${field.replace(".", "\\.")}.`),
@@ -1142,6 +1148,10 @@ describe("a job whose body is a prompt", () => {
 
   it("needs somewhere to be addressed and to answer", () => {
     expect(() => loadManifest(withJob({ report: undefined }))).toThrow(/no `report`/);
+  });
+
+  it("takes a report that omits `proven`, which is every prompt job", () => {
+    expect(loadManifest(withJob()).jobs[0]!.report?.proven).toBeUndefined();
   });
 
   it("refuses the announce mode that keys on something a turn never writes", () => {

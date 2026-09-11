@@ -426,8 +426,11 @@ jobs:
     report: { surface: slack, channel: "C0123456789" }
 ```
 
-The words are **a skill**, at the layout every agent runtime already uses for a page of
-instructions an agent reads and follows — `skills/<name>/SKILL.md` in the bundle:
+Either form is taken at any length. Inline is for something short — nothing enforces that,
+since a bound on lines would refuse a readable three-line prompt to catch the page it is
+aimed at. Anything longer wants to be **a skill**, at the layout every agent runtime already
+uses for a page of instructions an agent reads and follows — `skills/<name>/SKILL.md` in the
+bundle:
 
 ```markdown
 ---

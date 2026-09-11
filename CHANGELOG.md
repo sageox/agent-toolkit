@@ -18,10 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway process. Everything around it is the envelope that was already there — `slug`,
   `archetype`, `trigger.schedules` and `trigger.timezone`, `killSwitch`, `suspend`,
   `report`, `announce`, the work events, `doctor` and `validate` — which is why this is one
-  list and not a second block. `prompt` takes an inline string for a one-liner or
-  `{ skill: <name> }` for anything longer — **a skill**, at `skills/<name>/SKILL.md` in the
-  bundle, which is the layout every agent runtime already uses for a page of instructions an
-  agent reads and follows. Named rather than pointed at, because a name is what a person
+  list and not a second block. `prompt` takes either an inline string or
+  `{ skill: <name> }` — **a skill**, at `skills/<name>/SKILL.md` in the bundle, which is the
+  layout every agent runtime already uses for a page of instructions an agent reads and
+  follows. Inline is for something short and the schema does not enforce that; a page of
+  prompt inside a YAML block scalar is a page nobody reviews. Named rather than pointed at, because a name is what a person
   says and what a tool argument carries: the day a skill can be invoked from the chat face,
   "run the digest now" resolves the same name through the same lookup, with no second
   declaration and no file moved. The frontmatter `name` must match the directory. The root

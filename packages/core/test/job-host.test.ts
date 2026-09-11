@@ -723,7 +723,7 @@ describe("the status post", () => {
   const feed = (
     id: (n: number) => EventRef | undefined = named,
     announce: JobAnnounce = "unproven",
-    proven: ProvenVoice = "labelled",
+    proven?: ProvenVoice,
   ) => {
     const posts: Array<{ text: string; threadRoot?: EventRef; mentions?: readonly string[] }> = [];
     const post: JobPoster = async (report, text, threadRoot, mentions) => {
@@ -738,7 +738,9 @@ describe("the status post", () => {
         surface: "console",
         channel: "hive",
         announce,
-        proven,
+        // Absent unless the job asked for one: `proven` carries no schema default, so that
+        // the difference between omitting it and choosing `labelled` survives to the load.
+        ...(proven ? { proven } : {}),
         probe: false,
         history: false,
       });
