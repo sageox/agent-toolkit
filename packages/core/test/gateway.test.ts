@@ -1075,10 +1075,9 @@ describe("Gateway.tick", () => {
     await started; // the chat turn is inside the brain and holding the channel
 
     const ticked = gw.tick(tickEv("the digest"), { surface: "slack", channel: "C01" });
-    // Drained rather than slept on: every microtask the tick could have run on has run, and
-    // it still has not entered the brain.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Asserted with nothing awaited in between, and that is the point: `ChannelQueue.submit`
+    // pumps synchronously, so if the tick could overtake a running turn in its channel it
+    // would already have entered the brain by this line.
     expect(entered).toEqual(["u1"]);
 
     release();
@@ -1110,13 +1109,24 @@ describe("Gateway.tick", () => {
       release = resolve;
     });
     let resumed = false;
+    let stepTaken!: () => void;
+    // The completion point, and it is a real one rather than a guess: this `finally` runs
+    // when the abandoned generator is returned, which cannot happen before `drive` has
+    // taken the late step off the `yield` and offered it to the send.
+    const taken = new Promise<void>((resolve) => {
+      stepTaken = resolve;
+    });
     // Suspended inside an `await` when the timeout wins, then coming back with a reply.
     // `withTimeout` releases the queue slot and cannot cancel this — so the send has to.
     const brain: Brain = {
       async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
-        await held;
-        resumed = true;
-        yield { type: "reply", msg: { text: "late" } };
+        try {
+          await held;
+          resumed = true;
+          yield { type: "reply", msg: { text: "late" } };
+        } finally {
+          stepTaken();
+        }
       },
     };
     const gw = new Gateway({
@@ -1130,7 +1140,7 @@ describe("Gateway.tick", () => {
     expect((outcome.error as Error).message).toMatch(/turn timed out/);
 
     release();
-    await new Promise((r) => setTimeout(r, 20));
+    await taken;
     // The brain came back and asked to post, and nothing reached the channel: the host has
     // already said this tick proved nothing, and a second, contradicting post at top level
     // is what this closes.
