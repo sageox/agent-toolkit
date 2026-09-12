@@ -16,31 +16,34 @@
  * A bare URL is left alone; Slack links it without help.
  */
 export function toMrkdwn(text: string): string {
-  let fenced = false;
+  let fence: string | undefined;
   return text
     .split("\n")
     .map((line) => {
-      if (FENCE.test(line)) {
-        fenced = !fenced;
+      const rail = FENCE.exec(line)?.[1];
+      if (rail) {
+        // A block closes only on its own character and on a run at least as long as the one
+        // that opened it, so a ```` block quoting ``` stays open and its lines stay verbatim.
+        if (!fence) fence = rail;
+        else if (rail[0] === fence[0] && rail.length >= fence.length) fence = undefined;
         return line;
       }
-      if (fenced) return line;
+      if (fence) return line;
       const heading = HEADING.exec(line);
       if (heading) {
         const title = inline(heading[1]).trimEnd();
-        // `## **Summary**` is bold already; wrapping it again leaves a stray `*` each side.
-        return title.startsWith("*") && title.endsWith("*") ? title : `*${title}*`;
+        // mrkdwn has no bold inside bold. A heading already carrying a `*` — its own
+        // emphasis, or one no rule claimed — keeps it rather than being wrapped in a span
+        // that `*` would leave unbalanced.
+        return title.includes("*") ? title : `*${title}*`;
       }
       return inline(line.replace(BULLET, "$1• "));
     })
     .join("\n");
 }
 
-/** A fence line — the same pattern opens a block and closes it. Slack renders the block. */
-const FENCE = /^[ \t]*```/;
-
-/** Kept whole by the `split` in {@link inline}, so no rule reaches inside a code span either. */
-const CODE_SPAN = /(`[^`]*`)/;
+/** A fence line, and the run that has to be matched to close it. Slack renders the block. */
+const FENCE = /^[ \t]*(`{3,}|~{3,})/;
 
 /** mrkdwn has no heading, so bold is the nearest thing a brain that asked for one gets. */
 const HEADING = /^#{1,6}[ \t]+(.+)$/;
@@ -48,12 +51,17 @@ const HEADING = /^#{1,6}[ \t]+(.+)$/;
 /** The space is required: `---` stays a rule and `**bold**` at a line start stays bold. */
 const BULLET = /^([ \t]*)[-*][ \t]+/;
 
+/**
+ * A code span closes on a backtick run as long as the one that opened it, so the doubled
+ * backticks a brain uses to quote a backtick are one span and not two empty ones with
+ * translated text between them. A run that never closes is copied like one that did, and
+ * the text around it is still translated.
+ */
+const SEGMENT = /(`+).*?\1|[^`]+|`+/g;
+
 /** The rules, applied to the parts of a line that are not a code span. */
 function inline(line: string): string {
-  return line
-    .split(CODE_SPAN)
-    .map((part, index) => (index % 2 ? part : translate(part)))
-    .join("");
+  return line.replace(SEGMENT, (part) => (part.startsWith("`") ? part : translate(part)));
 }
 
 /**

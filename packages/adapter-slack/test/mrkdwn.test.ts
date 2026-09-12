@@ -7,8 +7,11 @@ describe("Markdown to mrkdwn", () => {
       "*bold* and *bold* and _italic_ and _italic_ and ~struck~",
     );
     expect(toMrkdwn("# Deploy report")).toBe("*Deploy report*");
-    // A heading is bold, and one written bold is not bold twice.
+    // A heading is bold, and one written bold is not bold twice. mrkdwn has no bold inside
+    // bold, so a heading that emphasizes only part of itself keeps that rather than being
+    // wrapped in a span the inner `*` would leave unbalanced.
     expect(toMrkdwn("### **Summary**")).toBe("*Summary*");
+    expect(toMrkdwn("## **Summary** today")).toBe("*Summary* today");
     expect(toMrkdwn("- one\n* two\n  - nested")).toBe("• one\n• two\n  • nested");
     expect(toMrkdwn("([#305](https://github.test/org/repo/pull/305)) landed")).toBe(
       "(<https://github.test/org/repo/pull/305|#305>) landed",
@@ -32,6 +35,16 @@ describe("Markdown to mrkdwn", () => {
     expect(toMrkdwn("`**kwargs` beside **bold**")).toBe("`**kwargs` beside *bold*");
     expect(toMrkdwn("```ts\nconst x = **a**;\n- not a bullet\n```\nthen **bold**")).toBe(
       "```ts\nconst x = **a**;\n- not a bullet\n```\nthen *bold*",
+    );
+    // A span closes on a run as long as the one that opened it, or the two backticks a
+    // brain used to quote a backtick would read as one empty span and expose what follows.
+    expect(toMrkdwn("``**a**`` beside **bold**")).toBe("``**a**`` beside *bold*");
+    // The same rule for a block: `~~~` fences, and a ```` block quoting ``` stays open.
+    expect(toMrkdwn("~~~\n**a**\n- not a bullet\n~~~\nthen **bold**")).toBe(
+      "~~~\n**a**\n- not a bullet\n~~~\nthen *bold*",
+    );
+    expect(toMrkdwn("````\n```\n**a**\n```\n````\nthen **bold**")).toBe(
+      "````\n```\n**a**\n```\n````\nthen *bold*",
     );
   });
 
