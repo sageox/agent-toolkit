@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-11
+
+Everything below shipped after `v0.5.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.5.2` takes `:latest` and advances `:0.5`. Pin
+the digest recorded on the GitHub Release in production. A patch rather than a minor
+because nothing about configuration moved: no manifest field, no chart setting, and no
+chart version — `deploy/helm` renders on 0.14.0 exactly as it did.
+
+**Every Slack reply reads differently, and there is nothing to turn on.** Emphasis,
+headings, list markers and links render now rather than arriving with their punctuation
+showing. The one thing to check before upgrading is an agent whose prompt was steered to
+write Slack's dialect itself: `*bold*` is Markdown for italic, so that steering now
+produces `_bold_`. Drop it; the adapter translates for every agent. Only `adapter-slack`
+changed, so Buzz and console egress is byte-identical.
+
 - **A brain's Markdown renders on Slack, because the adapter now writes Slack's dialect.**
   A reply left the gateway as the brain wrote it — `SlackAdapter.outboundText` escaped `&`,
   `<` and `>` and nothing else — so `**Agents logged solid work.**` and
