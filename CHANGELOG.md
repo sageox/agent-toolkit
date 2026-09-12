@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A brain's Markdown renders on Slack, because the adapter now writes Slack's dialect.**
+  A reply left the gateway as the brain wrote it — `SlackAdapter.outboundText` escaped `&`,
+  `<` and `>` and nothing else — so `**Agents logged solid work.**` and
+  `[#305](https://github.example/org/repo/pull/305)` arrived with their asterisks and
+  brackets showing, while the same text read correctly on a Markdown surface. Steering a
+  persona per surface is not a fix: a fleet's reply contract is one prompt shared by every
+  agent, so "write `*bold*` on Slack" cannot be said to one of them, and a contract that
+  requires a Markdown link cannot be excepted at all. The dialect is a fact about the
+  transport, so the transport applies it — `adapter-slack` is the only thing that knows the
+  surface is Slack. On egress `**bold**` and `__bold__` become `*bold*`, `*italic*` becomes
+  `_italic_`, `~~struck~~` becomes `~struck~`, `# Heading` becomes bold, `-` and `*` list
+  markers become `•`, and `[text](url)` becomes `<url|text>`; code spans and fenced blocks
+  are copied untouched, and a bare URL is left bare because Slack links one itself. The
+  pass runs **after** the escape, which is what keeps it safe: by then a `<`, `>` or `&`
+  the brain typed is an entity, and a link is built only around an `http(s):` or `mailto:`
+  URL — so `[page everyone](!channel)` is still text and `<!channel>` still notifies
+  nobody.
+
 ## [0.5.1] - 2026-09-11
 
 Everything below shipped after `v0.5.0`.

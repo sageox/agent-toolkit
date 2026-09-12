@@ -21,6 +21,7 @@ import {
   toSlackInboundEvent,
   type SlackMessage,
 } from "./normalize.ts";
+import { toMrkdwn } from "./mrkdwn.ts";
 
 export interface SlackSocketClient {
   on(event: string, listener: (payload: unknown) => void): unknown;
@@ -1023,7 +1024,9 @@ export class SlackAdapter implements SurfaceAdapter {
    * those characters — `normalizeSlackText` un-escapes the `&lt;!channel&gt;` Slack sent —
    * so quoting either form is an answer and one `egress_escaped` line, not a dead turn.
    *
-   * `&` is replaced first, or it escapes the ampersands the other two introduce.
+   * `&` is replaced first, or it escapes the ampersands the other two introduce, and
+   * {@link toMrkdwn} runs after all three — so the `<url|text>` it builds from a Markdown
+   * link is the only live markup on the wire, and prose cannot reach one.
    */
   private outboundText(msg: GuardedMessage, channel: string): string {
     if (/<!\s*(?:channel|here|everyone)(?:\^[^>]*)?>/i.test(msg.text)) {
@@ -1032,7 +1035,11 @@ export class SlackAdapter implements SurfaceAdapter {
           `reason="the text carried a broadcast, escaped to characters that notify nobody"`,
       );
     }
-    return msg.text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    const escaped = msg.text
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+    return toMrkdwn(escaped);
   }
 
 }
