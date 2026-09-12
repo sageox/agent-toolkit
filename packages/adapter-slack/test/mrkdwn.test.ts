@@ -16,8 +16,10 @@ describe("Markdown to mrkdwn", () => {
     expect(toMrkdwn("([#305](https://github.test/org/repo/pull/305)) landed")).toBe(
       "(<https://github.test/org/repo/pull/305|#305>) landed",
     );
-    // The link inside is translated, not swallowed by the emphasis around it.
+    // The link inside is translated, not swallowed by the emphasis around it — and Slack
+    // renders mrkdwn inside a label, so emphasis there is translated rather than shown.
     expect(toMrkdwn("**[#305](https://github.test/a)**")).toBe("*<https://github.test/a|#305>*");
+    expect(toMrkdwn("[**#305**](https://github.test/a)")).toBe("<https://github.test/a|*#305*>");
   });
 
   it("leaves alone the punctuation that is not markup", () => {
@@ -46,6 +48,11 @@ describe("Markdown to mrkdwn", () => {
     expect(toMrkdwn("````\n```\n**a**\n```\n````\nthen **bold**")).toBe(
       "````\n```\n**a**\n```\n````\nthen *bold*",
     );
+    // Only an opening fence carries a word after the run, so a block whose code says
+    // ```bash stays open — and closing on it would read the rest of the message inverted.
+    expect(toMrkdwn("```ts\nsee ```bash\n- literal\n```\nthen **bold**")).toBe(
+      "```ts\nsee ```bash\n- literal\n```\nthen *bold*",
+    );
   });
 
   it("builds a link only around a URL, so escaped markup cannot become live again", () => {
@@ -54,7 +61,8 @@ describe("Markdown to mrkdwn", () => {
     // The one rule that emits `<` needs an http(s) or mailto URL, which these are not.
     expect(toMrkdwn("[boom](!channel)")).toBe("[boom](!channel)");
     expect(toMrkdwn("[boom](javascript:alert(1))")).toBe("[boom](javascript:alert(1))");
-    // A label is markup to nobody: it arrives escaped and is copied, never translated.
+    // A label is translated, but the rule that emits `<` needs a `]` and a label may not
+    // contain one — so no label can put a second `<…>` inside the link built around it.
     expect(toMrkdwn("[&lt;!channel&gt;](https://x.test/a)")).toBe(
       "<https://x.test/a|&lt;!channel&gt;>",
     );

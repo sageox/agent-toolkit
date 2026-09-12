@@ -20,12 +20,16 @@ export function toMrkdwn(text: string): string {
   return text
     .split("\n")
     .map((line) => {
-      const rail = FENCE.exec(line)?.[1];
-      if (rail) {
-        // A block closes only on its own character and on a run at least as long as the one
-        // that opened it, so a ```` block quoting ``` stays open and its lines stay verbatim.
+      const fenceLine = FENCE.exec(line);
+      if (fenceLine) {
+        const [, rail, info] = fenceLine;
+        // A block closes only on its own character, on a run at least as long as the one
+        // that opened it, and on nothing else: a ```` block quoting ``` stays open, and so
+        // does one whose code says ```bash, because only an opening fence carries a word.
         if (!fence) fence = rail;
-        else if (rail[0] === fence[0] && rail.length >= fence.length) fence = undefined;
+        else if (rail[0] === fence[0] && rail.length >= fence.length && !info.trim()) {
+          fence = undefined;
+        }
         return line;
       }
       if (fence) return line;
@@ -42,8 +46,8 @@ export function toMrkdwn(text: string): string {
     .join("\n");
 }
 
-/** A fence line, and the run that has to be matched to close it. Slack renders the block. */
-const FENCE = /^[ \t]*(`{3,}|~{3,})/;
+/** A fence line: the run a close has to match, and what follows it on the line. */
+const FENCE = /^[ \t]*(`{3,}|~{3,})(.*)$/;
 
 /** mrkdwn has no heading, so bold is the nearest thing a brain that asked for one gets. */
 const HEADING = /^#{1,6}[ \t]+(.+)$/;
@@ -66,9 +70,11 @@ function inline(line: string): string {
 
 /**
  * Emphasized text is translated in turn, or `**[#305](url)**` would consume the link and
- * send its brackets. That terminates: a delimiter pair is dropped on the way in. A link's
- * label is the exception — it is the one place a nested rule would put a second `<…>`
- * inside the one being built.
+ * send its brackets. That terminates: a delimiter pair is dropped on the way in.
+ *
+ * A label is translated too — Slack renders mrkdwn inside one — and cannot smuggle a second
+ * `<…>` into the link being built around it: the link rule needs a `]`, and a label is
+ * matched by a class that excludes one.
  */
 function translate(text: string): string {
   /**
@@ -96,7 +102,7 @@ function translate(text: string): string {
       strike: string,
       italic: string,
     ) => {
-      if (url) return `<${url}|${label}>`;
+      if (url) return `<${url}|${translate(label)}>`;
       if (bold) return `*${translate(bold)}*`;
       if (strike) return `~${translate(strike)}~`;
       return `_${translate(italic)}_`;
