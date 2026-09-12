@@ -29,9 +29,10 @@ them in CI. The runtime image is the entry point, and its `validate` is the same
 repository's `./bin/sageox-agent validate` runs:
 
 ```bash
-# The same tag the deployment runs: the gate is only worth having if it holds the schema
-# the runtime about to load this file holds.
-docker run --rm -v "$PWD:/w" ghcr.io/sageox/agent-base:0.4 validate /w/agent.yaml
+# The same image the deployment runs: the gate is only worth having if it holds the schema
+# the runtime about to load this file holds. That is the digest the deployment pins, not a
+# floating tag — a patch advances the tag and may add schema the deployment still refuses.
+docker run --rm -v "$PWD:/w" ghcr.io/sageox/agent-base@sha256:<digest> validate /w/agent.yaml
 ```
 
 Two properties make this worth a CI step rather than a later `doctor` run:
