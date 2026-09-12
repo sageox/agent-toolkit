@@ -53,6 +53,9 @@ describe("Markdown to mrkdwn", () => {
     expect(toMrkdwn("```ts\nsee ```bash\n- literal\n```\nthen **bold**")).toBe(
       "```ts\nsee ```bash\n- literal\n```\nthen *bold*",
     );
+    // Code outranks every other rule, including the link one: a span inside a label is
+    // copied, which costs that link its translation and keeps the guarantee one sentence.
+    expect(toMrkdwn("[`--flag`](https://x.test/a)")).toBe("[`--flag`](https://x.test/a)");
   });
 
   it("builds a link only around a URL, so escaped markup cannot become live again", () => {
