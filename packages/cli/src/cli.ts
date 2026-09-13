@@ -13,7 +13,7 @@ import { z } from "zod";
 import {
   Gateway,
   MockBrain,
-  ClaudeAcpBrain,
+  AcpBrain,
   describeStartup,
   describeUnmet,
   errorLine,
@@ -32,8 +32,10 @@ import {
   type TeamBrain,
   resolveSecret,
   type AgentManifest,
+  type McpServer,
+  type McpServerConfig,
   type Brain,
-  type ToolPolicy,
+  ToolPolicy,
   McpBroker,
   resolveMcpServer,
   stdioTransport,
@@ -115,7 +117,7 @@ import {
   saveCreateProgress,
 } from "./commands.ts";
 import {
-  ANTHROPIC_KEY_SPEC,
+  BRAIN_KEY_SPECS,
   GITHUB_TOKEN_SPEC,
   SAGEOX_TOKEN_SPEC,
   declaredSecrets,
@@ -305,7 +307,12 @@ async function buildBrain(
   }
 
   // Every server hosted below listens on the same address.
-  const serveAt = { host: process.env.BRAIN_MCP_HOST };
+  const isCodex = manifest.brain.provider === "codex-acp";
+  const toolPolicy = policy ?? new ToolPolicy([], []);
+  const serveAt = (server: string) => ({
+    host: process.env.BRAIN_MCP_HOST,
+    ...(isCodex ? { toolPolicy: { server, policy: toolPolicy } } : {}),
+  });
 
   // Re-invoking this CLI needs the loader flags it was started with: under tsx the
   // script is a .ts file that plain node cannot run.
@@ -315,7 +322,7 @@ async function buildBrain(
     process.stdout.write(`  note: the "${preset}" brain is configured but not implemented yet\n`);
   }
 
-  const mcpServers: unknown[] = [...wiring.servers];
+  const mcpServers: McpServer[] = isCodex ? [] : [...wiring.servers];
   const hosted: HostedMcp[] = [];
   const addHosted = (name: string, server: HostedMcp, label: string) => {
     hosted.push(server);
@@ -350,7 +357,7 @@ async function buildBrain(
   }
 
   if (postMessage || react) {
-    const server = await serveSurfaceEgress(egress!, policy!, { postMessage, react }, serveAt);
+    const server = await serveSurfaceEgress(egress!, policy!, { postMessage, react }, serveAt(SURFACE_EGRESS_SERVER));
     const label = [postMessage && "post", react && "reaction"].filter(Boolean).join(" and ");
     addHosted(SURFACE_EGRESS_SERVER, server, `${label} tool`);
   }
@@ -362,7 +369,7 @@ async function buildBrain(
     (tool) => policy?.allowsTool(qualifyTool(SURFACE_READ_SERVER, tool)).ok === true,
   );
   if (reads.length && egress?.canRead()) {
-    const server = await serveSurfaceRead(egress, policy!, serveAt);
+    const server = await serveSurfaceRead(egress, policy!, serveAt(SURFACE_READ_SERVER));
     addHosted(SURFACE_READ_SERVER, server, `surface read tools (${reads.join(", ")})`);
   } else if (reads.length) {
     process.stdout.write(
@@ -381,10 +388,21 @@ async function buildBrain(
     );
   }
 
-  const broker = manifest.mcpServers.length
+  const brokerServers: McpServerConfig[] = [
+    ...manifest.mcpServers.map(resolveMcpServer),
+    ...(isCodex ? wiring.servers.map(({ name, command, args, env }) => ({
+      name,
+      command,
+      args,
+      env: Object.fromEntries(env.map(({ name, value }) => [name, value])),
+      secrets: {},
+      scope: {},
+    })) : []),
+  ];
+  const broker = brokerServers.length
     ? new McpBroker({
-        servers: manifest.mcpServers.map(resolveMcpServer),
-        policy: policy!,
+        servers: brokerServers,
+        policy: toolPolicy,
         transport: stdioTransport,
         secretOpts: { dir: secretsDir },
         // The same patterns the chat chokepoint runs. A tool argument is the other way out
@@ -398,10 +416,9 @@ async function buildBrain(
       })
     : undefined;
 
-  for (const decl of manifest.mcpServers) {
-    const { name, scope } = resolveMcpServer(decl);
-    const server = await serveBrokerServer(broker!, name, serveAt);
-    const bound = Object.entries(scope)
+  for (const { name, scope } of brokerServers) {
+    const server = await serveBrokerServer(broker!, name, serveAt(name));
+    const bound = Object.entries(scope ?? {})
       .map(([arg, values]) => `${arg} ∈ ${values.join(", ")}`)
       .join("; ");
     addHosted(name, server, `mcp server "${name}"${bound ? ` (bound to ${bound})` : ""}`);
@@ -454,7 +471,7 @@ async function buildBrain(
         // siblings.
         owner: manifest.owner ?? [],
       },
-      serveAt,
+      serveAt(JOB_SERVER),
     );
     addHosted(JOB_SERVER, server, `job tool (${requestable.map((l) => l.slug).join(", ")})`);
   }
@@ -466,7 +483,7 @@ async function buildBrain(
       const identity = resolveSecret(cfg.age.identitySecret, { dir: secretsDir });
       server = await serveVaultBrain(
         new Vault(cfg.root, { recipient: cfg.age.recipient, identity }),
-        serveAt,
+        serveAt(cfg.name),
       );
     } else if (cfg.preset === "private") {
       const buzz = buzzSurface(manifest);
@@ -490,7 +507,7 @@ async function buildBrain(
           parkBy: manifest.killSwitchParkBy ?? [],
           asking: egress && (() => egress.asking()),
         },
-        serveAt,
+        serveAt(cfg.name),
       );
     } else {
       // Held, not just served: this is the one brain that measures its own health, and
@@ -510,20 +527,21 @@ async function buildBrain(
         // the next `ox` child carries.
         token: () => resolveSecret(cfg.token, { dir: secretsDir }),
       });
-      server = await serveTeamBrain(teamBrain, serveAt);
+      server = await serveTeamBrain(teamBrain, serveAt(cfg.name));
     }
     addHosted(cfg.name, server, `${cfg.preset === "vault" ? cfg.brainPreset : cfg.preset} brain`);
   }
 
   if (codeWorkspace) {
-    const server = await serveCodeWorkspace(codeWorkspace, serveAt);
+    const server = await serveCodeWorkspace(codeWorkspace, serveAt(CODE_SERVER));
     addHosted(CODE_SERVER, server, "code tools");
   }
 
-  // ACP applies the same tool policy to these memory servers as to every other tool the
-  // brain can reach; hosted servers additionally keep their credential on this side.
+  // Claude checks permissions over ACP; Codex reaches only policy-checked HTTP servers.
+  // Hosted servers keep their credentials on this side of the brain boundary.
   return {
-    brain: new ClaudeAcpBrain({
+    brain: new AcpBrain({
+      provider: manifest.brain.provider,
       toolPolicy: policy,
       // Never the repository checkout: an agent whose working directory is cloned code
       // picks that repository's own agent instructions up as trusted context. Code
@@ -532,7 +550,7 @@ async function buildBrain(
       mcpServers,
       // Handed over explicitly: the brain's own env is an allowlist, and a mounted key
       // is never in it.
-      apiKey: resolveSecret("ANTHROPIC_API_KEY", { dir: secretsDir }),
+      apiKey: resolveSecret(BRAIN_KEY_SPECS[manifest.brain.provider].name, { dir: secretsDir }),
       model: manifest.brain.model,
       // The number `job_run` weighs a job's deadline against, so the two cannot disagree.
       turnTimeoutMs: manifest.limits.turnTimeoutMs,
@@ -1290,7 +1308,7 @@ async function finishCreateJourney(
   if (progress.stage === "repos") {
     // The mock brain cannot call the code tools, so asking for repositories there would
     // knowingly create a configuration that the preflight below rejects.
-    if (readManifest(agent.config).brain.provider === "claude-acp") {
+    if (readManifest(agent.config).brain.provider !== "mock") {
       for (;;) {
         const repository = await setupChoice("Add repository context?", [
           "Done adding repositories",
@@ -1374,8 +1392,8 @@ async function runCmd(argv: string[]): Promise<void> {
 
   // Resolve the spend credential before starting any background network work. A failed
   // unattended launch should not leave a clone running after the process reports failure.
-  if (manifest.brain.provider === "claude-acp") {
-    await requireCredential(ANTHROPIC_KEY_SPEC, { secretsDir });
+  if (manifest.brain.provider !== "mock") {
+    await requireCredential(BRAIN_KEY_SPECS[manifest.brain.provider], { secretsDir });
   }
 
   const repos = readRepos(agent.repos);
@@ -1389,11 +1407,11 @@ async function runCmd(argv: string[]): Promise<void> {
     );
   }
 
-  const policy = manifest.brain.provider === "claude-acp" && manifest.tools
+  const policy = manifest.brain.provider !== "mock" && manifest.tools
     ? loadToolPolicy(readFileSync(resolve(agent.dir, manifest.tools), "utf8"))
     : undefined;
   const codeWorkspace =
-    repos.length && manifest.brain.provider === "claude-acp"
+    repos.length && manifest.brain.provider !== "mock"
       ? createRepoWorkspace(repos, { root: join(agent.dir, "workspace"), secretsDir })
       : undefined;
 
@@ -1466,7 +1484,7 @@ async function runCmd(argv: string[]): Promise<void> {
   // Subscribe before the brain is ready — upstream's `--lazy-pool` exists for the same
   // reason. A brain that takes seconds to come up must not cost us the mentions that
   // arrive meanwhile; a turn landing early simply waits for readiness.
-  const starting = brain instanceof ClaudeAcpBrain ? brain.start() : Promise.resolve();
+  const starting = brain instanceof AcpBrain ? brain.start() : Promise.resolve();
   starting.catch(() => {}); // reported below, once we are already listening
 
   const persona = manifest.persona
@@ -1533,7 +1551,7 @@ async function runCmd(argv: string[]): Promise<void> {
     // It settles rather than waits — see `JobHost.abandon`.
     await jobs?.abandon().catch(() => {});
     await gw.stop().catch(() => {});
-    if (brain instanceof ClaudeAcpBrain) await brain.stop().catch(() => {});
+    if (brain instanceof AcpBrain) await brain.stop().catch(() => {});
     await closeHosted();
     persist();
     process.exit(0);
@@ -2390,6 +2408,7 @@ function validateCmd(argv: string[]): boolean {
   return true;
 }
 
+/** Checks an agent's configuration and credentials; warnings alone still return true. */
 async function doctorCmd(argv: string[]): Promise<boolean> {
   const agent = await agentFrom(argv);
   loadDotEnv(agent.env);
@@ -2427,15 +2446,18 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
 
   if (manifest) {
     process.chdir(agent.dir);
-    if (manifest.brain.provider === "claude-acp" && !resolveSecret("ANTHROPIC_API_KEY", { dir: secretsDir }))
-      problems.push("brain is claude-acp but ANTHROPIC_API_KEY does not resolve (file or env)");
-    else if (manifest.brain.provider === "claude-acp") ok.push("ANTHROPIC_API_KEY resolves");
+    if (manifest.brain.provider !== "mock") {
+      const key = BRAIN_KEY_SPECS[manifest.brain.provider].name;
+      if (!resolveSecret(key, { dir: secretsDir })) {
+        problems.push(`brain is ${manifest.brain.provider} but ${key} does not resolve (file or env)`);
+      } else ok.push(`${key} resolves`);
+    }
     // Named in the report because a pin is a cost decision: the operator who set one
     // should be able to confirm it survived, without reading the manifest back.
     if (manifest.brain.model) ok.push(`brain.model pins ${manifest.brain.model}`);
 
     if (repos.length) {
-      if (manifest.brain.provider !== "claude-acp") {
+      if (manifest.brain.provider === "mock") {
         problems.push("repos.conf is configured but the mock brain cannot use its code tools");
       }
       if (!hasOnPath("git")) problems.push("repos.conf is configured but `git` is not installed");
@@ -2893,16 +2915,17 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
   return true;
 }
 
+/** Runs a console trial; real brains use the selected provider's environment credential. */
 async function tryCmd(argv: string[]): Promise<void> {
   loadDotEnv();
   const provider = flag(argv, "brain", "mock")!;
-  if (provider !== "mock" && provider !== "claude-acp") {
-    process.stderr.write(`unknown brain: ${provider} (expected mock | claude-acp)\n`);
+  if (provider !== "mock" && provider !== "claude-acp" && provider !== "codex-acp") {
+    process.stderr.write(`unknown brain: ${provider} (expected mock | claude-acp | codex-acp)\n`);
     process.exit(1);
   }
   const model = optionValue(argv, "model", MODEL_ID);
-  if (model && provider !== "claude-acp") {
-    process.stderr.write("--model needs --brain claude-acp; the mock brain runs no model\n");
+  if (model && provider === "mock") {
+    process.stderr.write("--model needs --brain claude-acp or codex-acp; the mock brain runs no model\n");
     process.exit(1);
   }
 
@@ -2918,14 +2941,15 @@ limits: { perAuthorPerMinute: 600, perChannelPerMinute: 600, maxTurnsPerThread: 
 `);
 
   let brain: Brain;
-  if (provider === "claude-acp") {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      process.stderr.write("ANTHROPIC_API_KEY is required for --brain claude-acp\n");
+  if (provider !== "mock") {
+    const key = BRAIN_KEY_SPECS[provider].name;
+    if (!process.env[key]) {
+      process.stderr.write(`${key} is required for --brain ${provider}\n`);
       process.exit(1);
     }
     // `try` has no manifest to pin from, so the flag is the whole mechanism here — this
     // is where you find out a model is worth pinning before you write it into one.
-    const acp = new ClaudeAcpBrain({ model });
+    const acp = new AcpBrain({ provider, model });
     await acp.start();
     brain = acp;
   } else {
@@ -2940,7 +2964,7 @@ limits: { perAuthorPerMinute: 600, perChannelPerMinute: 600, maxTurnsPerThread: 
 
   const shutdown = async () => {
     await gw.stop().catch(() => {});
-    if (brain instanceof ClaudeAcpBrain) await brain.stop().catch(() => {});
+    if (brain instanceof AcpBrain) await brain.stop().catch(() => {});
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown());
@@ -2966,10 +2990,10 @@ setting up, in the order you need them:
                                preflight, naming the doctor command to run instead
   init [--name x] [--display-name x] [--about x]
                                scaffold the same files with defaults (for scripts)
-  brain claude [--model <id>] | mock
-                               choose the brain            (claude needs an API key)
-                               --model pins this agent's model, e.g. claude-opus-5;
-                               unset leaves it on the brain's own default
+  brain claude|codex [--model <id>] | mock
+                               choose the brain            (Claude and Codex need an API key)
+                               --model pins this agent's model; switching providers
+                               without it uses the new provider's default
   identity create | attach | show
                                create a new identity or securely provide an existing key
   identity register [buzz] [--relay <url>] [--channel <id>] [--add-as-bot]
@@ -3035,7 +3059,7 @@ running it:
                                this host, holding the agent's signing key, is the only place
                                arming happens. The agent's own brain can park a switch, from
                                a turn \`killSwitchParkBy\` admits, and never arm one
-  try [--brain mock|claude-acp] [--model <id>]
+  try [--brain mock|claude-acp|codex-acp] [--model <id>]
                                talk to a throwaway agent, no config at all
 
 Agents live in ${agentsHome()}/<name>/ — config, persona, profile, avatar, tools,

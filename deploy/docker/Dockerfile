@@ -1,6 +1,6 @@
 # One image, every component the agent needs to run:
 #   - the gateway (this toolkit)
-#   - the brain (`claude-agent-acp`, spawned as a child over stdio)
+#   - the ACP brains (Claude and Codex, spawned as children over stdio)
 #   - `ox`, which the gateway shells to for the team brain
 #
 # The brain speaks ACP over the gateway's stdin/stdout, so it is a child process rather
@@ -57,11 +57,14 @@ RUN set -eu; \
     rm "/tmp/${archive}"; \
     ox version
 
-# The brain. Installed as a real binary so the gateway does not reach for npx at runtime,
+# The brains. Installed as real binaries so the gateway does not reach for npx at runtime,
 # which would mean a network fetch on the first turn.
 ARG CLAUDE_AGENT_ACP_VERSION=0.68.0
+ARG CODEX_ACP_VERSION=1.11.0
 RUN npm install -g "@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}" \
- && command -v claude-agent-acp
+      "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \
+ && claude-agent-acp --version \
+ && codex-acp --version
 
 WORKDIR /app
 

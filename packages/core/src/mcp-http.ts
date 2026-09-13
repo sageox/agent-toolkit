@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { auditToolCall } from "./tool-audit.ts";
-import { qualifyTool } from "./tool-policy.ts";
+import { auditToolCall, ToolRefused } from "./tool-audit.ts";
+import { qualifyTool, type ToolPolicy } from "./tool-policy.ts";
 
 /**
  * Serves one MCP server over HTTP, from inside the gateway.
@@ -11,8 +11,7 @@ import { qualifyTool } from "./tool-policy.ts";
  * the credential and runs the server, and the brain receives a URL and a capability token.
  * It asks for a tool call; it never holds the means to make one itself.
  *
- * `claude-agent-acp` declares `mcpCapabilities: {http, sse}` and no `acp`, so HTTP is the
- * only transport that can carry a gateway-hosted server to this brain.
+ * Both ACP adapters support HTTP, so hosted servers stay in the gateway's process.
  */
 export interface HostedMcp {
   /** What the brain connects to. */
@@ -30,6 +29,11 @@ export interface ServeOptions {
    */
   host?: string;
   port?: number;
+  /**
+   * Enforce permissions here when the ACP agent does not approve every MCP call.
+   * `server` is the ACP alias assigned by trusted gateway wiring, not MCP serverInfo.
+   */
+  toolPolicy?: { server: string; policy: ToolPolicy };
 }
 
 /** Handles one JSON-RPC request. Returning undefined means "no such method". */
@@ -91,12 +95,36 @@ export function mcpToolServer(opts: {
 
 const MAX_BODY = 1024 * 1024;
 
+/** Hosts a bearer-authenticated MCP handler, applying any supplied policy before tool execution. */
 export async function serveMcp(handle: McpHandler, opts: ServeOptions = {}): Promise<HostedMcp> {
   const token = randomBytes(32).toString("base64url");
   const host = opts.host ?? "127.0.0.1";
 
+  const guarded: McpHandler = async (msg) => {
+    const gate = opts.toolPolicy;
+    if (gate && msg.method === "tools/call") {
+      const tool = qualifyTool(gate.server, String(msg.params?.name ?? ""));
+      const verdict = gate.policy.allowsTool(tool);
+      if (!verdict.ok) {
+        return auditToolCall(
+          { tool, args: (msg.params?.arguments ?? {}) as Record<string, unknown> },
+          async () => { throw new ToolRefused(verdict.reason); },
+        );
+      }
+    }
+    const result = await handle(msg);
+    if (gate && msg.method === "tools/list" && Array.isArray(result?.tools)) {
+      return {
+        ...result,
+        tools: result.tools.filter((tool: { name: string }) =>
+          gate.policy.allowsTool(qualifyTool(gate.server, tool.name)).ok),
+      };
+    }
+    return result;
+  };
+
   const server = createServer((req, res) => {
-    void handleHttp(handle, token, req, res);
+    void handleHttp(guarded, token, req, res);
   });
 
   await new Promise<void>((ok, fail) => {

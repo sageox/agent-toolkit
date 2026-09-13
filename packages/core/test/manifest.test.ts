@@ -208,21 +208,25 @@ describe("guard.leakPatterns", () => {
 describe("brain.model", () => {
   const base = "name: x\nrespondTo: anyone\nsurfaces: [{kind: console}]\n";
 
-  it("pins the model for this agent", () => {
-    expect(loadManifest(`${base}brain: {provider: claude-acp, model: claude-opus-5}`).brain.model)
-      .toBe("claude-opus-5");
+  it.each([
+    ["claude-acp", "claude-opus-5"],
+    ["codex-acp", "gpt-test"],
+  ])("pins the model for %s", (provider, model) => {
+    expect(loadManifest(`${base}brain: {provider: ${provider}, model: ${model}}`).brain)
+      .toEqual({ provider, model });
   });
 
-  it("is optional — an unpinned agent runs the brain's own default", () => {
-    expect(loadManifest(`${base}brain: {provider: mock}`).brain.model).toBeUndefined();
+  it.each(["mock", "claude-acp", "codex-acp"])("leaves %s unpinned by default", (provider) => {
+    expect(loadManifest(`${base}brain: {provider: ${provider}}`).brain)
+      .toEqual({ provider });
   });
 
-  it("refuses an empty pin, which names no model", () => {
-    expect(() => loadManifest(`${base}brain: {provider: claude-acp, model: ''}`)).toThrow();
+  it.each(["claude-acp", "codex-acp"])("refuses an empty %s model pin", (provider) => {
+    expect(() => loadManifest(`${base}brain: {provider: ${provider}, model: ''}`)).toThrow();
   });
 
-  it("refuses a misspelt key rather than reading as a pin nobody made", () => {
-    expect(() => loadManifest(`${base}brain: {provider: claude-acp, modle: claude-opus-5}`))
+  it.each(["claude-acp", "codex-acp"])("refuses a misspelt %s model key", (provider) => {
+    expect(() => loadManifest(`${base}brain: {provider: ${provider}, modle: test-model}`))
       .toThrow();
   });
 

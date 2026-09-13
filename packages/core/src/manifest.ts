@@ -1151,13 +1151,13 @@ const ManifestSchema = z
     name: z.string().min(1),
     brain: z
       .object({
-        provider: z.enum(["mock", "claude-acp"]),
+        provider: z.enum(["mock", "claude-acp", "codex-acp"]),
         /**
-         * Pins the model this agent's brain runs on, e.g. `claude-opus-5`.
+         * Pins the model this agent's selected provider runs on.
          *
          * In the manifest rather than the environment because a pin is a decision about
          * one agent that should be reviewable in the bundle diff — an ambient
-         * `ANTHROPIC_MODEL` on the host would silently repin every agent it runs, and
+         * model override on the host would silently repin every agent it runs, and
          * would be invisible to anyone reading the config. Left unset, the brain uses
          * its own default.
          */
@@ -1213,8 +1213,8 @@ const ManifestSchema = z
   })
   // A pin under the mock brain is a line that claims a model is in force when nothing
   // runs one — the same failure `.strict()` refuses a misspelt key for.
-  .refine((m) => m.brain.provider === "claude-acp" || !m.brain.model, {
-    message: "brain.model requires brain.provider: claude-acp — the mock brain runs no model",
+  .refine((m) => m.brain.provider !== "mock" || !m.brain.model, {
+    message: "brain.model requires brain.provider: claude-acp or codex-acp — the mock brain runs no model",
     path: ["brain", "model"],
   })
   .refine((m) => m.respondTo !== "owner-only" || !!m.owner, {

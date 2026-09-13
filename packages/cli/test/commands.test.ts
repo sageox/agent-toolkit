@@ -15,6 +15,7 @@ import {
   setRespondTo,
 } from "../src/edit-config.ts";
 import { AGENT_YAML } from "../src/init.ts";
+import { doctorReport } from "./cli-harness.ts";
 import {
   brainCmd,
   BUZZ_AUTHOR_GATE,
@@ -197,7 +198,8 @@ describe("agent-local credentials", () => {
   let root: string;
   let agentDir: string;
   const savedHome = process.env.AGENT_TOOLKIT_HOME;
-  const savedKey = process.env.ANTHROPIC_API_KEY;
+  const savedAnthropicKey = process.env.ANTHROPIC_API_KEY;
+  const savedOpenAIKey = process.env.OPENAI_API_KEY;
   const savedNsec = process.env.BUZZ_NSEC;
   const savedBuzzPrivateKey = process.env.BUZZ_PRIVATE_KEY;
   const savedSlackBot = process.env.SLACK_BOT_TOKEN;
@@ -211,6 +213,7 @@ describe("agent-local credentials", () => {
     // Cleared, not merely saved: `readEnvValue` checks the environment before the agent's
     // own .env, so an inherited value would let these pass without reading the file at all.
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     delete process.env.BUZZ_NSEC;
     delete process.env.BUZZ_PRIVATE_KEY;
     delete process.env.SLACK_BOT_TOKEN;
@@ -221,8 +224,10 @@ describe("agent-local credentials", () => {
     rmSync(root, { recursive: true, force: true });
     if (savedHome === undefined) delete process.env.AGENT_TOOLKIT_HOME;
     else process.env.AGENT_TOOLKIT_HOME = savedHome;
-    if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-    else process.env.ANTHROPIC_API_KEY = savedKey;
+    if (savedAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = savedAnthropicKey;
+    if (savedOpenAIKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = savedOpenAIKey;
     if (savedNsec === undefined) delete process.env.BUZZ_NSEC;
     else process.env.BUZZ_NSEC = savedNsec;
     if (savedBuzzPrivateKey === undefined) delete process.env.BUZZ_PRIVATE_KEY;
@@ -233,30 +238,62 @@ describe("agent-local credentials", () => {
     else process.env.SLACK_APP_TOKEN = savedSlackApp;
   });
 
-  it("brain claude resolves the key from the selected agent's .env", async () => {
-    writeFileSync(join(agentDir, ".env"), "ANTHROPIC_API_KEY=sk-ant-agent-local\n");
+  describe.each([
+    {
+      brain: "claude", key: "ANTHROPIC_API_KEY", otherKey: "OPENAI_API_KEY",
+      apiKey: "sk-ant-agent-local", model: "claude-opus-5",
+    },
+    {
+      brain: "codex", key: "OPENAI_API_KEY", otherKey: "ANTHROPIC_API_KEY",
+      apiKey: "sk-agent-local", model: "gpt-test",
+    },
+  ])("brain $brain", ({ brain, key, otherKey, apiKey, model }) => {
+    it("resolves the selected agent's own key", async () => {
+      writeFileSync(join(agentDir, ".env"), `${key}=${apiKey}\n`);
+      await brainCmd([brain]);
+      expect(loadManifest(readFileSync(join(agentDir, "agent.yaml"), "utf8")).brain)
+        .toEqual({ provider: `${brain}-acp` });
+    });
 
-    await expect(brainCmd(["claude"])).resolves.toBeUndefined();
+    it("pins the model alongside the provider", async () => {
+      writeFileSync(join(agentDir, ".env"), `${key}=${apiKey}\n`);
+      await brainCmd([brain, "--model", model]);
+      expect(loadManifest(readFileSync(join(agentDir, "agent.yaml"), "utf8")).brain)
+        .toEqual({ provider: `${brain}-acp`, model });
+    });
 
-    expect(loadManifest(readFileSync(join(agentDir, "agent.yaml"), "utf8")).brain.provider)
-      .toBe("claude-acp");
+    it("reports the key and model pin in doctor without exposing the key", async () => {
+      writeFileSync(join(agentDir, ".env"), `${key}=${apiKey}\n`);
+      await brainCmd([brain, "--model", model]);
+      const report = await doctorReport(root, {
+        ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: undefined,
+      });
+      expect(report).toContain(`${key} resolves`);
+      expect(report).toContain(`brain.model pins ${model}`);
+      expect(report).not.toContain(`${otherKey} does not resolve`);
+      expect(report).not.toContain(apiKey);
+    });
+
+    it("does not switch when only the other provider's credential exists", async () => {
+      writeFileSync(join(agentDir, ".env"), `${otherKey}=sk-other-provider\n`);
+      await expect(brainCmd([brain])).rejects.toThrow(`${key} is not set`);
+      expect(loadManifest(readFileSync(join(agentDir, "agent.yaml"), "utf8")).brain.provider)
+        .toBe("mock");
+    });
   });
 
-  it("does not switch to Claude when its credential is missing", async () => {
-    await expect(brainCmd(["claude"])).rejects.toThrow(/ANTHROPIC_API_KEY is not set/);
-
-    expect(loadManifest(readFileSync(join(agentDir, "agent.yaml"), "utf8")).brain.provider)
-      .toBe("mock");
-  });
-
-  it("brain claude --model pins the model alongside the provider", async () => {
-    writeFileSync(join(agentDir, ".env"), "ANTHROPIC_API_KEY=sk-ant-agent-local\n");
-
-    await expect(brainCmd(["claude", "--model", "claude-opus-5"])).resolves.toBeUndefined();
-
-    const m = loadManifest(readFileSync(join(agentDir, "agent.yaml"), "utf8"));
-    expect(m.brain.provider).toBe("claude-acp");
-    expect(m.brain.model).toBe("claude-opus-5");
+  it("clears model pins when switching providers and preserves them on repeated setup", async () => {
+    writeFileSync(join(agentDir, ".env"), "ANTHROPIC_API_KEY=sk-ant-agent-local\nOPENAI_API_KEY=sk-agent-local\n");
+    await brainCmd(["claude", "--model", "claude-opus-5"]);
+    await brainCmd(["codex"]);
+    expect(loadManifest(readFileSync(join(agentDir, "agent.yaml"), "utf8")).brain)
+      .toEqual({ provider: "codex-acp" });
+    await brainCmd(["codex", "--model", "gpt-test"]);
+    await brainCmd(["codex"]);
+    expect(loadManifest(readFileSync(join(agentDir, "agent.yaml"), "utf8")).brain.model).toBe("gpt-test");
+    await brainCmd(["claude"]);
+    expect(loadManifest(readFileSync(join(agentDir, "agent.yaml"), "utf8")).brain)
+      .toEqual({ provider: "claude-acp" });
   });
 
   it("repins an already-Claude agent without needing the provider to change", async () => {

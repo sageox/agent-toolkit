@@ -3,6 +3,7 @@ import {
   DEFAULT_SECRETS_DIR,
   resolveMcpServer,
   resolveSecret,
+  type AcpProvider,
   type AgentManifest,
 } from "@sageox/agent-toolkit-core";
 import { DEFAULT_OX_TOKEN_SECRET } from "./brains.ts";
@@ -76,6 +77,18 @@ export const ANTHROPIC_KEY_SPEC: CredentialSpec = {
   hint: "Get one at https://console.anthropic.com/settings/keys",
   looksRight: (value) => value.startsWith("sk-ant-"),
 };
+
+export const OPENAI_KEY_SPEC: CredentialSpec = {
+  name: "OPENAI_API_KEY",
+  label: "Paste your OpenAI API key (input hidden)",
+  hint: "Get one at https://platform.openai.com/api-keys",
+  looksRight: (value) => value.startsWith("sk-"),
+};
+
+export const BRAIN_KEY_SPECS = {
+  "claude-acp": ANTHROPIC_KEY_SPEC,
+  "codex-acp": OPENAI_KEY_SPEC,
+} satisfies Record<AcpProvider, CredentialSpec>;
 
 export const GITHUB_TOKEN_SPEC: CredentialSpec = {
   name: "GITHUB_TOKEN",

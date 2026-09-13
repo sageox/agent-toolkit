@@ -30,17 +30,18 @@ credentials exist in Part 2. Generation and publication first validate that `age
 
 Next, the same command asks which brain to use and where people should reach the agent.
 The default Mock + Console path needs no account or credential. Choosing Claude asks for
-its Anthropic key; choosing Buzz or Slack continues into only that surface's identity,
-credential, relay, channel, and profile-publication questions. Buzz and Slack can both be
-selected from the checkbox menu, in which case it completes both flows and retains both
-surface identities. Console is always included and is not a mutually exclusive choice.
+its Anthropic key; choosing Codex asks for its OpenAI key. Choosing Buzz or Slack continues
+into only that surface's identity, credential, relay, channel, and profile-publication
+questions. Buzz and Slack can both be selected from the checkbox menu, in which case it
+completes both flows and retains both surface identities. Console is always included
+and is not a mutually exclusive choice.
 
 The wizard then offers memory as a checkbox list: Local, Shared, Team via SageOx, and
 Buzz-private (when Buzz is configured) can be combined. It then offers one or more MCP
-servers and, with Claude, repository context. Selecting GitHub asks which repositories the
-agent may touch, which write tools to arm, and then for its token with hidden input; a
-custom server asks for `SERVER_ENV=SECRET_NAME` mappings and then collects each mapped
-secret the same way. Private repository setup likewise asks for a narrowly scoped,
+servers and, with Claude or Codex, repository context. Selecting GitHub asks which
+repositories the agent may touch, which write tools to arm, and then for its token with
+hidden input; a custom server asks for `SERVER_ENV=SECRET_NAME` mappings and then collects
+each mapped secret the same way. Private repository setup likewise asks for a narrowly scoped,
 read-only token. A blank answer to any of these skips that stage rather than ending setup
 part-way; `memory add`, `mcp add`, and `repos add` add it later.
 Finally, `create` runs `doctor` itself and stops: starting the agent with
@@ -112,10 +113,10 @@ identity), `avatar.md` (the style-independent character brief), and `avatar.svg`
 publishable starter face). If you chose generation, `avatar.png` is added and selected in
 the profile. No credential is stored; a console agent itself needs none.
 
-## Step 2 — the real brain
+## Step 2 — choose Claude or Codex
 
 ```bash
-./bin/sageox-agent brain claude     # asks for your API key and saves it
+./bin/sageox-agent brain claude     # asks for your Anthropic API key and saves it
 ./bin/sageox-agent run
 ```
 
@@ -128,6 +129,29 @@ exits naming the variable to set. Same for `run`.
 The key only ever reaches the brain subprocess. The gateway's own credentials are never
 placed in that subprocess's environment — that separation is what makes a prompt-injected
 agent unable to reach anything it was not given.
+
+### Use Codex as the brain
+
+```bash
+npm install -g @agentclientprotocol/codex-acp@1.11.0
+./bin/sageox-agent brain codex --agent my-agent
+./bin/sageox-agent run my-agent
+```
+
+The command resolves `OPENAI_API_KEY` from the selected agent's `.env`, the environment,
+or the deployment secret mount, and prompts with hidden input when needed. Add
+`--model <id>` to pin a model supported by Codex. The manifest records
+`brain.provider: codex-acp`. Switching between Claude and Codex without `--model`
+clears the previous provider's model pin; repeating setup for the same provider keeps it.
+
+Codex uses the same channel conversations, persona, guard feedback, memory, repository
+context, and MCP servers as Claude. Its tool calls are checked against `settings.json`
+in the gateway. Codex runs with a fresh temporary home, without host login sessions or
+user MCP configuration. Native shell tools and permission escalation are disabled;
+repository access and writes go through the gateway's configured tools and jobs.
+
+For a console-only trial, set `OPENAI_API_KEY` and run
+`./bin/sageox-agent try --brain codex-acp [--model <id>]`.
 
 ---
 

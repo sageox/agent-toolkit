@@ -52,7 +52,7 @@ import {
   WebSlackProfileApi,
 } from "@sageox/agent-toolkit-adapter-slack";
 import {
-  ANTHROPIC_KEY_SPEC,
+  BRAIN_KEY_SPECS,
   requireCredential,
   readEnvFileValue,
   readEnvValue,
@@ -141,7 +141,7 @@ export interface CreateProgress {
   version: 1;
   stage: CreateStage;
   avatar?: "generate" | "starter";
-  brain?: "mock" | "claude";
+  brain?: "mock" | "claude" | "codex";
   surfaces?: Array<"buzz" | "slack">;
   configuredSurfaces?: Array<"buzz" | "slack">;
   registerSurfaces?: Partial<Record<"buzz" | "slack", boolean>>;
@@ -243,7 +243,8 @@ Your agent runs right now, from anywhere:
 Running that console agent uses no account, key, or model spend.
 When you want more, each step is separate and optional:
 
-  sageox-agent brain claude      use the real Claude brain   (needs ANTHROPIC_API_KEY)
+  sageox-agent brain claude      use the Claude brain        (needs ANTHROPIC_API_KEY)
+  sageox-agent brain codex       use the Codex brain         (needs OPENAI_API_KEY)
   sageox-agent identity create   create a new Nostr identity (only for the Buzz surface)
   sageox-agent identity attach   attach an existing identity (private key input is hidden)
   sageox-agent identity register  publish profile.json       (Buzz or Slack)
@@ -586,7 +587,8 @@ async function finishCreateSetup(name: string, progress: CreateProgress): Promis
       if (!progress.brain) {
         progress.brain = await promptSelect("How should this agent think?", [
           { value: "mock" as const, label: "Mock brain", hint: "free and ready now" },
-          { value: "claude" as const, label: "Claude", hint: "real responses; needs an API key" },
+          { value: "claude" as const, label: "Claude", hint: "real responses; needs an Anthropic API key" },
+          { value: "codex" as const, label: "Codex", hint: "real responses; needs an OpenAI API key" },
         ], "mock");
         saveCreateProgress(name, progress);
       }
@@ -1416,33 +1418,32 @@ function writeSurfaceConfig(paths: ReturnType<typeof agentPaths>, config: string
 /** Flips the brain between mock and the real thing, without hand-editing YAML. */
 export async function brainCmd(argv: string[]): Promise<void> {
   const which = argv[0];
-  if (which !== "claude" && which !== "mock") {
-    throw new Error("usage: sageox-agent brain claude [--model <id>] | brain mock");
+  if (which !== "claude" && which !== "codex" && which !== "mock") {
+    throw new Error("usage: sageox-agent brain claude|codex [--model <id>] | brain mock");
   }
   const model = optionValue(argv, "model", MODEL_ID);
   // Refused rather than written and ignored: the mock brain answers from a canned script
   // and runs no model at all, so a pin recorded here would read as one that is in force.
   if (model && which === "mock") {
-    throw new Error("the mock brain runs no model — --model applies to `brain claude`");
+    throw new Error("the mock brain runs no model — --model applies to `brain claude` or `brain codex`");
   }
   const paths = await selectedPaths(argv);
   if (!existsSync(paths.config)) throw new Error(`no agent.yaml — run \`sageox-agent init --name <name>\` first`);
 
-  const provider = which === "claude" ? "claude-acp" : "mock";
+  const provider = which === "mock" ? "mock" : (`${which}-acp` as const);
   const config = setBrainProvider(readFileSync(paths.config, "utf8"), provider);
   // Both edits prepared before either is written, so a rejected model does not leave the
   // provider switched behind it.
   //
-  // Switching to `mock` clears the pin rather than leaving it dormant: the manifest
-  // refuses that pairing at load, and a `model:` line surviving the round trip would come
-  // back in force on the next `brain claude` as though it had been chosen again.
+  // Keep a pin only for the same provider; switching providers restores its default
+  // unless the operator chooses a model explicitly. Mock never carries a model pin.
   let pinned = { yaml: config.yaml, changed: false };
-  if (which === "mock") pinned = setBrainModel(config.yaml, undefined);
-  else if (model) pinned = setBrainModel(config.yaml, model);
-  if (which === "claude") {
+  if (model) pinned = setBrainModel(config.yaml, model);
+  else if (which === "mock" || config.changed) pinned = setBrainModel(config.yaml, undefined);
+  if (provider !== "mock") {
     // Validate above, ask next, and write last: neither a bad config nor a missing key
-    // should leave behind half of a Claude setup.
-    await requireCredential(ANTHROPIC_KEY_SPEC, { envPath: paths.env });
+    // should leave behind half of a brain setup.
+    await requireCredential(BRAIN_KEY_SPECS[provider], { envPath: paths.env });
   }
   if (config.changed || pinned.changed) writeFileSync(paths.config, pinned.yaml);
 
@@ -1454,10 +1455,12 @@ export async function brainCmd(argv: string[]): Promise<void> {
   if (model) {
     out(pinned.changed ? `  brain.model is now ${model}\n` : `  brain.model is already ${model}\n`);
   } else if (pinned.changed) {
-    out("  brain.model removed — the mock brain runs no model\n");
+    out(which === "mock"
+      ? "  brain.model removed — the mock brain runs no model\n"
+      : "  brain.model removed — using the selected brain's default model\n");
   }
 
-  if (which === "claude") {
+  if (which !== "mock") {
     out("\n  sageox-agent run\n");
   }
 }

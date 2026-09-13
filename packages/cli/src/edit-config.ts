@@ -1,10 +1,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { parseDocument, type YAMLMap, type YAMLSeq } from "yaml";
-import { resolveMcpServer, type ChannelDecl, type McpServerDecl } from "@sageox/agent-toolkit-core";
+import { resolveMcpServer, type AgentManifest, type ChannelDecl, type McpServerDecl } from "@sageox/agent-toolkit-core";
 import { writeIfAbsent, SETTINGS_JSON } from "./init.ts";
 
-export type BrainProvider = "mock" | "claude-acp";
+export type BrainProvider = AgentManifest["brain"]["provider"];
 
 /**
  * Points the manifest at a brain.
@@ -37,7 +37,7 @@ export function setBrainProvider(
  * allowlist, which drops an ambient `ANTHROPIC_MODEL` on purpose.
  *
  * Removal exists because the mock brain runs no model: a pin left behind on the way to
- * `mock` is one the manifest refuses to load, and one the next switch back to Claude
+ * `mock` is one the manifest refuses to load, and one the next switch to an ACP brain
  * would silently reuse as though it had been chosen again.
  */
 export function setBrainModel(

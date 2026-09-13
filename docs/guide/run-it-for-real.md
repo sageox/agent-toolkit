@@ -15,11 +15,14 @@ in a script.
 
 ## Step 9a — keep it running (macOS)
 
-Install the ACP brain as a real binary first. A background service must not depend on
-`npx` downloading it at startup:
+Install the selected ACP brain as a real binary first. A background service must not
+depend on `npx` downloading it at startup:
 
 ```bash
+# For a Claude brain:
 npm install -g @agentclientprotocol/claude-agent-acp@0.68.0
+# For a Codex brain:
+npm install -g @agentclientprotocol/codex-acp@1.11.0
 ```
 
 ```bash
