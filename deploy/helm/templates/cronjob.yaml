@@ -14,7 +14,13 @@ values and native references. Nothing below knows it is on any particular cloud.
 */}}
 {{- range $name, $agent := .Values.agents }}
 {{- range $job := $agent.jobs }}
-{{- $schedules := $job.trigger.schedules -}}
+{{/*
+A job whose body is a prompt runs as a brain turn inside the gateway process, on a clock the
+gateway holds — so there is no command for a Pod to run and no CronJob to render. It is still
+mirrored, carrying `prompt: true` and no `budget`, because the mirror's own rule is that
+every declared job appears: one left out reads exactly like an agent that declared none.
+*/}}
+{{- $schedules := ternary (list) $job.trigger.schedules (hasKey $job "prompt") -}}
 {{- range $index, $schedule := $schedules }}
 {{- $context := dict "root" $ "name" $name "agent" $agent "job" $job "index" $index "total" (len $schedules) -}}
 ---

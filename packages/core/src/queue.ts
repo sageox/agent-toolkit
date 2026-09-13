@@ -10,8 +10,14 @@ export interface QueueOptions {
   onError?: (error: unknown, channel: string) => void;
 }
 
+/** One queued turn, and how to tell it that it will never run. */
+interface Queued {
+  turn: Turn;
+  shed?: () => void;
+}
+
 interface ChannelState {
-  pending: Turn[];
+  pending: Queued[];
   running: boolean;
 }
 
@@ -29,15 +35,24 @@ export class ChannelQueue {
 
   constructor(private opts: QueueOptions) {}
 
-  submit(channel: string, turn: Turn): void {
+  /**
+   * `shed` is called when overflow drops this turn instead of running it.
+   *
+   * A chat turn needs none: the message is still in the channel, and the shedding is
+   * already in the log. A caller that is owed an answer whatever happens — a clock tick,
+   * which has a run record to write either way — passes one, because a dropped turn is
+   * otherwise a promise that never settles.
+   */
+  submit(channel: string, turn: Turn, shed?: () => void): void {
     const state = this.channels.get(channel) ?? { pending: [], running: false };
     this.channels.set(channel, state);
 
-    state.pending.push(turn);
+    state.pending.push({ turn, shed });
     if (state.pending.length > this.opts.channelQueueLimit) {
-      const dropped = state.pending.length - this.opts.channelQueueLimit;
-      state.pending.splice(0, dropped); // shed oldest — the newest message is the live one
-      this.opts.onShed?.(channel, dropped);
+      const count = state.pending.length - this.opts.channelQueueLimit;
+      // shed oldest — the newest message is the live one
+      for (const dropped of state.pending.splice(0, count)) dropped.shed?.();
+      this.opts.onShed?.(channel, count);
     }
     this.pump();
   }
@@ -64,8 +79,8 @@ export class ChannelQueue {
     state.running = true;
     this.activeChannels++;
     try {
-      const turn = state.pending.shift();
-      if (turn) await turn();
+      const queued = state.pending.shift();
+      if (queued) await queued.turn();
     } catch (error) {
       // One bad turn must not wedge its channel forever.
       this.opts.onError?.(error, channel);

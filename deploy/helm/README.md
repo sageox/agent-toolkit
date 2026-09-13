@@ -51,7 +51,7 @@ Or depend on it, and nest this chart's values under its name. Helm hands every s
 # Chart.yaml
 dependencies:
   - name: agent
-    version: 0.13.1
+    version: 0.14.0
     repository: "file://../agent-toolkit/deploy/helm"
 ```
 
@@ -79,11 +79,11 @@ Collect `sageox_work_event` records from those containers' stdout. Child diagnos
 use a separate envelope. External jobs report lifecycle and aggregate results from
 the launching host; their events remain partial because the dispatcher does not
 return individual worker checks or work metadata. See the
-[work event contract](https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs/job-contract.md#structured-work-events-schema-1).
+[work event contract](https://github.com/sageox/agent-toolkit/blob/v0.5.2/docs/job-contract.md#structured-work-events-schema-1).
 
 Structured job answers need no chart setting: declare `output: {format: json}` in
 the bundle's `agent.yaml`, and use workers built from the same toolkit release as
-the gateway and dispatcher. See [structured answers](https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs/external-jobs.md#structured-answers).
+the gateway and dispatcher. See [structured answers](https://github.com/sageox/agent-toolkit/blob/v0.5.2/docs/external-jobs.md#structured-answers).
 
 ## Where a bundle comes from
 
@@ -358,6 +358,19 @@ schedule renders no scheduled object, which is the correct rendering of an on-re
 start one by hand with `sageox-agent job run <slug> --trigger on-request`. `timeZone` needs
 Kubernetes 1.27 or newer.
 
+A job whose `agent.yaml` body is `prompt:` rather than `run:` renders no `CronJob` either,
+and it is the one kind that renders none while declaring a schedule. Its body is a brain
+turn, held on a clock inside the gateway process, so there is no command for a Pod to run.
+It needs toolkit **0.5.1 or newer** — a 0.5.0 gateway refuses an `agent.yaml` that declares
+one, because `jobs[]` required `run` there.
+Mirror it as `{slug, suspend, trigger, prompt: true}` and state no `budget`; the chart
+refuses one, because nothing here would bound it. It also refuses a `sharedVolumes` claim
+mounted inside `/agents/<name>`: a prompt job's words are read from `skills/<name>/SKILL.md`
+under that directory and go to the brain as steering rather than as fenced data, so the
+bundle has to be the only thing that can supply them. The runtime cannot see this one — a mount point is an ordinary
+directory to `realpath` — which is why the refusal belongs where the mount is made. `sageox-agent doctor` prints each one's
+next fire time, and `sageox-agent job park <slug>` stops it without a deploy.
+
 Each Job execs `sageox-agent job run <slug> --trigger schedule` against the same bundle the
 Deployment runs, so the envelope is the host's: admission past both switches, single-flight,
 the budget's bow-out, the run record, and the verdict. The trigger is stamped by the door it
@@ -397,7 +410,7 @@ agents:
 
 A body then finds `workspace/repos/<owner>--<repo>` under its working directory, where a run
 started from chat already finds it
-([the job body contract](https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs/job-contract.md#what-a-body-finds-on-disk)).
+([the job body contract](https://github.com/sageox/agent-toolkit/blob/v0.5.2/docs/job-contract.md#what-a-body-finds-on-disk)).
 
 Three things this deliberately does not do.
 
@@ -490,7 +503,7 @@ These gateway/scheduled-Pod mount rules apply to local jobs. An external `worker
 instead maps each `run.secrets` and `run.jobSecrets` ref through
 `agents.<agent>.jobs[].worker.secrets`.
 That worker-only credential path supports both requested and scheduled runs, without
-mounting the credential in the gateway. See [external jobs](https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs/external-jobs.md).
+mounting the credential in the gateway. See [external jobs](https://github.com/sageox/agent-toolkit/blob/v0.5.2/docs/external-jobs.md).
 
 Two consequences worth knowing before you split a local job credential out:
 
@@ -518,4 +531,4 @@ rule that reads as a control and is not.
 
 ## External job workers
 
-For on-demand jobs with their own runtime image, use [the external jobs guide](https://github.com/sageox/agent-toolkit/blob/v0.5.0/docs/external-jobs.md). It covers the worker image, per-job ServiceAccount and Secret mappings, the shared dispatcher, scheduled triggers, durable results and cancellation. The gateway image does not need the task runtime.
+For on-demand jobs with their own runtime image, use [the external jobs guide](https://github.com/sageox/agent-toolkit/blob/v0.5.2/docs/external-jobs.md). It covers the worker image, per-job ServiceAccount and Secret mappings, the shared dispatcher, scheduled triggers, durable results and cancellation. The gateway image does not need the task runtime.

@@ -201,11 +201,26 @@ export function assembleTurnPrompt(
           "",
         ];
 
+  const header =
+    `[${ctx.scheduled ? "scheduled turn · " : ""}${event.surface} · channel ${event.channel.id}` +
+    `${event.channel.isPublic ? " · PUBLIC" : ""} · from ${event.author.id}` +
+    `${event.author.isAgent ? " · another agent" : ""}]`;
+
+  // A scheduled turn's text is the bundle's own prompt, read off disk by this process from
+  // the same reviewed directory the persona above came out of. So it goes in as steering,
+  // unfenced and unaltered: fencing it would brief the agent never to obey the one thing
+  // it was woken to do, and defanging it would silently edit an operator's words. Nothing
+  // in a channel sets `scheduled` — `Gateway.tick` does, and only the ticker calls it.
+  if (ctx.scheduled) {
+    return [...steering, ...capabilitySteering(ctx.capabilities ?? []), header, event.text].join(
+      "\n",
+    );
+  }
+
   return [
     ...steering,
     ...capabilitySteering(ctx.capabilities ?? []),
-    `[${event.surface} · channel ${event.channel.id}${event.channel.isPublic ? " · PUBLIC" : ""}` +
-      ` · from ${event.author.id}${event.author.isAgent ? " · another agent" : ""}]`,
+    header,
     UNTRUSTED_OPEN,
     body,
     UNTRUSTED_CLOSE,

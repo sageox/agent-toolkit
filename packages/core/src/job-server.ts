@@ -14,7 +14,7 @@ import {
   type JobRun,
   type JobStart,
 } from "./job-host.ts";
-import type { JobConfig } from "./manifest.ts";
+import { isProcessJob, type JobConfig, type ProcessJob } from "./manifest.ts";
 import {
   mcpToolServer,
   serveMcp,
@@ -66,8 +66,10 @@ function outputReader(agentName: string, home: InboundEvent): string {
  * job that only takes a clock is not offered here — and the refusal is the host's, not this
  * list's, so naming one anyway is denied and recorded rather than quietly ignored.
  */
-export function requestableJobs(jobs: readonly JobConfig[]): readonly JobConfig[] {
-  return jobs.filter((job) => job.trigger.onRequest);
+export function requestableJobs(jobs: readonly JobConfig[]): readonly ProcessJob[] {
+  // Every one of these has a `run` body — `JobSchema` refuses `trigger.onRequest` on a
+  // prompt job — so the narrowing costs a predicate and saves every caller a second test.
+  return jobs.filter((job): job is ProcessJob => job.trigger.onRequest && isProcessJob(job));
 }
 
 export interface JobToolOptions {
@@ -374,7 +376,9 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
       // picks between them — not a field in this call, and not a field in the manifest that
       // could disagree with either number. A job that fits inside a turn is waited for and
       // quoted; one that cannot is started, and answers where it declared it would.
-      if (job.worker || jobDeadlineMs(job) > turnTimeoutMs) {
+      // Both shapes below are a process job's: `requestableJobs` offers no other kind, and
+      // a slug naming a prompt body falls through to the host, which records the refusal.
+      if (isProcessJob(job) && (job.worker || jobDeadlineMs(job) > turnTimeoutMs)) {
         // Read now, not when the run lands: by then the turn is over and the gateway has
         // forgotten which message it was answering. Chat gets a bounded human summary;
         // diagnostic prose stays in tool results and the declared operator reports.
@@ -465,7 +469,7 @@ function describeRun(run: JobRun, job: JobConfig): string {
  * for the person in the channel to discover by waiting. `doctor` flags the same job before
  * a deploy; this is the honest thing to say when one is running anyway.
  */
-function describeStart(job: JobConfig, start: JobStart, answered: boolean): string {
+function describeStart(job: ProcessJob, start: JobStart, answered: boolean): string {
   if (job.worker) return `job ${job.slug} accepted — run id ${start.runId}; no verdict yet. ` +
     "Use job_status with this job and runId to retrieve the result, including after a restart. " +
     "job_cancel stops the worker but does not roll back external side effects.";

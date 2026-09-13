@@ -728,8 +728,17 @@ const JobParameterSchema = z.discriminatedUnion("type", [
  * identity with.
  *
  * The toolkit owns the *envelope* — the trigger, the switch, the bound, the run record,
- * the shape of the status post. It never owns the job body, which is an ordinary process
- * named by `run`. See [the RFC](../../../docs/design/2026-08-19-jobs-rfc.md).
+ * the shape of the status post. It never owns the job body.
+ * See [the RFC](../../../docs/design/2026-08-19-jobs-rfc.md).
+ *
+ * A job declares exactly one body, and which one decides where it runs and what it can
+ * reach. `run` is a process in a pod of its own, with a scrubbed environment and whatever
+ * credentials it declared; `prompt` is a brain turn in the gateway, with the agent's own
+ * tools and no credential at all. The envelope above them is the same one, which is why
+ * this is one list rather than two: the trigger, the switch, `suspend`, `report` and the
+ * work events already exist here, and a second block would be all of them again for the
+ * sake of one field. The line that matters holds in both directions — a `run` body cannot
+ * reach the brain, and a `prompt` body cannot reach a scrubbed process or a job secret.
  *
  * Here rather than in chart values because `docs/deployment-contract.md` requires a
  * deployment target to "preserve this contract instead of translating `agent.yaml` into a
@@ -778,7 +787,12 @@ export const JobSchema = z
      * want on the roster but not running is `suspend: true`.
      */
     suspend: z.boolean().default(false),
-    budget: BudgetSchema,
+    /**
+     * Required of a `run` body and optional on a `prompt` one, which has no process to
+     * bound: a brain turn is already held to `limits.turnTimeoutMs`, and a `wallClockMs`
+     * below that number is the only thing a prompt job's budget can shorten.
+     */
+    budget: BudgetSchema.optional(),
     /**
      * The tier this job's work runs on. Independent of `brain.model` — a job is its own
      * process, not a turn on the agent's brain.
@@ -792,8 +806,9 @@ export const JobSchema = z
       directory: z.string().regex(/^\//, "worker directory must be absolute"),
     }).strict().optional(),
     /**
-     * The job body: a process, an exit code, and a verdict artifact. TypeScript, a shell
-     * script, or a compiled binary — the toolkit spawns it and reads what it wrote.
+     * One of the two job bodies: a process, an exit code, and a verdict artifact.
+     * TypeScript, a shell script, or a compiled binary — the toolkit spawns it and reads
+     * what it wrote. See {@link JobSchema}'s `prompt` for the other.
      *
      * This names a process the host spawns, so it sits on the same trust boundary as
      * `mcpServers[].command` and `brains[].command`: a bundle is code-equivalent. Two
@@ -837,7 +852,65 @@ export const JobSchema = z
          */
         passthrough: z.array(EnvVarName).default([]),
       })
-      .strict(),
+      .strict()
+      .optional(),
+    /**
+     * The other job body: words, run as an ordinary guarded brain turn in the gateway
+     * process. No pod, no argv, no scrubbed environment, and no credential of its own —
+     * a tick enters the turn path as a synthetic inbound event and comes out as a post in
+     * the channel `report` names.
+     *
+     * Two forms, and the schema takes either at any length: a string written inline, or the
+     * name of a skill found at `skills/<name>/SKILL.md` in the bundle.
+     *
+     * Inline is for something short. Nothing here enforces that — a bound on lines or
+     * characters would refuse a perfectly readable three-line prompt to catch the case it
+     * is aimed at — but a page of prompt inside a YAML block scalar is a page nobody
+     * reviews, and a skill is what the rest of the world already calls a page of
+     * instructions an agent reads and follows.
+     *
+     * Named rather than pointed at, and that is the whole of the difference. A name is what
+     * a person says and what a tool argument carries, so the day a skill can be invoked
+     * from the chat face, "run the digest now" resolves the same name through the same
+     * lookup with no second declaration and no file moved. A path is not an invocation
+     * handle. It is also the narrower thing to admit: a slug cannot be absolute, cannot
+     * traverse, and cannot reach the runtime's own `workspace/` — where repository
+     * checkouts live, refreshed from their remotes — so those are not doors this has to
+     * close one at a time.
+     *
+     * The file is read at load, and refused there if it is missing, is not UTF-8, is larger
+     * than a verdict artifact may be, or really lives outside the bundle's `skills/` tree.
+     * A schedule that discovers its own prompt is unreadable at 18:00 has nothing to say
+     * and nowhere to say it.
+     *
+     * Provenance is the property that must survive: the words come from the reviewed
+     * bundle and nowhere else. No channel message can start one of these turns, edit its
+     * prompt, or claim to be one.
+     */
+    prompt: z
+      .union([
+        z.string().trim().min(1),
+        z
+          .object({
+            /**
+             * The directory under `skills/` holding this skill's `SKILL.md`, and the name
+             * its frontmatter has to agree with — two spellings of one thing are how a
+             * skill ends up found under one name and announcing itself as another.
+             *
+             * A job slug's grammar, because it names the same kind of thing and a second
+             * spelling of "what may name a thing here" is one more rule to remember.
+             */
+            skill: z
+              .string()
+              .regex(
+                /^[a-z][a-z0-9-]*$/,
+                "a skill name is lower-case letters, digits, and hyphens, starting with a " +
+                  "letter — it names the directory under `skills/`",
+              ),
+          })
+          .strict(),
+      ])
+      .optional(),
     /**
      * Values a caller may hand one run of this job, by name. See {@link JobParameterSchema}.
      *
@@ -897,7 +970,15 @@ export const JobSchema = z
          * is still minted from what the body ran, and the headline stays host-phrased —
          * a combined verdict carries none of the body's words.
          */
-        proven: z.enum(["labelled", "verbatim"]).default("labelled"),
+        /**
+         * Left undefined rather than defaulted, because the default already lives where it
+         * is used: `jobStatus` and `describeJobRun` both take `proven?: ProvenVoice` and
+         * render `labelled` for an absent one. Defaulting here as well would be the same
+         * decision written twice — and it would erase the difference between a job that
+         * omitted the field and one that asked for `labelled`, which is the difference a
+         * prompt job's refusal below is made of.
+         */
+        proven: z.enum(["labelled", "verbatim"]).optional(),
         /**
          * Whether this job's body may talk through this channel while it runs, rather than
          * only being reported into it when it is over.
@@ -945,6 +1026,117 @@ export const JobSchema = z
       .optional(),
   })
   .strict()
+  // One body per job, and every field that belongs to the body it is not.
+  //
+  // The refusals below are not tidiness. Each one is a field that would load, read as a
+  // grant, and do nothing — a `model` nothing pins, a `parameters` nothing can fill, a
+  // `report.probe` opening a channel no body is there to talk through. A declaration that
+  // claims a capability it does not have is worse than one that never made the claim,
+  // because the next person to read it plans against it.
+  .superRefine((job, ctx) => {
+    // Nothing below is true yet while the object's own fields are failing: a `prompt`
+    // refused for its own reason is simply absent from `job` here, and "declares neither
+    // body" would then be said about a manifest that plainly declares one.
+    if (ctx.issues.length) return;
+
+    const refuse = (message: string, path: string[] = []) =>
+      ctx.addIssue({ code: "custom", message, path });
+
+    if (!job.run === !job.prompt) {
+      refuse(
+        `job "${job.slug}" declares ` +
+          (job.run ? "both `run` and `prompt`" : "neither `run` nor `prompt`") +
+          " — a job has exactly one body: `run` for a process in its own pod, `prompt` for " +
+          "a brain turn in the gateway",
+      );
+      return;
+    }
+
+    if (job.run) {
+      // Required here and optional on the other body, because a turn already has a clock
+      // it cannot outlive and a spawned process has none.
+      if (!job.budget) {
+        refuse(
+          `job "${job.slug}" declares a \`run\` body but no \`budget\` — a spawned process ` +
+            "has no bound of its own, and an unstated bound is no bound",
+          ["budget"],
+        );
+      }
+      return;
+    }
+
+    for (const [field, declared, why] of [
+      ["worker", job.worker, "a turn runs in the gateway process; there is no image to pin"],
+      [
+        "parameters",
+        Object.keys(job.parameters).length > 0,
+        "a tick carries no values, and the prompt is the bundle's rather than a caller's",
+      ],
+      ["model", job.model, "a turn runs on the agent's own brain — pin it with `brain.model`"],
+      ["output", job.output, "a turn writes no verdict artifact to retrieve application data from"],
+      [
+        "trigger.onRequest",
+        job.trigger.onRequest,
+        "nothing serves this door yet; a person who wants the turn now can ask for it in the channel",
+      ],
+      [
+        "trigger.webhook",
+        job.trigger.webhook,
+        "nothing serves this door yet; the clock is the only trigger a prompt body takes",
+      ],
+      [
+        "report.probe",
+        job.report?.probe,
+        "it opens the per-run job channel, and no body is spawned here to talk through one",
+      ],
+      [
+        "report.history",
+        job.report?.history,
+        "the brain reads the channel with its own read tools",
+      ],
+      [
+        "report.proven",
+        job.report?.proven !== undefined,
+        "it renders the threaded gate lines, and a tick mints one gate — so there is no " +
+          "thread and nothing for this to phrase",
+      ],
+    ] as const) {
+      if (declared) {
+        refuse(`job "${job.slug}" declares a \`prompt\` body, so it declares no \`${field}\` — ${why}`,
+          field.split("."));
+      }
+    }
+
+    // The tick has to enter the turn path somewhere, and `report` is the only field that
+    // says where. Without it there is no surface, no channel, and nothing to post into.
+    if (!job.report) {
+      refuse(
+        `job "${job.slug}" declares a \`prompt\` body but no \`report\` — that is where the ` +
+          "tick is addressed and where the turn answers",
+        ["report"],
+      );
+    }
+    // `reported` announces a run whose body wrote a `detail` on some gate. A turn writes no
+    // gates, so the mode would silence every tick rather than select among them.
+    if (job.report?.announce === "reported") {
+      refuse(
+        `job "${job.slug}" declares a \`prompt\` body, so \`report.announce: reported\` has ` +
+          "nothing to key on — a turn writes no gate details. Use `unproven` or `always`",
+        ["report", "announce"],
+      );
+    }
+    // The gateway's ticker computes a next wall-clock fire time in `trigger.timezone`.
+    // `@every 5m` names an interval instead, so there is nothing for the zone to resolve.
+    const intervals = job.trigger.schedules.filter((expression) => expression.startsWith("@every"));
+    if (intervals.length) {
+      refuse(
+        `job "${job.slug}" declares a \`prompt\` body and the schedule ` +
+          `${intervals.join(", ")} — the gateway fires a prompt job at a wall-clock time in ` +
+          "`trigger.timezone`, and an interval descriptor names none. Write it as five fields",
+        ["trigger", "schedules"],
+      );
+    }
+  })
   // Resolve the switch key here so no consumer re-derives it. Two derivations of one key
   // is how a reader and a writer end up on different keys.
   .transform((job) => ({
@@ -1159,7 +1351,7 @@ const ManifestSchema = z
   // only which process the deployment started it in.
   .superRefine((m, ctx) => {
     for (const job of m.jobs) {
-      const moved = Object.values(job.run.jobSecrets);
+      const moved = Object.values(job.run?.jobSecrets ?? {});
       if (!moved.length || !job.trigger.onRequest || job.worker) continue;
       ctx.addIssue({
         code: "custom",
@@ -1188,7 +1380,9 @@ const ManifestSchema = z
   // last — and which map a ref is in is what the rule above reads.
   .superRefine((m, ctx) => {
     for (const job of m.jobs) {
-      const both = Object.keys(job.run.jobSecrets).filter((name) => name in job.run.secrets);
+      const run = job.run;
+      if (!run) continue;
+      const both = Object.keys(run.jobSecrets).filter((name) => name in run.secrets);
       if (!both.length) continue;
       ctx.addIssue({
         code: "custom",
@@ -1261,6 +1455,46 @@ export type LimitsConfig = z.infer<typeof LimitsSchema>;
 export type AckConfig = z.infer<typeof AckSchema>;
 export type BrainConfig = z.infer<typeof BrainSchema>;
 export type JobConfig = z.infer<typeof JobSchema>;
+
+/**
+ * A job whose body is a process. `run` and `budget` are what every path that spawns one,
+ * holds it to a clock, or renders it into a deploy target reads, and a prompt job has
+ * neither — so those paths take this rather than re-deciding per field whether the job
+ * they were handed has a body they can run.
+ */
+export type ProcessJob = JobConfig & {
+  run: NonNullable<JobConfig["run"]>;
+  budget: NonNullable<JobConfig["budget"]>;
+};
+
+/**
+ * A job whose body is a prompt — the gateway's ticker is the only thing that runs one.
+ *
+ * `report` is part of the type because it is where the tick is addressed and where the
+ * turn answers; `JobSchema` refuses a prompt job without one.
+ */
+export type PromptJob = JobConfig & {
+  prompt: NonNullable<JobConfig["prompt"]>;
+  report: NonNullable<JobConfig["report"]>;
+};
+
+/**
+ * Narrowing, not a test: `JobSchema` already refused a job with neither body or both, and
+ * a `run` body without a `budget`.
+ *
+ * Both fields are tested anyway, because the type claims both and not every job reaching
+ * these doors came through `loadManifest` — a hand-built one missing its budget would
+ * otherwise narrow here and throw in `jobDeadlineMs`, past the guard that was meant to
+ * catch it.
+ */
+export function isProcessJob(job: JobConfig): job is ProcessJob {
+  return job.run !== undefined && job.budget !== undefined;
+}
+
+export function isPromptJob(job: JobConfig): job is PromptJob {
+  return job.prompt !== undefined && job.report !== undefined;
+}
+
 export type JobArchetype = JobConfig["archetype"];
 /** Whether a job's status post is gated on the verdict. See the `report.announce` field. */
 export type JobAnnounce = NonNullable<JobConfig["report"]>["announce"];

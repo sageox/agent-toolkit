@@ -122,4 +122,81 @@ describe("doctor and the job tool", () => {
     expect(report).not.toContain("job tool");
     expect(report).not.toContain("mcp__jobs__job_run");
   });
+  /**
+   * A job whose body is a prompt: the gateway holds its clock, so `run` reads the prompt at
+   * startup and refuses to launch on a file it cannot read. `doctor` has to find that first
+   * — the same rule that puts every declared `secretRef` in this report.
+   */
+  /** Slack rather than console: a scheduled turn answers with a top-level post. */
+  const SLACK_SURFACE =
+    "surfaces:\n  - kind: slack\n    identity: TEST_SLACK_BOT_TOKEN\n" +
+    "    appToken: TEST_SLACK_APP_TOKEN\n    channels: [{id: C01, name: hive, reply: private}]\n";
+
+  const TOKENS = { TEST_SLACK_BOT_TOKEN: "xoxb-test", TEST_SLACK_APP_TOKEN: "xapp-test" };
+
+  const declarePrompt = (body: string, report = "{surface: slack, channel: C01}", surface = SLACK_SURFACE) =>
+    writeFileSync(
+      join(agentDir, "agent.yaml"),
+      AGENT_YAML("demo").replace("surfaces:\n  - kind: console\n", surface) +
+        "\nbrains:\n  - preset: local\nkillSwitchParkBy: []\n" +
+        "jobs:\n  - slug: daily-digest\n    archetype: watch\n" +
+        "    description: One short post per day.\n" +
+        "    trigger: {schedules: ['0 18 * * *'], timezone: America/Los_Angeles}\n" +
+        "    killSwitch: {failDirection: closed}\n" +
+        `    prompt: ${body}\n` +
+        `    report: ${report}\n`,
+    );
+
+  /** `skills/<name>/SKILL.md` — the one layout a named skill resolves to. */
+  const writeSkill = (name: string) => {
+    mkdirSync(join(agentDir, "skills", name), { recursive: true });
+    writeFileSync(
+      join(agentDir, "skills", name, "SKILL.md"),
+      `---\nname: ${name}\ndescription: One short post per day.\n---\nSummarize the day.\n`,
+    );
+    return join(agentDir, "skills", name, "SKILL.md");
+  };
+
+  it("names a scheduled turn's skill, its size, and when it next fires", async () => {
+    const path = writeSkill("daily-digest");
+    declarePrompt("{skill: daily-digest}");
+
+    const report = await doctor(home, TOKENS);
+
+    expect(report).toContain('job "daily-digest" is a scheduled turn');
+    expect(report).toContain(path);
+    expect(report).toMatch(/\(\d+ bytes\), next \d{4}-\d{2}-\d{2} 18:00:00 America\/Los_Angeles/);
+  });
+
+  it("fails on a skill that is not there, rather than at 18:00", async () => {
+    declarePrompt("{skill: daily-digest}");
+
+    // `doctorReport` hands back stdout either way, so the path alone would pass on a run
+    // that merely mentioned the file. The verdict beside it is what says `run` would refuse.
+    expect(await doctor(home, TOKENS)).toMatch(/FAIL\s+job "daily-digest" skill daily-digest/);
+  });
+
+  it("fails when the turn would have nowhere to post", async () => {
+    declarePrompt("'Summarize the day.'", "{surface: slack, channel: nowhere}");
+
+    const report = await doctor(home, TOKENS);
+
+    expect(report).toContain("FAIL");
+    expect(report).toContain("does not list as a channel");
+  });
+
+  // The one a channel list cannot answer: console lists the channel and has no way to
+  // publish a new top-level message in it, so `run` refuses a turn that would answer there.
+  it("fails when the report surface carries no top-level posts at all", async () => {
+    declarePrompt(
+      "'Summarize the day.'",
+      "{surface: console, channel: local}",
+      "surfaces:\n  - kind: console\n    channels: [{id: local, reply: private}]\n",
+    );
+
+    const report = await doctor(home);
+
+    expect(report).toContain("FAIL");
+    expect(report).toContain("carries no top-level posts");
+  });
 });

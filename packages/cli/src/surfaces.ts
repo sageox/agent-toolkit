@@ -63,6 +63,36 @@ export function buzzSurface(manifest: AgentManifest): BuzzTarget | undefined {
   return buzzTarget(manifest.surfaces.find((surface) => surface.kind === "buzz"));
 }
 
+/**
+ * The adapter class behind each surface kind, for the questions that have an answer before
+ * anything is built. Keep it beside {@link buildAdapters}: a kind added to that switch
+ * belongs here too, and `surfaces.test.ts` holds the two together.
+ */
+const ADAPTERS: Record<string, { prototype: Partial<SurfaceAdapter> }> = {
+  console: ConsoleAdapter,
+  buzz: BuzzAdapter,
+  slack: SlackAdapter,
+};
+
+/**
+ * Whether a surface of this kind can create a **new top-level post** — which is how a
+ * scheduled turn answers, and the console surface cannot.
+ *
+ * Read off the adapter's own prototype rather than restated as a list here, so it cannot
+ * disagree with the adapter it names: `post` and `postTargets` are optional on
+ * {@link SurfaceAdapter}, and every adapter this CLI builds either defines them as class
+ * methods or has neither. That is what lets `validate` ask with no agent home, no
+ * credential and no relay, and `doctor` ask before a deploy — neither builds an adapter,
+ * and both have to refuse what `run` would refuse.
+ *
+ * An unknown kind answers `false`. `buildAdapters` refuses it anyway, and the caller that
+ * asks this is reporting on a channel, so naming the channel is the wrong finding.
+ */
+export function carriesTopLevelPosts(kind: string): boolean {
+  const adapter = ADAPTERS[kind]?.prototype;
+  return typeof adapter?.post === "function" && typeof adapter?.postTargets === "function";
+}
+
 /** Turns the manifest's declared surfaces into live adapters. */
 export async function buildAdapters(
   manifest: AgentManifest,
@@ -108,7 +138,8 @@ export async function buildAdapters(
 
       default:
         throw new Error(
-          `surface "${surface.kind}" is not implemented yet (have: console, buzz, slack)`,
+          `surface "${surface.kind}" is not implemented yet ` +
+            `(have: ${Object.keys(ADAPTERS).join(", ")})`,
         );
     }
   }

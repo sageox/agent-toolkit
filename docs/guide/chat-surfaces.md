@@ -262,6 +262,21 @@ It is asked rather than inferred: naming a channel says where the agent should l
 which is not the same as saying it may speak there. Without a terminal, pass
 `--allow-public` — otherwise the public channels are dropped and the command says so.
 
+### Markdown — translated to mrkdwn on the way out
+
+A brain writes Markdown wherever it is: its reply contract is one prompt for every surface
+it answers on. Slack renders *mrkdwn*, which spells emphasis and links differently, so the
+adapter translates on the way out. `**bold**` and `__bold__` become `*bold*`, `*italic*`
+becomes `_italic_`, `~~struck~~` becomes `~struck~`, `# Heading` becomes bold, `-` and `*`
+list markers become `•`, and `[text](url)` becomes Slack's `<url|text>`. Code spans and
+fenced blocks are copied untouched, and a bare URL is left bare — Slack links one itself.
+
+There is nothing to configure and nothing to steer per agent, because the dialect is a fact
+about the transport rather than about the agent. The escape still runs first and still
+holds: a `<`, `>` or `&` the agent typed renders as that character, and a link is built
+only around an `http(s):` or `mailto:` URL — so `[page everyone](!channel)` is text, not a
+broadcast.
+
 ### Leak patterns — the second gate on a public destination
 
 A grant says the agent may speak in a channel. It does not say everything the agent knows

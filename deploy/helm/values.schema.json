@@ -70,7 +70,10 @@
     "job": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["slug", "suspend", "trigger", "budget"],
+      "required": ["slug", "suspend", "trigger"],
+      "if": { "required": ["prompt"] },
+      "then": { "properties": { "budget": false } },
+      "else": { "required": ["budget"] },
       "properties": {
         "worker": {
           "type": "object",
@@ -119,6 +122,10 @@
           }
         },
         "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "prompt": {
+          "const": true,
+          "description": "Mirror a job whose agent.yaml body is `prompt:`. Renders no CronJob — its turn runs on a clock inside the gateway — and states no budget. Requires toolkit 0.5.1 or newer."
+        },
         "suspend": { "type": "boolean" },
         "trigger": {
           "type": "object",

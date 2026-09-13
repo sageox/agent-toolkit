@@ -387,6 +387,30 @@ describe("SlackAdapter", () => {
     expect(api.posts[1].text).toBe("<@U0DRONE> who is &lt;@U0ALICE&gt;?");
   });
 
+  it("writes the brain's Markdown as mrkdwn, after the escape and on both outbound paths", async () => {
+    const { instance, socket, api } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    await socket.emit(mention());
+
+    // A brain writes Markdown on every surface — one reply contract, one prompt — and the
+    // adapter is what knows this one renders mrkdwn. The escape still runs first, so the
+    // `<…>` around the link is the only live markup that reached the wire.
+    await instance.send(
+      got[0].channel,
+      { text: "**Done.** See [#305](https://github.test/org/repo/pull/305), thanks <@U0ALICE>" },
+      got[0],
+    );
+    expect(api.posts[0].text).toBe(
+      "*Done.* See <https://github.test/org/repo/pull/305|#305>, thanks &lt;@U0ALICE&gt;",
+    );
+
+    // The recipients `post` builds are not text a brain wrote, and are untouched by both.
+    const channel = { surface: "slack", id: "GENG", isPublic: false } as const;
+    await instance.post(channel, { text: "- **shipped**" }, undefined, ["U0DRONE"]);
+    expect(api.posts[1].text).toBe("<@U0DRONE> • *shipped*");
+  });
+
   it("names the members a message mentions, and asks Slack about each one once", async () => {
     const { instance, socket, api } = adapter();
     const got: InboundEvent[] = [];
