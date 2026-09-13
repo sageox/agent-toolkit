@@ -43,7 +43,8 @@ export interface AcpBrainOptions {
   /** Claude's ACP tool permissions. Codex's HTTP endpoints enforce the same policy. */
   toolPolicy?: ToolPolicy;
   /**
-   * Servers the brain can reach. Codex accepts only gateway-hosted HTTP endpoints;
+   * Capabilities supplied by trusted gateway wiring, never by a turn or raw manifest.
+   * Codex requires gateway-hosted HTTP endpoints enforcing the caller's tool policy;
    * Claude also accepts stdio servers that hold no credential.
    */
   mcpServers?: readonly McpServer[];
@@ -121,6 +122,7 @@ export class AcpBrain implements Brain {
 
   constructor(private opts: AcpBrainOptions = {}) {}
 
+  /** Shares one ACP connection and readiness promise across incoming turns. */
   async start(): Promise<void> {
     this.starting ??= this.doStart().catch(async (error) => {
       await this.stop();
@@ -131,6 +133,13 @@ export class AcpBrain implements Brain {
 
   private async doStart(): Promise<void> {
     if (this.conn) return;
+    // Check the complete list, including generated memory and built-in servers, before
+    // the adapter can resolve two different capabilities under the same policy name.
+    const serverNames = new Set<string>();
+    for (const { name } of this.opts.mcpServers ?? []) {
+      if (serverNames.has(name)) throw new Error(`duplicate MCP server name "${name}" — server names must be unique`);
+      serverNames.add(name);
+    }
     const app = client({ name: "agent-gateway" });
 
     // The brain's own tools (shell, edit) are the third governed surface alongside egress
@@ -191,6 +200,7 @@ export class AcpBrain implements Brain {
     this.canCloseSessions = init.agentCapabilities?.sessionCapabilities?.close != null;
   }
 
+  /** Closes conversations, terminates the adapter, and removes its temporary home. */
   async stop(): Promise<void> {
     for (const [key, entry] of this.sessions) {
       this.sessions.delete(key);
@@ -293,6 +303,7 @@ export class AcpBrain implements Brain {
     }
   }
 
+  /** Starts the selected adapter with only its model credential and gateway capabilities. */
   private spawnBrain(): Stream {
     const provider = this.opts.provider ?? "claude-acp";
     const resolved = resolveBrainCommand(provider);

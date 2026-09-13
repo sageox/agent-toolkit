@@ -29,7 +29,10 @@ export interface ServeOptions {
    */
   host?: string;
   port?: number;
-  /** Enforce permissions here when the ACP agent does not approve every MCP call. */
+  /**
+   * Enforce permissions here when the ACP agent does not approve every MCP call.
+   * `server` is the ACP alias assigned by trusted gateway wiring, not MCP serverInfo.
+   */
   toolPolicy?: { server: string; policy: ToolPolicy };
 }
 

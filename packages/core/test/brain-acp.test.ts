@@ -118,6 +118,20 @@ async function drain(
 
 describe.each(["claude-acp", "codex-acp"] as const)("%s brain", (provider) => {
   const makeBrain = (opts: AcpBrainOptions = {}) => new AcpBrain({ ...opts, provider });
+
+  it("refuses duplicate MCP names before connecting to the adapter", async () => {
+    const f = fakeAgent(["ok"]);
+    const brain = makeBrain({
+      target: f.app,
+      mcpServers: [
+        { type: "http", name: "brain", url: "http://127.0.0.1:1234/mcp", headers: [] },
+        { type: "http", name: "brain", url: "http://127.0.0.1:5678/mcp", headers: [] },
+      ],
+    });
+    await expect(brain.start()).rejects.toThrow('duplicate MCP server name "brain"');
+    expect(f.calls).toEqual([]);
+  });
+
   it("keeps final answer chunks but drops narration superseded by tool calls", async () => {
     const f = fakeAgent([[
       { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Still running — checking back." } },
