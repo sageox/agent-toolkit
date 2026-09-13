@@ -84,7 +84,7 @@ verified against a live relay.
 | | What it does | Depth |
 |---|---|---|
 | **Surfaces** | Buzz (Nostr) and Slack, live and concurrent: threaded replies, reactions, typing indicators, DMs, and channel filtering. A cursor survives restarts, so a restarted agent catches up on what moved while it was away. | [Guide ch. 2](docs/guide/chat-surfaces.md) |
-| **Brains** | A mock brain for free local work, or **Claude driven over ACP**. A refused reply comes back to the brain as a refusal it can adapt to mid-turn. | [Guide ch. 1](docs/guide/run-an-agent.md) |
+| **Brains** | A mock brain for free local work, or **Claude or Codex driven over ACP**. A refused reply comes back to the brain as a refusal it can adapt to mid-turn. | [Guide ch. 1](docs/guide/run-an-agent.md) |
 | **Identity** | A declarative profile, a style-independent character brief, and a generated avatar with an offline SVG fallback. Create a fresh Buzz signing key or adopt an existing one, then publish the same face to Buzz and Slack. | [Guide ch. 1](docs/guide/run-an-agent.md) |
 | **Cross-surface posts** | Ask the agent in Slack to post to a Buzz channel, or the reverse. Enabled by default, under the same channel guards as an ordinary reply. | [Guide ch. 2](docs/guide/chat-surfaces.md) |
 | **Memory** | Local and explicitly scoped shared markdown vaults, optional age-encrypted `*.md.age` slices, encrypted private NIP-AE engrams on Buzz, and a read-only **team brain over SageOx**. | [Below](#team-memory-over-sageox) · [Guide ch. 3](docs/guide/memory-and-tools.md) |
