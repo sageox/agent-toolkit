@@ -95,6 +95,7 @@ export function mcpToolServer(opts: {
 
 const MAX_BODY = 1024 * 1024;
 
+/** Hosts a bearer-authenticated MCP handler, applying any supplied policy before tool execution. */
 export async function serveMcp(handle: McpHandler, opts: ServeOptions = {}): Promise<HostedMcp> {
   const token = randomBytes(32).toString("base64url");
   const host = opts.host ?? "127.0.0.1";

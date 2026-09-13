@@ -2408,6 +2408,7 @@ function validateCmd(argv: string[]): boolean {
   return true;
 }
 
+/** Checks an agent's configuration and credentials; warnings alone still return true. */
 async function doctorCmd(argv: string[]): Promise<boolean> {
   const agent = await agentFrom(argv);
   loadDotEnv(agent.env);
@@ -2914,6 +2915,7 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
   return true;
 }
 
+/** Runs a console trial; real brains use the selected provider's environment credential. */
 async function tryCmd(argv: string[]): Promise<void> {
   loadDotEnv();
   const provider = flag(argv, "brain", "mock")!;
