@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { once } from "node:events";
+import { accessSync, constants, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import {
@@ -10,20 +12,25 @@ import {
   PROTOCOL_VERSION,
   type AgentApp,
   type ClientConnection,
+  type McpServer,
   type SessionBuilder,
   type Stream,
 } from "@agentclientprotocol/sdk";
 import type { Brain, BrainContext, BrainStep, GuardFeedback } from "./brain.ts";
 import type { InboundEvent } from "./events.ts";
 import { assembleTurnPrompt } from "./turn.ts";
-import { brainEnv } from "./brain-env.ts";
+import { brainEnv, type AcpProvider } from "./brain-env.ts";
 import { withTimeout } from "./gateway.ts";
 import type { ToolPolicy } from "./tool-policy.ts";
+
+export type { McpServer } from "@agentclientprotocol/sdk";
 
 /** Where the ACP agent lives: a transport stream, or an in-process app (tests). */
 export type AcpTarget = Stream | AgentApp;
 
 export interface AcpBrainOptions {
+  /** Claude remains the default for existing callers. */
+  provider?: AcpProvider;
   /** Defaults to spawning the brain subprocess. */
   target?: AcpTarget;
   /** The brain zone's only secret. Falls back to the ambient key. */
@@ -33,17 +40,17 @@ export interface AcpBrainOptions {
   cwd?: string;
   /** How many times a refused reply may be re-prompted before the turn gives up. */
   maxGuardRetries?: number;
-  /** Governs the brain's own tools. Absent means nothing is allowlisted. */
+  /** Claude's ACP tool permissions. Codex's HTTP endpoints enforce the same policy. */
   toolPolicy?: ToolPolicy;
   /**
-   * MCP servers the agent runs itself. Only for servers with **no credential** — a vault
-   * brain qualifies, a token-bearing server does not (see the brains wiring for why).
+   * Servers the brain can reach. Codex accepts only gateway-hosted HTTP endpoints;
+   * Claude also accepts stdio servers that hold no credential.
    */
-  mcpServers?: readonly unknown[];
+  mcpServers?: readonly McpServer[];
   /** How long a channel's conversation is kept before it is closed. */
   sessionIdleMs?: number;
   /**
-   * `limits.turnTimeoutMs`, as the spawned subprocess's `MCP_TOOL_TIMEOUT`. A `target`
+   * `limits.turnTimeoutMs`, applied to the provider's MCP tool timeout. A `target`
    * handed in instead is not a process and carries no such bound.
    */
   turnTimeoutMs?: number;
@@ -52,9 +59,9 @@ export interface AcpBrainOptions {
 /** Long enough to keep a conversation alive across a coffee break. */
 const DEFAULT_SESSION_IDLE_MS = 60 * 60 * 1000;
 
-const BRAIN_BIN = "claude-agent-acp";
 const FALLBACK_COMMAND = "npx";
-const FALLBACK_ARGS = ["-y", "@agentclientprotocol/claude-agent-acp"];
+const CLAUDE_AGENT_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp@0.68.0";
+const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.11.0";
 
 /** How long the ACP handshake may take before we call it dead. */
 const INITIALIZE_TIMEOUT_MS = 90_000;
@@ -66,10 +73,11 @@ const INITIALIZE_TIMEOUT_MS = 90_000;
  * cold cache it downloads while we are already waiting on the handshake, and it leaves
  * the real agent as a *grandchild*, so killing our child orphans it.
  */
-function resolveBrainCommand(): { command: string; args: string[] } {
+function resolveBrainCommand(provider: AcpProvider): { command: string; args: string[] } {
+  const binary = provider === "codex-acp" ? "codex-acp" : "claude-agent-acp";
   for (const dir of (process.env.PATH ?? "").split(":")) {
     if (!dir) continue;
-    const candidate = join(dir, BRAIN_BIN);
+    const candidate = join(dir, binary);
     try {
       accessSync(candidate, constants.X_OK);
       return { command: candidate, args: [] };
@@ -77,26 +85,30 @@ function resolveBrainCommand(): { command: string; args: string[] } {
       /* keep looking */
     }
   }
-  return { command: FALLBACK_COMMAND, args: FALLBACK_ARGS };
+  return {
+    command: FALLBACK_COMMAND,
+    args: ["-y", provider === "codex-acp" ? CODEX_ACP_PACKAGE : CLAUDE_AGENT_ACP_PACKAGE],
+  };
 }
 
-/**
- * The brain: Claude driven over ACP.
- *
- * The process is long-lived (one subprocess, §6.3) while each turn gets its own
- * session (§6.1). It yields intent and never touches a transport — the gateway decides
- * whether anything is sent, and a refusal comes back into the same turn.
- */
 interface ChannelSession {
   session: Awaited<ReturnType<SessionBuilder["start"]>>;
   lastUsed: number;
 }
 
-export class ClaudeAcpBrain implements Brain {
+/**
+ * Claude and Codex share one ACP session and guard-feedback implementation.
+ *
+ * The process is long-lived, with one session per channel. It yields intent and
+ * never touches a transport — the gateway decides whether anything is sent,
+ * and a refusal comes back into the same turn.
+ */
+export class AcpBrain implements Brain {
   private conn?: ClientConnection;
   private child?: ChildProcess;
   private canCloseSessions = false;
   private starting?: Promise<void>;
+  private codexHome?: string;
   /**
    * One session per channel, not per turn.
    *
@@ -110,7 +122,10 @@ export class ClaudeAcpBrain implements Brain {
   constructor(private opts: AcpBrainOptions = {}) {}
 
   async start(): Promise<void> {
-    this.starting ??= this.doStart();
+    this.starting ??= this.doStart().catch(async (error) => {
+      await this.stop();
+      throw error;
+    });
     return this.starting;
   }
 
@@ -125,9 +140,14 @@ export class ClaudeAcpBrain implements Brain {
       // `name` is the tool identifier the policy is written against; `title` is a
       // human-readable label ("Delete the repo") and would never match a rule.
       const toolName = ctx.params.toolCall.name ?? ctx.params.toolCall.title ?? "";
-      const verdict = this.opts.toolPolicy?.allowsTool(toolName);
+      // Codex's MCP approval omits the tool name. Let that attempt reach the gateway,
+      // where the HTTP endpoint checks the actual tool before executing it. The adapter
+      // marks MCP approvals explicitly; native permission escalation is always refused.
+      const allowed = this.opts.provider === "codex-acp"
+        ? ctx.params._meta?.is_mcp_tool_approval === true
+        : this.opts.toolPolicy?.allowsTool(toolName).ok === true;
 
-      if (verdict?.ok) {
+      if (allowed) {
         const allow = ctx.params.options.find(
           (o) => o.kind === "allow_once" || o.kind === "allow_always",
         );
@@ -160,6 +180,14 @@ export class ClaudeAcpBrain implements Brain {
       INITIALIZE_TIMEOUT_MS,
       `the brain did not answer initialize within ${INITIALIZE_TIMEOUT_MS / 1000}s`,
     );
+    if (
+      this.opts.provider === "codex-acp" && !this.opts.target &&
+      init.agentInfo?.name !== "@agentclientprotocol/codex-acp"
+    ) {
+      throw new Error(
+        `Codex requires @agentclientprotocol/codex-acp; install it with \`npm install -g ${CODEX_ACP_PACKAGE}\``,
+      );
+    }
     this.canCloseSessions = init.agentCapabilities?.sessionCapabilities?.close != null;
   }
 
@@ -171,8 +199,24 @@ export class ClaudeAcpBrain implements Brain {
     this.conn?.close();
     this.conn = undefined;
     this.starting = undefined;
-    this.child?.kill();
+    const child = this.child;
+    if (child?.pid && this.opts.provider === "codex-acp" && process.platform !== "win32") {
+      // The adapter starts the Codex app server. Terminate their process group so
+      // shutdown cannot leave a model process holding its key and MCP capabilities.
+      const exited = child.exitCode === null && child.signalCode === null
+        ? once(child, "exit").then(() => {}) : Promise.resolve();
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+      await withTimeout(exited, 5_000, "Codex did not exit").catch(() => {
+        try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already exited */ }
+      });
+    } else child?.kill();
     this.child = undefined;
+    if (this.codexHome) rmSync(this.codexHome, { recursive: true, force: true });
+    this.codexHome = undefined;
   }
 
   async *runTurn(
@@ -219,9 +263,9 @@ export class ClaudeAcpBrain implements Brain {
   }
 
   private async openSession() {
-    let builder = this.conn!.agent.buildSession(this.opts.cwd ?? process.cwd());
+    let builder = this.conn!.agent.buildSession(this.codexHome ?? this.opts.cwd ?? process.cwd());
     for (const server of this.opts.mcpServers ?? []) {
-      builder = builder.withMcpServer(server as never);
+      builder = builder.withMcpServer(server);
     }
     return builder.start();
   }
@@ -250,15 +294,49 @@ export class ClaudeAcpBrain implements Brain {
   }
 
   private spawnBrain(): Stream {
-    const resolved = resolveBrainCommand();
+    const provider = this.opts.provider ?? "claude-acp";
+    const resolved = resolveBrainCommand(provider);
+    const env = brainEnv(process.env, {
+      provider,
+      apiKey: this.opts.apiKey,
+      model: this.opts.model,
+      turnTimeoutMs: this.opts.turnTimeoutMs,
+    });
+    if (provider === "codex-acp") {
+      // No host login, user MCP configuration, repository instructions, or agent .env
+      // enters Codex's working directory. Durable memory stays behind the gateway.
+      this.codexHome = mkdtempSync(join(tmpdir(), "sageox-codex-"));
+      env.HOME = this.codexHome;
+      env.CODEX_HOME = join(this.codexHome, ".codex");
+      mkdirSync(env.CODEX_HOME);
+      const servers = (this.opts.mcpServers ?? []).map((server) => {
+        if (!("type" in server) || server.type !== "http") {
+          throw new Error("Codex MCP servers must be gateway-hosted HTTP endpoints");
+        }
+        return [
+          `[mcp_servers.${JSON.stringify(server.name)}]`,
+          `url = ${JSON.stringify(server.url)}`,
+          `http_headers = { ${server.headers.map(({ name, value }) =>
+            `${JSON.stringify(name)} = ${JSON.stringify(value)}`).join(", ")} }`,
+          ...(this.opts.turnTimeoutMs
+            ? [`tool_timeout_sec = ${this.opts.turnTimeoutMs / 1000}`] : []),
+        ].join("\n");
+      });
+      writeFileSync(join(env.CODEX_HOME, "config.toml"), [
+        'default_permissions = "brain"',
+        '[permissions.brain.filesystem]',
+        '":root" = "deny"',
+        '[permissions.brain.network]',
+        'enabled = false',
+        ...servers,
+        "",
+      ].join("\n"), { mode: 0o600 });
+    }
     const child = spawn(resolved.command, resolved.args, {
       stdio: ["pipe", "pipe", "inherit"],
-      env: brainEnv(process.env, {
-        apiKey: this.opts.apiKey,
-        model: this.opts.model,
-        turnTimeoutMs: this.opts.turnTimeoutMs,
-      }),
-      cwd: this.opts.cwd,
+      detached: provider === "codex-acp" && process.platform !== "win32",
+      env,
+      cwd: this.codexHome ?? this.opts.cwd,
     });
     this.child = child;
     return ndJsonStream(
@@ -267,6 +345,9 @@ export class ClaudeAcpBrain implements Brain {
     );
   }
 }
+
+/** Kept for callers that already construct the Claude brain directly. */
+export { AcpBrain as ClaudeAcpBrain };
 
 /** ACP's convenience reader joins progress and final text, producing contradictory replies. */
 async function readFinalText(session: ChannelSession["session"]): Promise<string> {

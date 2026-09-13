@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Codex can run as an agent's brain over ACP, alongside Claude.** Select it with
+  `sageox-agent brain codex [--model <id>]`; setup and doctor use the agent's
+  `OPENAI_API_KEY`. Both providers share channel sessions, memory, MCP tools, and
+  guarded replies. Codex uses an isolated home and gateway-enforced tool permissions.
+  Switching providers clears the previous model pin unless a new one is supplied.
+  The runtime image includes both ACP adapters; local fallbacks pin the same versions.
+
 - **An external worker deploys on a managed Kubernetes cluster again.** The 1.34 floor
   chart 0.13.0 introduced compared the server's version against `>=1.34.0`, and every
   managed distribution reports a GitVersion carrying a build suffix — `v1.34.9-eks-bca9cf6`,

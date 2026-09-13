@@ -15,6 +15,43 @@ const gatewayEnv = {
 };
 
 describe("brainEnv", () => {
+  it("gives Codex only its own key and ignores inherited Codex overrides", () => {
+    const env = brainEnv({
+      ...gatewayEnv,
+      OPENAI_API_KEY: "sk-openai",
+      CODEX_API_KEY: "sk-wrong",
+      CODEX_CONFIG: '{"features":{"shell_tool":true}}',
+      CODEX_PATH: "/untrusted/codex",
+      MODEL_PROVIDER: "untrusted",
+      INITIAL_AGENT_MODE: "agent-full-access",
+      DEFAULT_AUTH_REQUEST: '{"methodId":"chat-gpt"}',
+      APP_SERVER_LOGS: "/tmp/logs",
+    }, { provider: "codex-acp", model: "gpt-test", apiKey: "sk-agent" });
+    expect(env.OPENAI_API_KEY).toBe("sk-agent");
+    for (const key of [
+      "ANTHROPIC_API_KEY", "CODEX_API_KEY", "CODEX_PATH", "MODEL_PROVIDER",
+      "APP_SERVER_LOGS", "SLACK_BOT_TOKEN", "BUZZ_NSEC",
+    ]) {
+      expect(env[key]).toBeUndefined();
+    }
+    expect(JSON.parse(env.CODEX_CONFIG!)).toMatchObject({
+      model: "gpt-test",
+      features: { shell_tool: false, hooks: false, apps: false, multi_agent: false },
+      web_search: "disabled",
+    });
+    expect(env.INITIAL_AGENT_MODE).toBe("read-only");
+    expect(JSON.parse(env.DEFAULT_AUTH_REQUEST!)).toEqual({ methodId: "api-key" });
+  });
+
+  it("uses the OpenAI key only for Codex and keeps unpinned models unset", () => {
+    const base = { ...gatewayEnv, OPENAI_API_KEY: "sk-openai" };
+    expect(brainEnv(base).OPENAI_API_KEY).toBeUndefined();
+    const env = brainEnv(base, { provider: "codex-acp" });
+    expect(env.OPENAI_API_KEY).toBe("sk-openai");
+    expect(JSON.parse(env.CODEX_CONFIG!).model).toBeUndefined();
+    expect(env.ANTHROPIC_MODEL).toBeUndefined();
+  });
+
   it("passes the Anthropic key through — the brain's only secret", () => {
     expect(brainEnv(gatewayEnv).ANTHROPIC_API_KEY).toBe("sk-ant-brain");
   });
