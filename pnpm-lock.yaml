@@ -47,6 +47,9 @@ importers:
       '@sageox/agent-toolkit-core':
         specifier: workspace:*
         version: link:../core
+      '@slack/logger':
+        specifier: ^5.0.0
+        version: 5.0.0
       '@slack/socket-mode':
         specifier: ^3.0.0
         version: 3.0.0(undici@7.29.0)
