@@ -143,7 +143,10 @@ export function surfaceReadHandler(egress: SurfaceEgress, policy: ToolPolicy): M
   });
 }
 
-const SurfaceArgs = z.object({ surface: z.string().min(1) });
+// Strict, and every `extend` below inherits it: an argument a declaration does not list is
+// refused by name rather than stripped. Stripped, a misspelt `withinHours` reads the whole
+// channel back to a caller that believes it asked for a day, and nothing says so.
+const SurfaceArgs = z.strictObject({ surface: z.string().min(1) });
 const ChannelArgs = SurfaceArgs.extend({
   channel: z.string().min(1),
   limit: z.number().int().min(1).optional(),

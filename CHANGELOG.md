@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The surface read tools refuse an argument they do not declare, instead of dropping it.**
+  `read_channel` called with `withinhours`, or any other spelling the tool does not list,
+  used to parse as a read with no window and hand the whole channel to a caller that
+  believed it asked for a day, with nothing to say so. Every surface read tool now fails
+  that call and names the key it did not recognise.
+
 - **`read_channel` takes a time window, and the gateway's clock cuts it.** Pass
   `withinHours: 24` and nothing older comes back: it becomes `Filter.since` on Buzz and
   `oldest` on Slack, so the surface does the cutting and the answer is the period rather
