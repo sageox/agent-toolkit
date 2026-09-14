@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-14
+
+Everything below shipped after `v0.5.2`.
+
+On publication, `ghcr.io/sageox/agent-base:0.6.0` takes `:latest` and `:0.6`.
+`:0.5` stays on 0.5.2. Before 1.0.0 a minor release may break configuration, so no
+`:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
+A minor rather than a patch because this adds a selectable Codex brain, a time window to
+`read_channel`, and an opt-in scheduled-job code-index mount. Existing Claude agents and
+valid manifests need no changes. Helm chart 0.15.0 pairs with this release; its new
+`persistence.jobCodeIndex` setting defaults off, and it now refuses `worker` beside
+`prompt: true`, a combination the runtime already refused.
+
 - **A Buzz reply no longer mentions the agent it answers, so one handoff is one ack.**
   Every reply `p`-tagged its author, and on Buzz that tag is the only thing that wakes an
   agent — so a sibling's one-line acknowledgement woke the agent that had handed off, whose
