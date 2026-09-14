@@ -157,7 +157,8 @@ function parseSlackReactionId(nativeId: string): { name: string; message: string
  * A read pages on only while it is short of readable messages, so this bounds the case
  * where it never gets there: a channel whose recent history is all join notices would
  * otherwise be walked to its first day to answer a question about its last hour. Reaching
- * it is a refusal and not a short answer — see {@link SlackAdapter.readChannel}.
+ * it comes back as `more` rather than as a plain short answer — see
+ * {@link SlackAdapter.readChannel}.
  */
 const MAX_HISTORY_PAGES = 5;
 
@@ -575,27 +576,33 @@ export class SlackAdapter implements SurfaceAdapter {
    * `MAX_HISTORY_PAGES` stops a channel that is nothing but notices from being walked back
    * to its first day.
    *
+   * `since` becomes the `oldest` this endpoint has always taken, so the window is cut by
+   * Slack rather than walked past here — and the page bound below then bounds a walk over
+   * the period asked about instead of over the whole channel.
+   *
    * `limit` is a ceiling and not a quota: fewer messages than asked for is an ordinary
    * answer, and on an installation served fifteen records a page it is the usual one. So
    * a short read is reported rather than refused, and {@link ChannelHistory.more} says
-   * which kind of short it is — the channel ran out, or this walk did.
+   * which kind of short it is — the window ran out, or this walk did.
    *
    * Thread replies are not in it — `conversations.history` returns parents only, the same
    * Slack fact `backfill` works around — and that is the right answer for a channel read.
    * {@link readThread} is how one thread is opened.
    */
-  async readChannel(channel: ChannelRef, limit?: number): Promise<ChannelHistory> {
+  async readChannel(channel: ChannelRef, limit?: number, since?: number): Promise<ChannelHistory> {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before readChannel()");
     this.assertChannel(channel);
 
+    // Seconds to the microsecond, which is how Slack spells a `ts` — and `"0"` is the
+    // channel's own beginning, which is what an unbounded read has always asked for.
+    const oldest = since === undefined ? "0" : (since / 1000).toFixed(6);
     const messages: SlackMessage[] = [];
     let readable = 0;
     let cursor: string | undefined;
-    let exhausted = false;
     for (let page = 0; ; page++) {
       const answered = await this.api.history({
         channel: channel.id,
-        oldest: "0",
+        oldest,
         limit: HISTORY_PAGE,
         cursor,
       });
@@ -604,13 +611,10 @@ export class SlackAdapter implements SurfaceAdapter {
         if (this.toChannelLine(message, channel.id)) readable += 1;
       }
       cursor = answered.nextCursor || undefined;
-      // No cursor is the channel's own end. `limit` unset asks for one page, per this
-      // method's contract.
+      // No cursor is the end of the window — `oldest`, or the channel's own beginning.
+      // `limit` unset asks for one page, per this method's contract.
       if (!cursor || limit === undefined || readable >= limit) break;
-      if (page + 1 >= MAX_HISTORY_PAGES) {
-        exhausted = true;
-        break;
-      }
+      if (page + 1 >= MAX_HISTORY_PAGES) break;
     }
 
     // Sorted on the Slack `ts` rather than the ISO string it becomes, per `readThread`.
@@ -623,11 +627,12 @@ export class SlackAdapter implements SurfaceAdapter {
     return {
       messages:
         limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit)),
-      // Stopping on the page bound while Slack was still offering a cursor is the only way
-      // this read comes back short of a channel that had more to give. Running out of
-      // cursor is the channel's own end, and reaching `limit` is the whole of what was
-      // asked for — neither is `more`.
-      more: exhausted,
+      // Two ways a message inside the window is left behind, and only one of them has a
+      // cursor to show for it. The other is the slice above: a page asks for `HISTORY_PAGE`
+      // records whatever the caller wants back, so the page that reaches the window's start
+      // can still hold far more than `limit`, and dropping the oldest of them is not an
+      // answer about a quiet window.
+      more: cursor !== undefined || (limit !== undefined && replies.length > limit),
     };
   }
 

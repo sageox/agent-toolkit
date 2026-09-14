@@ -603,10 +603,11 @@ export class SurfaceEgress {
     surface: string,
     channelId: string,
     limit?: number,
+    since?: number,
   ): Promise<ChannelHistory> {
     const adapter = this.byKind.get(surface);
     if (!adapter?.readChannel) throw cannotRead(surface, "read a channel back");
-    return adapter.readChannel(this.readTarget(adapter, surface, channelId), limit);
+    return adapter.readChannel(this.readTarget(adapter, surface, channelId), limit, since);
   }
 
   /**
