@@ -171,16 +171,24 @@ export function toReplyTemplate(msg: GuardedMessage, inReplyTo: InboundEvent): E
   // parent instead nests a new sub-thread under every answer.
   const anchor = inReplyTo.threadRoot?.nativeId ?? inReplyTo.id.nativeId;
 
+  const tags: string[][] = [
+    [BUZZ_DEFAULTS.channelTag, inReplyTo.channel.id],
+    // The anchor is the root of its own thread, so root and parent coincide: a single
+    // marked tag is both correct and what the relay's ancestry check expects.
+    [BUZZ_DEFAULTS.replyTag, anchor, "", "reply"],
+  ];
+  // A person is told their question was answered; another agent is not. A `p` tag is what
+  // wakes an agent (`toInboundEvent` reads `mentionsMe` off it), so an ack that tagged its
+  // sibling was a wake, and two agents acknowledging each other ran until
+  // `limits.maxAgentChainDepth` refused. An ack mentions nobody (design §8 rule 3); what a
+  // sibling answers under this agent's own post still comes home, because `Links.claim`
+  // matches on thread root and author, never on a mention.
+  if (!inReplyTo.author.isAgent) tags.push([BUZZ_DEFAULTS.mentionTag, inReplyTo.author.id]);
+
   return {
     kind: BUZZ_DEFAULTS.kind,
     created_at: Math.floor(Date.now() / 1000),
-    tags: [
-      [BUZZ_DEFAULTS.channelTag, inReplyTo.channel.id],
-      // The anchor is the root of its own thread, so root and parent coincide: a single
-      // marked tag is both correct and what the relay's ancestry check expects.
-      [BUZZ_DEFAULTS.replyTag, anchor, "", "reply"],
-      [BUZZ_DEFAULTS.mentionTag, inReplyTo.author.id],
-    ],
+    tags,
     content: msg.text,
   };
 }

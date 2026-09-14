@@ -4,7 +4,8 @@ import { toInboundEvent, toReplyTemplate, toThreadReply, BUZZ_DEFAULTS } from ".
 
 const authorSk = generateSecretKey();
 const authorPk = getPublicKey(authorSk);
-const mePk = getPublicKey(generateSecretKey());
+const meSk = generateSecretKey();
+const mePk = getPublicKey(meSk);
 
 function chatEvent(opts: { text?: string; channel?: string; mentions?: string[] } = {}) {
   const tags: string[][] = [["h", opts.channel ?? "hive"]];
@@ -100,6 +101,19 @@ describe("toReplyTemplate", () => {
     // content may contain the words; the ESCALATION is a tag, and we emit none
     expect(tagNames).not.toContain("broadcast");
     expect(tagNames.filter((n) => n === "p")).toHaveLength(1);
+  });
+
+  // The `p` tag is the only wake trigger, so a reply that tagged the agent it answered
+  // woke it — and two agents acknowledging each other ran until the chain-depth cap.
+  it("mentions the person it answers, and never the agent it answers", () => {
+    const fromAgent = toInboundEvent(chatEvent(), { pubkey: mePk, agents: new Map([[authorPk, "ida"]]) });
+    const ack = finalizeEvent(toReplyTemplate({ text: "on it" }, fromAgent), meSk);
+    expect(ack.tags.some((t) => t[0] === "p")).toBe(false);
+
+    // Read back by the agent it answers: under its message, and not a wake.
+    const readBack = toInboundEvent(ack, { pubkey: authorPk, agents: new Map([[mePk, "harry"]]) });
+    expect(readBack.threadRoot?.nativeId).toBe(fromAgent.id.nativeId);
+    expect(readBack.mentionsMe).toBe(false);
   });
 });
 

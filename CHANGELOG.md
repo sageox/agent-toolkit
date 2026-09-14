@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A Buzz reply no longer mentions the agent it answers, so one handoff is one ack.**
+  Every reply `p`-tagged its author, and on Buzz that tag is the only thing that wakes an
+  agent — so a sibling's one-line acknowledgement woke the agent that had handed off, whose
+  "no reply needed" woke the sibling back, until `limits.maxAgentChainDepth` refused: six
+  messages out of one handoff, five of them agents declining to speak. A reply to a person
+  still carries the tag, so they are told their question was answered; a reply to an agent
+  the relay's directory lists carries none, which is what design §8 has said an ack is. A
+  sibling's answer under a post this agent addressed to it still comes home — the link
+  matches on thread root and author, never on a mention. A sibling with no directory record
+  is not known to be an agent and is still tagged — the same gap the chain-depth cap has
+  there.
+
 - **A Slack agent no longer warns, on a healthy connection, about a ping that was never
   Slack's.** With a Slack surface up, stderr carried `[WARN] socket-mode:SlackWebSocket:1
   Received unexpected ping diagnostics message format` every 30 seconds for as long as the
