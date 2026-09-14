@@ -163,6 +163,7 @@ absent "claimName: agents-ida"
 # runs on whichever node has room, whatever the agent Pod is doing.
 absent "name: checkouts"
 absent "podAffinity"
+absent "workspace/ox-data"
 
 # The Deployment keeps the claim. Its `/agents` holds the cursors, local memory, checkouts
 # and indexes the contract calls durable, so gating the mount on the wrong side of `.job`
@@ -189,12 +190,9 @@ done
 refuses "a string workEvents value" "workEvents" \
   --set-string agents.harry.workEvents=false
 
-# `persistence.jobCheckouts` mounts the one thing on the claim a scheduled run could not
-# cheaply build for itself: the checkouts the agent Pod clones and fast-forwards. Narrowed
-# by `subPath` to `workspace/repos`, so `workspace/ox-data`, `state.json` and the local
-# memory vault stay in the Deployment Pod — an index `ox` cannot write is reported corrupt
-# and answers a search from nothing, and the other two are not a job's to read.
+# Checkout-only deployments must keep the index excluded, including on older ox images.
 render --set agents.harry.persistence.jobCheckouts=true
+absent "workspace/ox-data"
 counted 2 "name: checkouts"
 present "mountPath: /agents/harry/workspace/repos"
 present "subPath: harry/workspace/repos"
@@ -230,6 +228,44 @@ rendered=$(helm template agents "$chart" --values "$values" \
   --set agents.harry.persistence.jobCheckouts=true --show-only templates/deployment.yaml)
 absent "name: checkouts"
 absent "podAffinity"
+
+# Index sharing also needs the checkout and the same-node affinity. The two directories
+# share one claim reference; neither mount exposes the agent's cursors or memory vault.
+for checkouts in false true; do
+  render --set agents.harry.persistence.jobCodeIndex=true \
+    --set agents.harry.persistence.jobCheckouts="$checkouts"
+  counted 3 "name: checkouts"
+  matched 1 "claimName: agents-harry$"
+  counted 2 "emptyDir: {}"
+  counted 1 "podAffinity:"
+  present "requiredDuringSchedulingIgnoredDuringExecution:"
+  absent "preferredDuringSchedulingIgnoredDuringExecution:"
+  present "topologyKey: kubernetes.io/hostname"
+  present "key: agent-toolkit/job"
+  present "operator: DoesNotExist"
+  matched 2 '^ *subPath: harry/workspace/(repos|ox-data)$'
+  matched 2 '^ *subPath:'
+  absent "/agents/ida/workspace"
+  for directory in repos ox-data; do
+    present "mountPath: /agents/harry/workspace/$directory"
+    if ! grep -A2 -F "mountPath: /agents/harry/workspace/$directory" <<<"$rendered" | grep -qF "readOnly: true"; then
+      fail "the $directory mount must be read-only"
+    fi
+  done
+  if grep -A2 -E "claimName: agents-harry$" <<<"$rendered" | grep -qF "readOnly"; then
+    fail "the shared claim reference must not be read-only"
+  fi
+done
+render --set agents.harry.persistence.jobCodeIndex=true \
+  --set agents.harry.persistence.existingClaim=warm-agent
+present "claimName: warm-agent"
+absent "claimName: agents-harry"
+rendered=$(helm template agents "$chart" --values "$values" \
+  --set agents.harry.persistence.jobCodeIndex=true --show-only templates/deployment.yaml)
+absent "name: checkouts"
+absent "workspace/ox-data"
+absent "podAffinity"
+present "claimName: agents-harry"
 
 # Every scheduled Pod stages its own bundle, into the `emptyDir` above. One that waited on
 # the Deployment to have gone first would lose its run on a fresh install, and nothing
@@ -403,6 +439,7 @@ render --kube-version 1.34.0 \
   --set agents.harry.jobSecrets.kubernetesSecret=old-job-secrets \
   --set agents.harry.jobSecrets.csi.secretProviderClass= \
   --set agents.harry.persistence.jobCheckouts=true \
+  --set agents.harry.persistence.jobCodeIndex=true \
   --set agents.harry.serviceAccount.automountJobToken=true
 present 'name: AGENT_JOB_DISPATCHER_URL'
 present 'name: AGENT_JOB_REQUEST_ID'
@@ -410,6 +447,9 @@ counted 1 'name: AGENT_WORK_EVENTS'
 absent 'task-credentials'
 absent 'old-job-secrets'
 absent 'mountPath: /agents/harry/workspace/repos'
+absent 'mountPath: /agents/harry/workspace/ox-data'
+absent 'name: checkouts'
+absent 'podAffinity:'
 absent 'automountServiceAccountToken: true'
 
 # The value comes from the Job controller's UID label, not the launcher's Pod UID. Every
