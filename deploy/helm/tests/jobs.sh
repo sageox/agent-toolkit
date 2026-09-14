@@ -112,9 +112,13 @@ refuses 'a shared claim mounted over the bundle' 'inside that agent'"'"'s own bu
 refuses 'a shared claim mounted at the bundle root' 'inside that agent'"'"'s own bundle directory' \
   $shared --set 'agents.harry.sharedVolumes[0].mountPath=/agents/harry/'
 # And anywhere else still renders, mounted in both the Deployment and the scheduled Pods.
-rendered=$(helm template agents "$chart" --values "$values" $shared \
-  --set 'agents.harry.sharedVolumes[0].mountPath=/srv/shared' --show-only templates/cronjob.yaml)
-present 'mountPath: "/srv/shared"'
+# Counted: the `stage-config` init container mounts the claim too, so `present` alone would
+# pass with the main container's mount gone.
+for template in deployment cronjob; do
+  rendered=$(helm template agents "$chart" --values "$values" $shared \
+    --set 'agents.harry.sharedVolumes[0].mountPath=/srv/shared' --show-only "templates/$template.yaml")
+  counted 2 'mountPath: "/srv/shared"'
+done
 
 present 'schedule: "0 */4 * * 1-5"'
 present 'timeZone: "America/New_York"'
