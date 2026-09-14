@@ -1334,9 +1334,46 @@ describe("BuzzAdapter reads the surface it is on", () => {
 
     const capped = await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false }, 1);
     expect(capped.messages.map((message) => message.text)).toEqual(["second"]);
-    // Asked for on the wire too: a relay that honours it sends one event rather than the
+    // Asked for on the wire too: a relay that honours it sends two events rather than the
     // channel's whole stored history for this to throw away.
-    expect(relay.reqs.at(-1)!.filters[0].limit).toBe(1);
+    expect(relay.reqs.at(-1)!.filters[0].limit).toBe(2);
+    // One past the ceiling is what makes this answerable at all. A relay hands back a
+    // filled `limit` and EOSE whether or not it had more, so asking for exactly `limit`
+    // would report a channel that was cut as one that was read to the end.
+    expect(capped.more).toBe(true);
+    await a.stop();
+  });
+
+  it("cuts a time-bounded read on the relay's own filter, not on the caller's arithmetic", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    relay.backlog.push(inChannel("hive", "yesterday", now - 7200));
+    relay.backlog.push(inChannel("hive", "just now", now - 60));
+
+    const hourAgo = now - 3600;
+    const recent = await a.readChannel!(
+      { surface: "buzz", id: "hive", isPublic: false },
+      50,
+      hourAgo * 1000,
+    );
+    expect(recent.messages.map((message) => message.text)).toEqual(["just now"]);
+    // On the wire, in the relay's seconds, so nothing outside the window is ever sent for a
+    // reader to sift — and a reader that cannot see an older message cannot include one.
+    expect(relay.reqs.at(-1)!.filters[0].since).toBe(hourAgo);
+    // Room under the ceiling and EOSE inside the window: the whole of the period asked
+    // about, which is the one short answer a caller may call a quiet hour from.
+    expect(recent.more).toBe(false);
+
+    // A window holding exactly `limit` is not one that overflowed, and the extra event
+    // asked for beyond the ceiling is how the two are told apart.
+    const exact = await a.readChannel!(
+      { surface: "buzz", id: "hive", isPublic: false },
+      1,
+      hourAgo * 1000,
+    );
+    expect(exact.messages.map((message) => message.text)).toEqual(["just now"]);
+    expect(exact.more).toBe(false);
     await a.stop();
   });
 });

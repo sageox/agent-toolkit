@@ -1648,7 +1648,10 @@ describe("SlackAdapter reads the surface it is on", () => {
       { surface: "slack", id: "GENG", isPublic: false },
       2,
     );
-    expect(more).toBe(false);
+    // Two is the whole of what was asked for and not the whole of what is there: Slack was
+    // still offering a cursor when the ceiling stopped the walk, so older messages exist
+    // that this read did not return.
+    expect(more).toBe(true);
     expect(messages.map((message) => [message.author.id, message.text])).toEqual([
       ["U0ALICE", "morning"],
       ["U0BOB", "and @alice"],
@@ -1688,7 +1691,8 @@ describe("SlackAdapter reads the surface it is on", () => {
       { surface: "slack", id: "GENG", isPublic: false },
       2,
     );
-    // Satisfied within the bound, so nothing was left behind.
+    // Satisfied inside the bound, and Slack stopped offering a cursor: nothing was left
+    // behind on either count.
     expect(more).toBe(false);
     expect(messages.map((message) => message.text)).toEqual(["first", "second"]);
     expect(api.historyCalls).toEqual([
@@ -1769,5 +1773,30 @@ describe("SlackAdapter reads the surface it is on", () => {
     // The channel's own end, which is a complete answer however short it is.
     expect(more).toBe(false);
     expect(api.historyCalls).toHaveLength(1);
+  });
+
+  it("asks Slack for the window rather than reading a channel and sifting it", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    api.histories = [
+      { messages: [{ type: "message", user: "U0ALICE", text: "inside", ts: "1786761001.000000" }] },
+    ];
+
+    const { messages, more } = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      50,
+      1_786_760_000_500,
+    );
+    // `oldest` is the whole of the filtering, spelled as Slack spells a `ts`. What arrives
+    // is already the window, so nothing downstream has to decide what is in it — which is
+    // the failure this replaces: a reader working the period out for itself, from a clock
+    // reading it did not take.
+    expect(api.historyCalls).toEqual([
+      { channel: "GENG", oldest: "1786760000.500000", limit: 200, cursor: undefined },
+    ]);
+    expect(messages.map((message) => message.text)).toEqual(["inside"]);
+    // Slack ran out of cursor inside the window, so this is the whole period asked about —
+    // the one short answer a caller may report a quiet channel from.
+    expect(more).toBe(false);
   });
 });

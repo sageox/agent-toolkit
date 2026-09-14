@@ -710,11 +710,22 @@ thousand messages a request. If your agent runs on an unlisted distributed app i
 `read_channel` still works and is simply slow and shallow, and `limit` behaves as the
 ceiling it is documented to be: you will often get fewer messages than you asked for.
 
+**Ask for a period with `withinHours`, never by reading a channel and filtering it.**
+`read_channel(channel: "status", withinHours: 24)` is the last day, cut by the gateway's
+clock before either surface is asked — `Filter.since` on Buzz, `oldest` on Slack. Leaving
+the window to the agent is how a scheduled digest goes wrong with nothing anywhere
+reporting it: a job set for 18:00 Pacific fires at 01:00 UTC on the *next* calendar day, so
+an agent handed that date alongside its own schedule can place "now" a day ahead, open a
+window that starts after the newest message in the channel, and report the busiest day the
+channel has had as silence. The read succeeds, the job passes, and the only artifact is a
+summary that says the opposite of the truth. The window also keeps the answer small, which
+is the difference between a result the agent reads and one it has to slice up first.
+
 That is why `read_channel` answers `more` beside its `messages`. A short list and a quiet
-channel are the same list, and only that field separates them — `more: true` means the read
-stopped before it had the whole window and there is history it did not reach, so the agent
-is told not to report the channel as quiet on it. `more: false` with three messages means
-the channel holds three.
+channel are the same list, and only that field separates them — `more: true` means there
+are messages inside the window, older than the oldest one in the answer, that the read did
+not return, so the agent is told not to report the channel as quiet or anyone in it as
+silent on it. `more: false` with three messages means the window holds three.
 
 Nothing here publishes, so nothing here is egress and the guard has nothing to rule on.
 What comes back is other people's text, and it is **untrusted** in exactly the way an

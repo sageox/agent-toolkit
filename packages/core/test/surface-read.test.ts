@@ -28,6 +28,8 @@ const IDA: ActorRef = {
 function reader(over: Partial<SurfaceAdapter> = {}) {
   const limits: Array<number | undefined> = [];
   const channels: string[] = [];
+  /** Only a channel read has a window, so this is not pushed beside every `limit`. */
+  const sinces: Array<number | undefined> = [];
   const value: SurfaceAdapter = {
     kind: "buzz",
     start: async () => {},
@@ -42,9 +44,10 @@ function reader(over: Partial<SurfaceAdapter> = {}) {
       return [IDA];
     },
     describeActor: async (id) => (id === IDA.id ? IDA : undefined),
-    readChannel: async (channel, limit) => {
+    readChannel: async (channel, limit, since) => {
       channels.push(channel.id);
       limits.push(limit);
+      sinces.push(since);
       return {
         messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
         more: false,
@@ -52,7 +55,7 @@ function reader(over: Partial<SurfaceAdapter> = {}) {
     },
     ...over,
   };
-  return { value, limits, channels };
+  return { value, limits, channels, sinces };
 }
 
 const allowAll = () =>
@@ -161,6 +164,26 @@ describe("the surface read server", () => {
     // filterless read with whatever it stores, so the bound has to be here rather than in
     // whatever the brain happened to ask for.
     expect(surface.limits).toEqual([200, 200, 200]);
+  });
+
+  it("cuts a channel read's window on this clock, so the brain never names an instant", async () => {
+    const surface = reader();
+    const { call } = server(surface.value);
+
+    const before = Date.now();
+    await call("read_channel", { surface: "buzz", channel: "hive", withinHours: 24 });
+    const after = Date.now();
+    // The brain said "24 hours" and nothing else. What reaches the surface is an instant
+    // this process read off its own clock — so a turn that has been told the wrong date, or
+    // has the job's timezone and the pod's disagreeing, cannot open the window after the
+    // newest message in the channel and report its busiest day as silence.
+    expect(surface.sinces.at(-1)).toBeGreaterThanOrEqual(before - 24 * 3_600_000);
+    expect(surface.sinces.at(-1)).toBeLessThanOrEqual(after - 24 * 3_600_000);
+
+    // Unset stays unset: a window is something to ask for, not a default period a caller
+    // has to know to widen.
+    await call("read_channel", { surface: "buzz", channel: "hive" });
+    expect(surface.sinces.at(-1)).toBeUndefined();
   });
 
   it("refuses a read the surface cannot make, rather than answering emptily", async () => {

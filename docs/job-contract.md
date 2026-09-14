@@ -437,10 +437,10 @@ bundle:
 name: daily-digest
 description: One short post per day summarizing what the other agents did.
 ---
-It is the scheduled daily digest. Read the last 24 hours of the status channel with
-read_channel. Write one line per agent that did something and keep the links those lines
-carry. Name agents with nothing as quiet. If `more` was true, say the window was busier
-than one read covers. Post nothing else.
+It is the scheduled daily digest. Read the status channel with read_channel, asking for
+withinHours: 24 rather than working the window out yourself. Write one line per agent that
+did something and keep the links those lines carry. Name agents with nothing as quiet. If
+`more` was true, say the window was busier than one read covers. Post nothing else.
 ```
 
 **Named, not pointed at.** A name is what a person says and what a tool argument carries,

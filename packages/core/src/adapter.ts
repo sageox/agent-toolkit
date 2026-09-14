@@ -181,12 +181,19 @@ export interface SurfaceAdapter {
    * keeps the most recent that many, because what a reader of a channel wants is the end
    * of it. The text is untrusted for the same reason and to the same degree.
    *
+   * `since` bounds it in time instead of in count: epoch milliseconds, and nothing older
+   * comes back. Both surfaces filter on the wire — `Filter.since` and `conversations.history`
+   * `oldest` — so a window is cheaper than the count it replaces rather than a pass over it.
+   * What it is compared against is the surface's own timestamp for a message, which on Buzz
+   * is the author's claimed `created_at`: a window is as good as the clocks that stamped the
+   * messages in it.
+   *
    * `limit` is a ceiling and not a quota, so coming back short is an ordinary answer — and
-   * {@link ChannelHistory.more} is how a short answer says which kind it is. An adapter
-   * that always reads to the end of what it was asked for reports `false` and never has to
-   * think about it.
+   * {@link ChannelHistory.more} is how a short answer says which kind it is. An adapter that
+   * reaches the start of the window reports `false`; one that stopped before it, for any
+   * reason of its own, reports `true`.
    */
-  readChannel?(channel: ChannelRef, limit?: number): Promise<ChannelHistory>;
+  readChannel?(channel: ChannelRef, limit?: number, since?: number): Promise<ChannelHistory>;
 
   /**
    * The resume cursor to persist, for surfaces that replay history from one. The CLI
