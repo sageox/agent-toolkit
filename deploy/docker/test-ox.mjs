@@ -20,6 +20,7 @@ const env = {
 };
 const ledger = join(env.XDG_DATA_HOME, "sageox/sageox.ai/ledgers/repo_fixture");
 
+/** Run a bounded command using only the isolated fixture's environment. */
 function run(binary, args, extraEnv = {}) {
   const result = spawnSync(binary, args, {
     cwd: repo, env: { ...env, ...extraEnv }, encoding: "utf8", timeout: 60_000,
@@ -29,6 +30,7 @@ function run(binary, args, extraEnv = {}) {
   return result;
 }
 
+/** Parse a quiet JSON reader; stderr may reveal a partial failure despite exit zero. */
 function ox(args, extraEnv) {
   const result = run("ox", args, extraEnv);
   // In particular, code insights can exit zero while warning about failed sections.
@@ -109,8 +111,15 @@ try {
   run("git", ["add", "."]);
   run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Index fixture"]);
   run("ox", ["index", "code", "--json"]);
+  // Run as the image's unprivileged user: neither shared path may accept job writes.
+  run("chmod", ["-R", "a-w", repo, env.XDG_DATA_HOME]);
+  for (const path of [repo, env.XDG_DATA_HOME]) {
+    assert.throws(() => writeFileSync(join(path, "job-must-not-write"), ""), { code: "EACCES" });
+  }
   const codeStatus = ox(["code", "status", "--json"]);
   assert.equal(codeStatus.index_exists, true);
+  assert.equal(codeStatus.read_only, true);
+  assert.ok(!codeStatus.open_error);
   assert.ok(codeStatus.commits > 0);
   const insights = ox(["code", "insights", "--json", "--days", "14", "--limit", "10"]);
   assert.ok(insights.recent_commits.some((commit) => commit.message === "Index fixture"));
@@ -130,8 +139,12 @@ try {
   }
   // The writer and search print progress/timing on stderr; their consumers use exit status.
   const search = run("ox", ["code", "search", "ScheduledWorkspaceMarker", "--json", "--limit", "5"]);
-  assert.match(search.stdout, /ScheduledWorkspaceMarker/);
+  const matches = JSON.parse(search.stdout);
+  assert.equal(matches.total, 1);
+  assert.equal(matches.results[0].file, "main.go");
+  assert.match(matches.results[0].snippet, /ScheduledWorkspaceMarker/);
   console.log("ox compatibility passed: status, team list, session list, glance, code insights and search");
 } finally {
+  run("chmod", ["-R", "u+w", root]);
   rmSync(root, { recursive: true, force: true });
 }

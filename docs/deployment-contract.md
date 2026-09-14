@@ -309,7 +309,9 @@ The runtime build checks the installed ox 0.15.0 binary with an
 [offline compatibility smoke test](../deploy/docker/test-ox.mjs) on both architectures.
 It exercises `status`, empty and populated `team list`, `session list`, and `glance`
 responses, plus indexing, `code insights`, and search, using isolated synthetic repositories
-and ledgers with no credentials, network, or running daemon. Session listing uses the
+and ledgers with no credentials, network, or running daemon. The code readers run after
+write permissions are removed from the checkout and index, and verify read-only status
+and a parsed search result. Session listing uses the
 gateway's explicit `AGENT_ENV=claude-code` context, retained from the ox 0.14.3 workaround
 for its inherited `--json` flag. These checks establish CLI output compatibility, not live
 sync or migration parity. #24 remains open.
