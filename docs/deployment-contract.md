@@ -200,13 +200,14 @@ render time; the mirror carries the clock and the bound only — not the argv, n
 — so it cannot become a second place a job is decided.
 
 A **`prompt`** job renders no `CronJob`, because the Deployment already runs its clock. It
-is mirrored as `{slug, suspend, trigger, prompt: true}` and states no budget — the chart
-refuses one, since nothing there would bound it — and the marker is what keeps a job left
-out of the mirror distinguishable from one the mirror says renders nothing. The chart also
-refuses a `sharedVolumes` claim mounted inside `/agents/<name>`: a prompt job's words are
-read from `skills/<name>/SKILL.md` under that directory and reach the brain as steering, so a
-mount that could supply them from somewhere else is refused where it is made. The runtime cannot catch that one — a
-mount point is an ordinary directory to `realpath`.
+is mirrored as `{slug, suspend, trigger, prompt: true}` and states no budget and no worker —
+the chart refuses both, since no `CronJob` is rendered for either to apply to — and the
+marker is what keeps a job left out of the mirror distinguishable from one the mirror says
+renders nothing. The chart also refuses a `sharedVolumes` claim mounted inside
+`/agents/<name>`: a prompt job's words are read from `skills/<name>/SKILL.md` under that
+directory and reach the brain as steering, so a mount that could supply them from somewhere
+else is refused where it is made. The runtime cannot catch that one — a mount point is an
+ordinary directory to `realpath`.
 [The chart's README](../deploy/helm/README.md#jobs) has the rendered shape and what a job
 Pod does not share by default — the agent's `ReadWriteOnce` claim, which ties its placement
 to the agent's node. It stages its bundle onto an `emptyDir` of its own instead.
