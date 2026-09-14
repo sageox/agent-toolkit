@@ -215,6 +215,12 @@ describe("the surface read server", () => {
       call("list_members", { surface: "buzz", channel: "hive", withinHours: 24 }),
     ).rejects.toThrow(/withinHours/);
     expect(surface.limits).toEqual([]);
+
+    // The advertised contract says what the parse enforces, so a client that validates
+    // before calling refuses the same argument the server would.
+    for (const tool of await handleTools(surface.value)) {
+      expect(tool.inputSchema).toMatchObject({ additionalProperties: false });
+    }
   });
 
   it("refuses a read the surface cannot make, rather than answering emptily", async () => {

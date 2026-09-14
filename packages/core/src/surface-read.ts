@@ -184,7 +184,12 @@ function tools(egress: SurfaceEgress): ToolDecl[] {
         "channel the agent is set up for is one nobody invited it to — an agent that joined " +
         "nothing looks healthy and is simply never spoken to. Answers `{channels}`, each " +
         "`{surface, id, isPublic, name?}`.",
-      inputSchema: { type: "object", properties: { surface }, required: ["surface"] },
+      inputSchema: {
+        type: "object",
+        properties: { surface },
+        required: ["surface"],
+        additionalProperties: false,
+      },
     },
     {
       name: LIST_MEMBERS,
@@ -210,6 +215,7 @@ function tools(egress: SurfaceEgress): ToolDecl[] {
           },
         },
         required: ["surface", "channel"],
+        additionalProperties: false,
       },
     },
     {
@@ -226,6 +232,7 @@ function tools(egress: SurfaceEgress): ToolDecl[] {
           id: { type: "string", description: "The id as that surface spells it" },
         },
         required: ["surface", "id"],
+        additionalProperties: false,
       },
     },
     {
@@ -268,6 +275,7 @@ function tools(egress: SurfaceEgress): ToolDecl[] {
           },
         },
         required: ["surface", "channel"],
+        additionalProperties: false,
       },
     },
   ];
