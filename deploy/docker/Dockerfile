@@ -100,6 +100,9 @@ ENV HOME=/home/agent \
     AGENT_TOOLKIT_HOME=/agents \
     NODE_ENV=production
 
+# Exercise the installed ox binary without credentials or network on both architectures.
+RUN --network=none node deploy/docker/test-ox.mjs
+
 # Secrets arrive as files under /mnt/secrets-store, which is where resolveSecret looks first.
 # Nothing here carries a credential in ENV, because `docker inspect` can read that.
 

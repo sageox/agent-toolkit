@@ -154,12 +154,12 @@ target supplies a clock, a process, a deadline, and durable state.
 A target **may** also let a scheduled run read the repository checkouts the agent's own
 workload maintains, and [the chart](#kubernetes-chart) does, per agent. Read-only is the
 whole of the offer: the agent fast-forwards those trees at every start, so a run writing to
-one is a second writer on a tree it does not own. The `ox` index beside them is not part of
-it — `ox` opens its store read-write and reports one it cannot write as corrupt, so a shared
-index answers a job's search from nothing instead of failing — and neither is the rest of
-the agent's durable state. A target that offers this owes a refusal rather than a
-substitute: a run that cannot reach the checkouts does not happen, because a body written to
-read code, running without the code, is a green run that proved nothing.
+one is a second writer on a tree it does not own. With ox 0.15.0 or newer, a target may also
+offer the adjacent code index read-only; the chart requires the separate
+`persistence.jobCodeIndex` opt-in. The rest of the agent's durable state remains private.
+A target that offers shared checkouts or an index owes a refusal rather than a substitute:
+a run that cannot read its required code or index must fail, because a body written to read
+code, running without the code, is a green run that proved nothing.
 
 ## Kubernetes chart
 
@@ -305,14 +305,17 @@ Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existin
 | Sync lifecycle and deployment | Tested locally: cold clone, periodic refresh, failure recovery, graceful restart/shutdown, process-group cancellation, ownership lock, and exclusion of reads during refresh. Resource measurements and live expired/revoked/rotated credential acceptance remain pending. |
 | Recent activity | Tested: populated and empty windows, unavailable/stale/mismatched ledgers, bounded inputs and text, ordering and truncation, repeatable reads, malformed responses, and credential rejection/recovery. |
 
-The ox 0.14.3 session-list output was also checked against isolated synthetic
-populated and empty ledgers, without credentials or a running daemon. Its session command
-ignores the inherited `--json` flag outside agent context, so the gateway explicitly sets
-`AGENT_ENV=claude-code` for that command, matching the hosted Claude/ACP brain. This checks
-CLI output compatibility, not live sync or migration parity. #24 remains open.
+The runtime build checks the installed ox 0.15.0 binary with an
+[offline compatibility smoke test](../deploy/docker/test-ox.mjs) on both architectures.
+It exercises `status`, empty and populated `team list`, `session list`, and `glance`
+responses, plus indexing, `code insights`, and search, using isolated synthetic repositories
+and ledgers with no credentials, network, or running daemon. Session listing uses the
+gateway's explicit `AGENT_ENV=claude-code` context, retained from the ox 0.14.3 workaround
+for its inherited `--json` flag. These checks establish CLI output compatibility, not live
+sync or migration parity. #24 remains open.
 
-That CLI's `ox glance` output was also checked against isolated synthetic populated
-and empty ledgers. `team_recent` passes absolute `--since`/`--until` bounds and validates
+The ox 0.15.0 `glance` check covers populated and empty ledgers.
+`team_recent` passes absolute `--since`/`--until` bounds and validates
 the returned repository, window, timestamps, and counts. It projects work updates and
 session activity without forwarding generated collision advice or prompt guidance. ox may
 write its local glance checkpoint under the gateway's config home; explicit bounds make
