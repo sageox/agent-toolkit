@@ -6,6 +6,7 @@
   "main": "./src/index.ts",
   "dependencies": {
     "@sageox/agent-toolkit-core": "workspace:*",
+    "@slack/logger": "^5.0.0",
     "@slack/socket-mode": "^3.0.0",
     "@slack/web-api": "^8.0.0"
   }
