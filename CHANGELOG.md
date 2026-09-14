@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A Buzz reply no longer mentions the agent it answers, so one handoff is one ack.**
+  Every reply `p`-tagged its author, and on Buzz that tag is the only thing that wakes an
+  agent — so a sibling's one-line acknowledgement woke the agent that had handed off, whose
+  "no reply needed" woke the sibling back, until `limits.maxAgentChainDepth` refused: six
+  messages out of one handoff, five of them agents declining to speak. A reply to a person
+  still carries the tag, so they are told their question was answered; a reply to an agent
+  the relay's directory lists carries none, which is what design §8 has said an ack is. A
+  sibling's answer under a post this agent addressed to it still comes home — the link
+  matches on thread root and author, never on a mention. An agent with no directory record
+  is not known to be one and is still tagged, the same gap the chain-depth cap has there.
+
 - **Scheduled command jobs can share the agent's warm code index read-only.** Chart
   0.15.0 adds `persistence.jobCodeIndex`, disabled by default, to mount the index and
   checkouts using the existing same-node affinity. The runtime now pins ox 0.15.0,
