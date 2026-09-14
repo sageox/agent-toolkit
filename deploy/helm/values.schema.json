@@ -72,7 +72,7 @@
       "additionalProperties": false,
       "required": ["slug", "suspend", "trigger"],
       "if": { "required": ["prompt"] },
-      "then": { "properties": { "budget": false } },
+      "then": { "properties": { "budget": false, "worker": false } },
       "else": { "required": ["budget"] },
       "properties": {
         "worker": {
