@@ -1,3 +1,4 @@
+import { ConsoleLogger } from "@slack/logger";
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
 import type {
@@ -271,7 +272,9 @@ export class SlackAdapter implements SurfaceAdapter {
     );
     this.since = opts.since;
     this.api = opts.api ?? new WebSlackApi(opts.botToken);
-    this.socket = opts.socket ?? new SocketModeClient({ appToken: opts.appToken });
+    this.socket =
+      opts.socket ??
+      new SocketModeClient({ appToken: opts.appToken, logger: new SocketModeLogger() });
   }
 
   cursor(): number | undefined {
@@ -1279,4 +1282,34 @@ function slackErrorCode(error: unknown): string | undefined {
 /** `already_reacted` — the one `reactions.add` failure that means the call succeeded. */
 function isAlreadyReacted(error: unknown): boolean {
   return slackErrorCode(error) === "already_reacted";
+}
+
+/**
+ * socket-mode's own console logger, minus its warning about frames on sockets that are
+ * not Slack's.
+ *
+ * `SlackWebSocket` subscribes to undici's `undici:websocket:ping` and `:pong` diagnostics
+ * channels, which every undici `WebSocket` in the process publishes to — Node's built-in
+ * `WebSocket` included, and nostr-tools opens the Buzz relay connection with it. Before
+ * asking whether a frame was for its own socket, socket-mode checks the message
+ * `instanceof` its npm copy of undici's `WebSocket`, which the built-in one is not, so a
+ * relay's keepalive ping was one WARN on a healthy Slack connection every time it arrived
+ * (#82). 3.0.1 has the same check; reported as slackapi/node-slack-sdk#2743, and this
+ * class goes when a release ignores frames for other sockets. Slack's own frames pass
+ * it, and nothing else socket-mode writes is dropped: a stale connection still warns
+ * before it is recycled.
+ */
+export class SocketModeLogger extends ConsoleLogger {
+  constructor() {
+    super();
+    // socket-mode names only the logger it builds itself; a supplied one is used as is.
+    this.setName("socket-mode");
+  }
+
+  warn(...msg: unknown[]): void {
+    if (/^Received unexpected (?:ping|pong) diagnostics message format$/.test(String(msg[0]))) {
+      return;
+    }
+    super.warn(...msg);
+  }
 }

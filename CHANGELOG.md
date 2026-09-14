@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is not known to be an agent and is still tagged — the same gap the chain-depth cap has
   there.
 
+- **A Slack agent no longer warns, on a healthy connection, about a ping that was never
+  Slack's.** With a Slack surface up, stderr carried `[WARN] socket-mode:SlackWebSocket:1
+  Received unexpected ping diagnostics message format` every 30 seconds for as long as the
+  socket lived, on a connection that was answering fine (#82). The ping was another
+  surface's: `@slack/socket-mode` watches a diagnostics channel every undici WebSocket in
+  the process publishes to and warns about any that is not an instance of its own copy of
+  undici — and the Buzz relay connection is opened with Node's built-in `WebSocket`, which
+  is a different copy (reported upstream as slackapi/node-slack-sdk#2743). The adapter now
+  hands socket-mode a logger that drops that one warning. Socket-mode's other lines,
+  including the one that says a stale Slack connection is being recycled, still reach
+  stderr, now under the name `socket-mode`.
+
 - **The chart refuses `worker` beside `prompt: true`, as it already refused `budget`.** A
   prompt job renders no `CronJob`, so a `worker` block mirrored onto one was read by nothing:
   the values passed the schema and rendered clean, with no sign that the ServiceAccount,
