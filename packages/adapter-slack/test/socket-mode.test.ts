@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { SocketModeClient } from "@slack/socket-mode";
 import { describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket as ServerSocket } from "ws";
-import { SocketModeLogger } from "../src/slack.ts";
+import { SlackAdapter, SocketModeLogger } from "../src/slack.ts";
 
 /**
  * Enough of Slack for socket-mode to come up: `apps.connections.open` hands out the
@@ -39,15 +39,23 @@ async function fakeSlack() {
       socket.ping();
       await pong;
     },
-    close() {
+    async close() {
       for (const socket of sockets) socket.terminate();
-      wss.close();
-      http.close();
+      await Promise.all([
+        new Promise<void>((resolve) => wss.close(() => resolve())),
+        new Promise<void>((resolve) => http.close(() => resolve())),
+      ]);
     },
   };
 }
 
 describe("SocketModeLogger", () => {
+  it("is what SlackAdapter hands SocketModeClient when no socket is injected", () => {
+    const adapter = new SlackAdapter({ botToken: "xoxb-test", appToken: "xapp-test", channels: [] });
+    const { socket } = adapter as unknown as { socket: { logger: unknown } };
+    expect(socket.logger).toBeInstanceOf(SocketModeLogger);
+  });
+
   it("drops the warning about pings on sockets that are not Slack's, and nothing else", async () => {
     const logged: unknown[][] = [];
     const warn = vi.spyOn(console, "warn").mockImplementation((...line) => void logged.push(line));
@@ -80,7 +88,7 @@ describe("SocketModeLogger", () => {
       ]);
       relay.close();
     } finally {
-      slack.close();
+      await slack.close();
       warn.mockRestore();
     }
   });
