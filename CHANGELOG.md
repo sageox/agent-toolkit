@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Scheduled command jobs can share the agent's warm code index read-only.** Chart
+  0.15.0 adds `persistence.jobCodeIndex`, disabled by default, to mount the index and
+  checkouts using the existing same-node affinity. The runtime now pins ox 0.15.0,
+  which supports read-only search. Checkout-only deployments keep their existing
+  behavior. External worker jobs retain their workspace isolation; scheduled prompt
+  jobs already use the gateway's code tools. The job contract documents data-directory
+  setup, readiness checks, and the explicit agent flag for non-interactive prime calls.
+
 - **Codex can run as an agent's brain over ACP, alongside Claude.** Select it with
   `sageox-agent brain codex [--model <id>]`; setup and doctor use the agent's
   `OPENAI_API_KEY`. Both providers share channel sessions, memory, MCP tools, and

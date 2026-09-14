@@ -42,12 +42,12 @@ RUN apt-get update \
 # The gateway runs ox itself — the credential stays on this side of the brain boundary.
 # Pin the release and verify it so rebuilding this image cannot silently install a newer
 # binary. Debian's architecture names match the SageOx release names we support.
-ARG OX_VERSION=0.14.3
+ARG OX_VERSION=0.15.0
 RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) checksum="57a3da98394bc34f0ac72855cf8a88b86d11fdb87b4e82fff881e8801f4b1f27" ;; \
-      arm64) checksum="626a2ae15b32dc227558b472597e7092a3f324b6977967ad4cd40e06d7a96fdd" ;; \
+      amd64) checksum="ca87bf2fe57fd198a61616e44f41d8ead72b6b904dd82559cc2a47936e17a829" ;; \
+      arm64) checksum="86ea6101519676226646b1a3e33175561d234dedbdbb735df9e5225fff930fac" ;; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     archive="ox_${OX_VERSION}_linux_${arch}.tar.gz"; \

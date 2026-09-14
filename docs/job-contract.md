@@ -146,12 +146,28 @@ agent is a mount the deployment gives it
 ([`sharedVolumes`](../deploy/helm/README.md#jobs) is the Kubernetes spelling); a working
 tree is not that, which is why the checkouts arrive read-only or not at all.
 
-**The index does not travel with them.** `ox` opens its store read-write, so pointed at a
-read-only one it reports corruption: `ox code search` errors, and `ox code status` answers
-zeroes over `index_exists: true`. A deployment that shares checkouts therefore shares the
-checkouts alone, and a body's `ox` finds no index rather than one that reads as empty.
-`ox query` is API-backed and needs no local store, so it works wherever the job has network
-and a credential.
+**The index is a separate opt-in.** `persistence.jobCheckouts` shares only checkouts.
+`persistence.jobCodeIndex` shares both the checkouts and `workspace/ox-data` read-only for
+scheduled local command jobs (`run` without `worker`). It requires ox 0.15.0 or newer,
+which the runtime image now includes. External worker jobs and their launchers remain
+isolated from the workspace. Scheduled `prompt` jobs use the gateway's existing code tools
+and need no job mount.
+`ox query` is API-backed and needs no local code index, so it remains available wherever
+the job has network and a credential.
+
+### Searching a shared code index
+
+For a scheduled local command job, enable `persistence.jobCodeIndex`, set `XDG_DATA_HOME`
+in `run.env`, and run ox from the selected checkout. The chart ships the complete
+[configuration and readiness check](../deploy/helm/README.md#a-job-that-searches-the-agents-code-index)
+so a copied chart carries the instructions it needs. The check refuses missing, empty,
+unreadable, or accidentally writable indexes; a failed search must fail the body, never
+become an empty result or trigger a rebuild of the agent's store.
+
+For standing team context, a non-interactive body must pass an explicit agent name, for
+example `ox agent prime --agent claude-code`, from the checkout. Check its exit code and retain
+stderr; a failed prime must not silently become an empty context section. Authentication
+for team context is still a separately declared job credential.
 
 ## What the job writes back
 

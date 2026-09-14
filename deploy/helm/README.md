@@ -51,7 +51,7 @@ Or depend on it, and nest this chart's values under its name. Helm hands every s
 # Chart.yaml
 dependencies:
   - name: agent
-    version: 0.14.0
+    version: 0.15.0
     repository: "file://../agent-toolkit/deploy/helm"
 ```
 
@@ -394,10 +394,10 @@ a second node.
 
 ### A job that reads the agent's checkouts
 
-The one thing on that claim a scheduled run cannot cheaply build for itself is the
-repository checkouts under `workspace/repos`. The agent Pod clones them at startup and only
-fast-forwards them afterwards; a job Pod starting from nothing pays the whole clone out of
-its budget, every tick. `persistence.jobCheckouts` mounts them into this agent's CronJob
+The repository checkouts under `workspace/repos` are expensive to rebuild on every tick.
+The agent Pod clones them at startup and only fast-forwards them afterwards; a job Pod
+starting from nothing pays the whole clone out of its budget, every tick.
+`persistence.jobCheckouts` mounts them into this agent's CronJob
 Pods, read-only:
 
 ```yaml
@@ -415,11 +415,8 @@ started from chat already finds it
 Three things this deliberately does not do.
 
 **It does not hand over the claim.** The mount is `subPath`-narrowed to `workspace/repos`,
-so `state.json` and the local memory vault stay in the Deployment Pod. `workspace/ox-data`
-— the `ox` code index — is left out for a second reason: `ox` opens its store read-write, so
-against a read-only one it reports corruption, `ox code search` errors, and `ox code status`
-answers zeroes over `index_exists: true`. An index that reads as empty is worse for a job
-than no index at all, so a job body's `ox` finds none and says so.
+so `state.json` and the local memory vault stay in the Deployment Pod. This setting also
+leaves out `workspace/ox-data`; sharing that index requires the separate opt-in below.
 
 **It does not make the tree writable.** `readOnly` is on the mount, so the kernel refuses:
 the agent fast-forwards those trees at every start, and a body writing there is a second
@@ -432,7 +429,74 @@ carry a required `podAffinity` onto the node the Deployment Pod runs on. While t
 missing — a drain, a rescheduling, an agent scaled to zero — the job Pod is unschedulable
 and the tick is lost as a `DeadlineExceeded` Job. That is the intended behaviour: a body
 written to read code, running without the code, is a green run that proved nothing. Leave
-`jobCheckouts` off for an agent whose jobs must fire while the agent itself is down.
+both `jobCheckouts` and `jobCodeIndex` off for an agent whose jobs must fire while the agent
+itself is down.
+
+### A job that searches the agent's code index
+
+**Requires ox 0.15.0 or newer, included in the runtime image built from this revision.**
+Deploy that image before enabling this setting. Earlier images with ox 0.14.3 cannot read
+a read-only index; Helm cannot inspect the binary inside `imageRef`.
+
+```yaml
+agents:
+  beekeeper:
+    persistence:
+      size: 20Gi
+      jobCodeIndex: true
+```
+
+`jobCodeIndex` applies to scheduled local command jobs (`run` without `worker`). It
+defaults to false and implies checkout sharing, even when `jobCheckouts` is false. It adds
+a read-only mount of `workspace/ox-data` from the same claim, with the same required
+affinity and deadline behavior described above. `/agents` remains the job's own
+`emptyDir`; neither mount exposes the agent's cursors or memory vault. Existing
+`jobCheckouts: true` deployments continue sharing only checkouts. External worker jobs
+and their launchers remain isolated from the workspace. Scheduled `prompt` jobs run in the
+gateway and already use its code tools; they need neither setting.
+
+After deploying ox 0.15.0 or newer and enabling `persistence.jobCodeIndex`,
+set the data directory through the existing job environment. Helm mounts the directories;
+it does not add variables to the job body's declared environment.
+
+```yaml
+jobs:
+  - slug: nightly
+    run:
+      command: ./nightly.sh
+      env:
+        XDG_DATA_HOME: /agents/beekeeper/workspace/ox-data
+```
+
+Use the absolute mounted path for your agent. In `nightly.sh`, select a repository and
+check that ox can actually read the shared index before searching:
+
+```sh
+set -eu
+: "${XDG_DATA_HOME:?set the shared index path in run.env}"
+if [ ! -d "$XDG_DATA_HOME" ]; then
+  echo "shared code index is not mounted: $XDG_DATA_HOME" >&2
+  exit 1
+fi
+git -C workspace/repos/acme--widgets rev-parse --verify HEAD >/dev/null
+cd workspace/repos/acme--widgets
+status=$(ox code status --json)
+printf '%s\n' "$status" | node -e '
+  const status = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+  if (status.index_exists !== true || status.read_only !== true || status.open_error ||
+      !(status.commits > 0)) {
+    console.error("shared code index is not ready:", status.open_error || "missing, empty, or not read-only");
+    process.exit(1);
+  }
+'
+ox code search "your query" --json
+```
+
+This check is for a read-only job mount: it also refuses an older ox binary that omits
+`read_only`, and a writable directory accidentally supplied in its place. A failed status
+or search must fail the body; do not convert it into an empty result or run `ox index code`
+to repair it. The agent remains the only index writer. A successful check is not a lock:
+the agent can update the store during the run, so handle a later search failure too.
 
 ### A job that reads the Kubernetes API
 

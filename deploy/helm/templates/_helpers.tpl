@@ -129,10 +129,16 @@ bundle.
 {{- define "agent.agentVolumeMounts" -}}
 - name: agent-data
   mountPath: /agents
-{{- if and .job (not .job.worker) .agent.persistence.jobCheckouts }}
+{{- if and .job (not .job.worker) (or .agent.persistence.jobCheckouts .agent.persistence.jobCodeIndex) }}
 - name: checkouts
   mountPath: /agents/{{ .name }}/workspace/repos
   subPath: {{ .name }}/workspace/repos
+  readOnly: true
+{{- end }}
+{{- if and .job (not .job.worker) .agent.persistence.jobCodeIndex }}
+- name: checkouts
+  mountPath: /agents/{{ .name }}/workspace/ox-data
+  subPath: {{ .name }}/workspace/ox-data
   readOnly: true
 {{- end }}
 {{- range $volume := .agent.sharedVolumes }}
@@ -202,13 +208,11 @@ bundle from `/config`, reads its kill switch through the relay, and writes its v
 the container's own tmpdir. Durable state a job body does share with the agent goes on a
 `sharedVolumes` claim, which the operator backs with an access mode that allows it.
 
-`persistence.jobCheckouts` is the one exception, and it is the same claim a second time:
-read-only, and narrowed by `subPath` to `workspace/repos`, the repository checkouts
-`sageox-agent run` clones and fast-forwards. The Pod affinity in `cronjob.yaml` is what
-makes that attachable at all. Narrowed rather than the whole claim, because two things on it
-are not a job's to read: `state.json` and the local memory vault are the agent's own, and
-`workspace/ox-data` is an index `ox` opens read-write — pointed at a store it cannot write,
-it reports corruption and answers a search from nothing, which is worse than having none.
+`persistence.jobCheckouts` mounts `workspace/repos` from that claim read-only.
+`persistence.jobCodeIndex` also mounts `workspace/ox-data`, and implies the checkouts mount.
+Both use the required Pod affinity in `cronjob.yaml` and narrow each mount by `subPath`,
+so `state.json` and the local memory vault stay private. These mounts are for local command
+jobs only; external workers stay isolated. Index sharing requires ox 0.15.0 or newer.
 
 `readOnly` sits on the mount rather than on the claim reference: the kubelet creates a
 missing `subPath` directory on the volume and cannot do that through a read-only attach, and
@@ -228,7 +232,7 @@ No volume at all is the case where the bundle rides inside `bundle.stageImage` i
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}
 {{- end }}
-{{- if and .job (not .job.worker) .agent.persistence.jobCheckouts }}
+{{- if and .job (not .job.worker) (or .agent.persistence.jobCheckouts .agent.persistence.jobCodeIndex) }}
 - name: checkouts
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}

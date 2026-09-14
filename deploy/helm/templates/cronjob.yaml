@@ -85,7 +85,7 @@ spec:
           tolerations:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if and (not $job.worker) $agent.persistence.jobCheckouts }}
+          {{- if and (not $job.worker) (or $agent.persistence.jobCheckouts $agent.persistence.jobCodeIndex) }}
           # The checkouts mount is the agent's own `ReadWriteOnce` claim, and one node at a
           # time can attach it. Required and not preferred: a Pod the scheduler placed
           # anywhere else would wait behind a `Multi-Attach` event with empty logs, while an
