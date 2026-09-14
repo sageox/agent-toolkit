@@ -199,6 +199,30 @@ describe("the surface read server", () => {
     }
   });
 
+  it("refuses an argument no tool declares, rather than dropping it and answering anyway", async () => {
+    const surface = reader();
+    const { call } = server(surface.value);
+
+    // Stripped instead, a misspelt window is a read with no window: the whole channel comes
+    // back to a caller that believes it asked for a day, which is the failure the window
+    // exists to remove.
+    await expect(
+      call("read_channel", { surface: "buzz", channel: "hive", withinhours: 24 }),
+    ).rejects.toThrow(/withinhours/);
+    // A roster read has no window, and one that quietly took the argument would be
+    // answering a question it did not apply.
+    await expect(
+      call("list_members", { surface: "buzz", channel: "hive", withinHours: 24 }),
+    ).rejects.toThrow(/withinHours/);
+    expect(surface.limits).toEqual([]);
+
+    // The advertised contract says what the parse enforces, so a client that validates
+    // before calling refuses the same argument the server would.
+    for (const tool of await handleTools(surface.value)) {
+      expect(tool.inputSchema).toMatchObject({ additionalProperties: false });
+    }
+  });
+
   it("refuses a read the surface cannot make, rather than answering emptily", async () => {
     const { call } = server(reader({ listMembers: undefined, readChannel: undefined }).value);
 
