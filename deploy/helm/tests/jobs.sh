@@ -106,16 +106,17 @@ refuses 'a mirrored prompt job marked false' 'prompt' --set 'agents.harry.jobs[2
 # A shared claim mounted inside the bundle. The runtime cannot see this one — a mount point
 # is an ordinary directory to `realpath`, so the prompt file is genuinely inside the agent
 # directory — which is why the refusal has to be here, where the mount is made.
-shared="--set agents.harry.sharedVolumes[0].name=shared --set agents.harry.sharedVolumes[0].claimName=team-share"
+shared=(--set 'agents.harry.sharedVolumes[0].name=shared'
+        --set 'agents.harry.sharedVolumes[0].claimName=team-share')
 refuses 'a shared claim mounted over the bundle' 'inside that agent'"'"'s own bundle directory' \
-  $shared --set 'agents.harry.sharedVolumes[0].mountPath=/agents/harry/shared'
+  "${shared[@]}" --set 'agents.harry.sharedVolumes[0].mountPath=/agents/harry/shared'
 refuses 'a shared claim mounted at the bundle root' 'inside that agent'"'"'s own bundle directory' \
-  $shared --set 'agents.harry.sharedVolumes[0].mountPath=/agents/harry/'
+  "${shared[@]}" --set 'agents.harry.sharedVolumes[0].mountPath=/agents/harry/'
 # And anywhere else still renders, mounted in both the Deployment and the scheduled Pods.
 # Counted: the `stage-config` init container mounts the claim too, so `present` alone would
 # pass with the main container's mount gone.
 for template in deployment cronjob; do
-  rendered=$(helm template agents "$chart" --values "$values" $shared \
+  rendered=$(helm template agents "$chart" --values "$values" "${shared[@]}" \
     --set 'agents.harry.sharedVolumes[0].mountPath=/srv/shared' --show-only "templates/$template.yaml")
   counted 2 'mountPath: "/srv/shared"'
 done
