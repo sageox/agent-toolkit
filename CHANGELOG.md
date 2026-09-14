@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including the one that says a stale Slack connection is being recycled, still reach
   stderr, now under the name `socket-mode`.
 
+- **The chart refuses `worker` beside `prompt: true`, as it already refused `budget`.** A
+  prompt job renders no `CronJob`, so a `worker` block mirrored onto one was read by nothing:
+  the values passed the schema and rendered clean, with no sign that the ServiceAccount,
+  Secrets and resources it named applied nowhere. The runtime already refuses the pair at
+  manifest load; the chart now refuses it at render. Chart 0.15.0, with the entry below;
+  the runtime is untouched.
+
 - **Scheduled command jobs can share the agent's warm code index read-only.** Chart
   0.15.0 adds `persistence.jobCodeIndex`, disabled by default, to mount the index and
   checkouts using the existing same-node affinity. The runtime now pins ox 0.15.0,

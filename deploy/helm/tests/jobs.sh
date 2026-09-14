@@ -95,26 +95,38 @@ absent "inbox"
 # would exec `job run daily-digest` against a job that has no command to run.
 absent "daily-digest"
 
-# The mirror still has to carry it — and refuse the two shapes that would make it a lie: a
-# prompt job stating a budget nothing here bounds, and a mirrored `prompt: false`, which
-# would read as a declaration that this job is not one.
+# The mirror still has to carry it — and refuse the three shapes that would make it a lie: a
+# prompt job stating a budget nothing here bounds, one naming a worker for a Pod that is
+# never rendered, and a mirrored `prompt: false`, which would read as a declaration that
+# this job is not one.
 refuses 'a mirrored prompt job with a budget' 'budget' \
   --set 'agents.harry.jobs[2].budget.wallClockMs=1000' \
   --set 'agents.harry.jobs[2].budget.deadlineHeadroomMs=1000'
+# With a dispatcher, because without one validate.yaml refuses the worker first, for a
+# reason that has nothing to do with the prompt body — and with one, these values used to
+# render clean and drop the worker without a word.
+refuses 'a mirrored prompt job with a worker' "at '/agents/harry/jobs/2/worker': false schema" \
+  --set 'agents.harry.dispatcher.tokenSecret=dispatcher-token' \
+  --set 'agents.harry.jobs[2].worker.serviceAccountName=task-worker'
 refuses 'a mirrored prompt job marked false' 'prompt' --set 'agents.harry.jobs[2].prompt=false'
 
 # A shared claim mounted inside the bundle. The runtime cannot see this one — a mount point
 # is an ordinary directory to `realpath`, so the prompt file is genuinely inside the agent
 # directory — which is why the refusal has to be here, where the mount is made.
-shared="--set agents.harry.sharedVolumes[0].name=shared --set agents.harry.sharedVolumes[0].claimName=team-share"
+shared=(--set 'agents.harry.sharedVolumes[0].name=shared'
+        --set 'agents.harry.sharedVolumes[0].claimName=team-share')
 refuses 'a shared claim mounted over the bundle' 'inside that agent'"'"'s own bundle directory' \
-  $shared --set 'agents.harry.sharedVolumes[0].mountPath=/agents/harry/shared'
+  "${shared[@]}" --set 'agents.harry.sharedVolumes[0].mountPath=/agents/harry/shared'
 refuses 'a shared claim mounted at the bundle root' 'inside that agent'"'"'s own bundle directory' \
-  $shared --set 'agents.harry.sharedVolumes[0].mountPath=/agents/harry/'
+  "${shared[@]}" --set 'agents.harry.sharedVolumes[0].mountPath=/agents/harry/'
 # And anywhere else still renders, mounted in both the Deployment and the scheduled Pods.
-rendered=$(helm template agents "$chart" --values "$values" $shared \
-  --set 'agents.harry.sharedVolumes[0].mountPath=/srv/shared' --show-only templates/cronjob.yaml)
-present 'mountPath: "/srv/shared"'
+# Counted: the `stage-config` init container mounts the claim too, so `present` alone would
+# pass with the main container's mount gone.
+for template in deployment cronjob; do
+  rendered=$(helm template agents "$chart" --values "$values" "${shared[@]}" \
+    --set 'agents.harry.sharedVolumes[0].mountPath=/srv/shared' --show-only "templates/$template.yaml")
+  counted 2 'mountPath: "/srv/shared"'
+done
 
 present 'schedule: "0 */4 * * 1-5"'
 present 'timeZone: "America/New_York"'
