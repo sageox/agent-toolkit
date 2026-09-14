@@ -711,13 +711,13 @@ thousand messages a request. If your agent runs on an unlisted distributed app i
 ceiling it is documented to be: you will often get fewer messages than you asked for.
 
 **Ask for a period with `withinHours`, never by reading a channel and filtering it.**
-`read_channel(channel: "status", withinHours: 24)` is the last day, cut by the gateway's
-clock before either surface is asked — `Filter.since` on Buzz, `oldest` on Slack. Leaving
-the window to the agent is how a scheduled digest goes wrong with nothing anywhere
-reporting it: a job set for 18:00 Pacific fires at 01:00 UTC on the *next* calendar day, so
-an agent handed that date alongside its own schedule can place "now" a day ahead, open a
-window that starts after the newest message in the channel, and report the busiest day the
-channel has had as silence. The read succeeds, the job passes, and the only artifact is a
+`read_channel(surface: "slack", channel: "status", withinHours: 24)` is the last day, cut by
+the gateway's clock before either surface is asked — `Filter.since` on Buzz, `oldest` on
+Slack. Leaving the window to the agent is how a scheduled digest goes wrong with nothing
+anywhere reporting it: a job set for 18:00 Pacific fires at 01:00 UTC on the *next* calendar
+day, so an agent handed that date alongside its own schedule can place "now" a day ahead,
+open a window that starts after the newest message in the channel, and report the busiest
+day the channel has had as silence. The read succeeds, the job passes, and the only artifact is a
 summary that says the opposite of the truth. The window also keeps the answer small, which
 is the difference between a result the agent reads and one it has to slice up first.
 

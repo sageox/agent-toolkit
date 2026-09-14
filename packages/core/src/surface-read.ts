@@ -43,6 +43,16 @@ const MAX_MESSAGES = 200;
 const MS_PER_HOUR = 3_600_000;
 
 /**
+ * The longest window a channel read will take: a year.
+ *
+ * Not a cost bound — {@link MAX_MESSAGES} is that. What it stops is a window large enough to
+ * stop being one: `withinHours: 1e308` puts the cutoff at `-Infinity`, which `JSON.stringify`
+ * writes onto a Nostr filter as `null`, leaving a read with no window at all for a caller
+ * that believes it asked for a day. Refusing it is the only answer that is not a wrong one.
+ */
+const MAX_WINDOW_HOURS = 8_760;
+
+/**
  * What this agent can find out about the surfaces it is already connected to.
  *
  * Everything here is a question the agent's own transport can answer and the brain
@@ -141,7 +151,9 @@ const ChannelArgs = SurfaceArgs.extend({
 const ActorArgs = SurfaceArgs.extend({ id: z.string().min(1) });
 // Its own schema rather than a field on `ChannelArgs`: a roster read has no window to ask
 // for, and a tool that quietly accepted one would be answering a question it did not apply.
-const HistoryArgs = ChannelArgs.extend({ withinHours: z.number().positive().finite().optional() });
+const HistoryArgs = ChannelArgs.extend({
+  withinHours: z.number().positive().max(MAX_WINDOW_HOURS).optional(),
+});
 
 type ToolDecl = { name: string; description: string; inputSchema: unknown };
 
@@ -244,10 +256,12 @@ function tools(egress: SurfaceEgress): ToolDecl[] {
           withinHours: {
             type: "number",
             exclusiveMinimum: 0,
+            maximum: MAX_WINDOW_HOURS,
             description:
               "Only messages from this many hours before now, where now is read off the " +
-              "host's clock when the call is made — `24` for the last day. Unset reads the " +
-              "recent end of the channel whatever its age.",
+              "host's clock when the call is made — `24` for the last day. At most " +
+              `${MAX_WINDOW_HOURS}, and a longer one is refused rather than widened. Unset ` +
+              "reads the recent end of the channel whatever its age.",
           },
         },
         required: ["surface", "channel"],

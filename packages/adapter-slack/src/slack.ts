@@ -627,10 +627,12 @@ export class SlackAdapter implements SurfaceAdapter {
     return {
       messages:
         limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit)),
-      // Whatever Slack was still offering when the walk stopped. Every way of stopping short
-      // of the window's start — filling `limit`, running into the page bound, asking for one
-      // page — leaves a cursor behind, and reaching the start is the one that does not.
-      more: cursor !== undefined,
+      // Two ways a message inside the window is left behind, and only one of them has a
+      // cursor to show for it. The other is the slice above: a page asks for `HISTORY_PAGE`
+      // records whatever the caller wants back, so the page that reaches the window's start
+      // can still hold far more than `limit`, and dropping the oldest of them is not an
+      // answer about a quiet window.
+      more: cursor !== undefined || (limit !== undefined && replies.length > limit),
     };
   }
 

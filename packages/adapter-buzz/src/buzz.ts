@@ -531,6 +531,10 @@ export class BuzzAdapter implements SurfaceAdapter {
       // holds exactly that many with the same list and the same EOSE. The extra event is
       // the whole difference between "there is more" and "that is all of it".
       ...(limit !== undefined ? { limit: limit + 1 } : {}),
+      // Floored, so a fractional cutoff widens the window by under a second rather than
+      // narrowing it. `created_at` is whole seconds and inclusive, so the boundary second is
+      // either in or out for every event in it — and a read whose failure mode is reporting
+      // a busy channel as quiet takes the second it does not need over the one it does.
       ...(since !== undefined ? { since: Math.floor(since / 1000) } : {}),
     });
     const replies = this.ordered(events);

@@ -1775,6 +1775,31 @@ describe("SlackAdapter reads the surface it is on", () => {
     expect(api.historyCalls).toHaveLength(1);
   });
 
+  it("says `more` when one page ends the window and still holds more than `limit`", async () => {
+    const { instance, api } = adapter();
+    await instance.start(() => {});
+    // No cursor, so the window ends here — and a page still carries `HISTORY_PAGE` records
+    // whatever the caller asked for, so ending the window says nothing about how much of it
+    // fits in `limit`.
+    api.histories = [
+      {
+        messages: [
+          { type: "message", user: "U0BOB", text: "newer", ts: "1786761002.000000" },
+          { type: "message", user: "U0ALICE", text: "older", ts: "1786761001.000000" },
+        ],
+      },
+    ];
+
+    const { messages, more } = await instance.readChannel!(
+      { surface: "slack", id: "GENG", isPublic: false },
+      1,
+    );
+    expect(messages.map((message) => message.text)).toEqual(["newer"]);
+    // `older` was read, dropped by the ceiling, and is inside the window. Answering `false`
+    // here is the same claim as an empty channel: that there is nothing further back.
+    expect(more).toBe(true);
+  });
+
   it("asks Slack for the window rather than reading a channel and sifting it", async () => {
     const { instance, api } = adapter();
     await instance.start(() => {});
