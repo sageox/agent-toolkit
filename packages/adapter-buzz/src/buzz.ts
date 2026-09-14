@@ -514,8 +514,12 @@ export class BuzzAdapter implements SurfaceAdapter {
    * operator configured, so no id a caller computes reaches a channel this agent does not
    * serve. A Nostr `limit` takes the newest that many, which is the end of the channel a
    * reader wants; they are then ordered oldest first, the way a person reads it.
+   *
+   * `since` is the same filter field the live subscription already carries, in the relay's
+   * own seconds: the window is cut on the wire, so a caller asking about the last day never
+   * pays for the rest of the channel.
    */
-  async readChannel(channel: ChannelRef, limit?: number): Promise<ChannelHistory> {
+  async readChannel(channel: ChannelRef, limit?: number, since?: number): Promise<ChannelHistory> {
     const relay = this.relay;
     if (!relay) throw new Error("BuzzAdapter.start() must be called before readChannel()");
     this.assertConfigured(channel);
@@ -523,7 +527,15 @@ export class BuzzAdapter implements SurfaceAdapter {
     const events = await this.query(relay, {
       kinds: [BUZZ_DEFAULTS.kind],
       [`#${BUZZ_DEFAULTS.channelTag}`]: [channel.id],
-      ...(limit !== undefined ? { limit } : {}),
+      // One past the ceiling, because the relay answers a filled `limit` and a window that
+      // holds exactly that many with the same list and the same EOSE. The extra event is
+      // the whole difference between "there is more" and "that is all of it".
+      ...(limit !== undefined ? { limit: limit + 1 } : {}),
+      // Floored, so a fractional cutoff widens the window by under a second rather than
+      // narrowing it. `created_at` is whole seconds and inclusive, so the boundary second is
+      // either in or out for every event in it — and a read whose failure mode is reporting
+      // a busy channel as quiet takes the second it does not need over the one it does.
+      ...(since !== undefined ? { since: Math.floor(since / 1000) } : {}),
     });
     const replies = this.ordered(events);
     return {
@@ -531,10 +543,10 @@ export class BuzzAdapter implements SurfaceAdapter {
       // line back, because `-0` is not a negative index.
       messages:
         limit === undefined ? replies : replies.slice(Math.max(0, replies.length - limit)),
-      // Never `more`: one REQ ends on the relay's EOSE, which says it has sent everything
-      // it stores for the filter, so a short answer here is the relay's whole answer. There
-      // is no cursor to stop early on and no page bound to run into.
-      more: false,
+      // One REQ ends on the relay's EOSE, which says it sent everything it stores for the
+      // filter — so `limit` is the only thing that can leave a message inside the window
+      // behind, and the event asked for beyond it is how that is known rather than guessed.
+      more: limit !== undefined && replies.length > limit,
     };
   }
 

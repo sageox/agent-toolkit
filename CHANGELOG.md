@@ -15,6 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   jobs already use the gateway's code tools. The job contract documents data-directory
   setup, readiness checks, and the explicit agent flag for non-interactive prime calls.
 
+- **`read_channel` takes a time window, and the gateway's clock cuts it.** Pass
+  `withinHours: 24` and nothing older comes back: it becomes `Filter.since` on Buzz and
+  `oldest` on Slack, so the surface does the cutting and the answer is the period rather
+  than a count to be sifted. The brain names a duration and never an instant, which is
+  where this failed silently — a digest job scheduled at 18:00 Pacific fires at 01:00 UTC
+  on the *next* calendar day, so a turn given that date and told its own schedule placed
+  "now" a day ahead, opened a window starting after the newest message in the channel, and
+  reported the busiest day the channel had had as "nothing in the last 24h". Nothing
+  flagged it: the read returned `ok`, the turn passed, and the post succeeded. Alongside
+  it, `more` now answers the question a caller is asking — true means there are messages
+  inside the window, older than the oldest one returned, that this read did not return.
+  It was `false` on Buzz whenever a read filled its `limit`, because one REQ ends on EOSE
+  and that was read as the whole channel, so a channel busier than `limit` reported as
+  fully read and the authors it never paged back to read as quiet.
+
 - **Codex can run as an agent's brain over ACP, alongside Claude.** Select it with
   `sageox-agent brain codex [--model <id>]`; setup and doctor use the agent's
   `OPENAI_API_KEY`. Both providers share channel sessions, memory, MCP tools, and

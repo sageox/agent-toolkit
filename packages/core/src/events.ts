@@ -89,15 +89,15 @@ export interface GuardedMessage {
  * exceptional one, and throwing on it fails ordinary reads of ordinary channels.
  */
 export interface ChannelHistory {
-  /** Oldest first, at most the `limit` asked for. */
+  /** Oldest first, at most the `limit` asked for, and always the recent end of the window. */
   messages: readonly ThreadReply[];
   /**
-   * History the read did not reach, and could have.
+   * Messages inside the window this read did not return, older than the oldest one here.
    *
-   * `true` only when the read came back short of `limit` **and** the surface was still
-   * offering more — so these messages are the recent end of what was read rather than the
-   * recent end of the channel. Never `true` when the channel itself ran out, which is the
-   * one short answer that is a complete one.
+   * `true` whenever the surface was still offering history when the read stopped — because
+   * `limit` was reached, or because the walk ran into its own page bound. Never `true` when
+   * the window itself ran out, which is the one short answer that is a complete one: with a
+   * `since`, that is "you have seen the whole period you asked about".
    */
   more: boolean;
 }

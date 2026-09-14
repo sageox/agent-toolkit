@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SurfaceAdapter } from "../src/adapter.ts";
 import type { ActorRef, ChannelRef } from "../src/events.ts";
 import { loadManifest } from "../src/manifest.ts";
@@ -28,6 +28,8 @@ const IDA: ActorRef = {
 function reader(over: Partial<SurfaceAdapter> = {}) {
   const limits: Array<number | undefined> = [];
   const channels: string[] = [];
+  /** Only a channel read has a window, so this is not pushed beside every `limit`. */
+  const sinces: Array<number | undefined> = [];
   const value: SurfaceAdapter = {
     kind: "buzz",
     start: async () => {},
@@ -42,9 +44,10 @@ function reader(over: Partial<SurfaceAdapter> = {}) {
       return [IDA];
     },
     describeActor: async (id) => (id === IDA.id ? IDA : undefined),
-    readChannel: async (channel, limit) => {
+    readChannel: async (channel, limit, since) => {
       channels.push(channel.id);
       limits.push(limit);
+      sinces.push(since);
       return {
         messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
         more: false,
@@ -52,7 +55,7 @@ function reader(over: Partial<SurfaceAdapter> = {}) {
     },
     ...over,
   };
-  return { value, limits, channels };
+  return { value, limits, channels, sinces };
 }
 
 const allowAll = () =>
@@ -161,6 +164,39 @@ describe("the surface read server", () => {
     // filterless read with whatever it stores, so the bound has to be here rather than in
     // whatever the brain happened to ask for.
     expect(surface.limits).toEqual([200, 200, 200]);
+  });
+
+  it("cuts a channel read's window on this clock, so the brain never names an instant", async () => {
+    const surface = reader();
+    const { call } = server(surface.value);
+    // 18:00 Pacific on the 13th, which is where the digest went wrong: the UTC date the turn
+    // is handed is already the 14th, so a window the brain works out from it opens a day
+    // ahead of this one.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-14T01:00:00.000Z"));
+
+    try {
+      await call("read_channel", { surface: "buzz", channel: "hive", withinHours: 24 });
+      // The brain said "24 hours" and nothing else, and the instant that reaches the surface
+      // is this process's own — so a turn holding the wrong date cannot open its window
+      // after the newest message in the channel and report a busy day as silence.
+      expect(surface.sinces.at(-1)).toBe(Date.parse("2026-09-13T01:00:00.000Z"));
+
+      // Unset stays unset: a window is something to ask for, not a default period a caller
+      // has to know to widen.
+      await call("read_channel", { surface: "buzz", channel: "hive" });
+      expect(surface.sinces.at(-1)).toBeUndefined();
+
+      // A year is a window; 1e308 is an arithmetic accident, and taking it would put the
+      // cutoff at `-Infinity` — which a Nostr filter carries as `null`, so the read would
+      // answer the whole channel to a caller that believes it asked for a period.
+      await expect(
+        call("read_channel", { surface: "buzz", channel: "hive", withinHours: 1e308 }),
+      ).rejects.toThrow();
+      expect(surface.sinces).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuses a read the surface cannot make, rather than answering emptily", async () => {
