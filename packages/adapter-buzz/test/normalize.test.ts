@@ -64,7 +64,9 @@ describe("toInboundEvent", () => {
     const reply = toThreadReply(chatEvent(), { pubkey: mePk, agents: new Map([[authorPk, "ida"]]) });
     expect(reply.author.isAgent).toBe(true);
     expect(reply.author.isSelf).toBe(false);
+    expect(reply.author.name).toBe("ida");
     expect(toThreadReply(chatEvent(), { pubkey: mePk }).author.isAgent).toBe(false);
+    expect(toThreadReply(chatEvent(), { pubkey: mePk }).author.name).toBeUndefined();
   });
 
   it("marks a channel public unless it is one the config called private", () => {
