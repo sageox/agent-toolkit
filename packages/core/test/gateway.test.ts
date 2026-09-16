@@ -1298,6 +1298,55 @@ describe("Gateway names what a turn left running", () => {
     await held.call;
   });
 
+  it("stays quiet while a second gateway in this process is mid-turn", async () => {
+    // The calls belong to the process, not to a gateway: `auditToolCall` is what every
+    // hosted and brokered server funnels through, and there is one of it. A gateway that
+    // counted only its own turns would speak for a call another gateway was still waiting
+    // on — and, worse, mark it told, so the gateway that owned it never reported it.
+    const f = postingAdapter([HIVE]);
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const manifest = ticking("limits: {turnTimeoutMs: 20}\n");
+    const holding = new Gateway({
+      manifest,
+      adapters: [postingAdapter([HIVE]).adapter],
+      brain: {
+        // eslint-disable-next-line require-yield
+        async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+          started();
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        },
+      },
+    });
+    const gw = new Gateway({ manifest, adapters: [f.adapter], brain: hangs });
+    await holding.start();
+    await gw.start();
+
+    const long = holding.tick(tickEv("watch"), { surface: "slack", channel: "C01" }, 60_000);
+    await running;
+    const held = serving("mcp__jobs__job_run");
+
+    const during = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+    expect(during.filter((line) => line.startsWith("tool_call_stranded"))).toEqual([]);
+
+    // And the call is still there to be named once the holder lets go, rather than having
+    // been consumed and marked by the gateway that did not own it. Named by the holder,
+    // because the claim belongs to whichever turn is last to end anywhere in the process.
+    const after = await logged(async () => {
+      release();
+      await long;
+    });
+    expect(after.filter((line) => line.startsWith("tool_call_stranded"))).toHaveLength(1);
+
+    held.land();
+    await held.call;
+  });
+
   it("stays quiet while another turn is running, because a call names no turn", async () => {
     // The line claims nobody is left to read the answer, and while a second turn is running
     // that is not yet true — the call in flight may well be its. Said later rather than

@@ -181,7 +181,7 @@ One more line is written about tool calls, by the gateway rather than by the cal
 tool_call_stranded tool="mcp__jobs__job_run" ms=87762
 ```
 
-Every turn has ended and that call is still running. Nothing here cancels it, so it finishes
+Every turn this process was running has ended and that call is still going. Nothing here cancels it, so it finishes
 and writes its own `tool_call` line whenever it lands — reading `ok` if it worked, because
 from the call's side it did. Nobody read the answer. Read it against the `turn_done` and
 `turn_failed` lines immediately above it.

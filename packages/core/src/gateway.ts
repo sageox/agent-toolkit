@@ -8,7 +8,7 @@ import { SurfaceEgress, type LiveTurnHandle } from "./surface-egress.ts";
 import { TurnPolicy } from "./policy.ts";
 import { ChannelQueue } from "./queue.ts";
 import { TurnClock } from "./turn-clock.ts";
-import { takeStranded } from "./tool-audit.ts";
+import { takeStranded, turnListening } from "./tool-audit.ts";
 
 export interface GatewayOpts {
   manifest: AgentManifest;
@@ -91,8 +91,6 @@ export class Gateway {
   private queue: ChannelQueue;
   private egress: SurfaceEgress;
   private clock: TurnClock;
-  /** Turns this gateway is running right now — see {@link Gateway.reportStranded}. */
-  private running = 0;
   private stoppedReason?: string;
 
   constructor(private opts: GatewayOpts) {
@@ -419,7 +417,7 @@ export class Gateway {
     // turn is running and which of the two numbers it was given — a scheduled tick arrives
     // with its own, shorter one.
     const closeClock = this.clock.open(Date.now() + timeoutMs);
-    this.running++;
+    const closeAudit = turnListening();
     try {
       return await withTimeout(
         this.drive(turn, e, send, tally),
@@ -428,7 +426,7 @@ export class Gateway {
       );
     } finally {
       closeClock();
-      this.running--;
+      closeAudit();
       this.reportStranded();
       // An abandoned generator never runs its own `finally`, so the brain would never
       // close its ACP session on a failed send or a timeout. Returning it does.
@@ -450,24 +448,24 @@ export class Gateway {
    * in the channel before it was cut off — issue #44, where that was a message telling two
    * people a job had produced nothing, three seconds before the job posted its result.
    *
-   * Written here because the audit knows the calls and only this knows whether anyone is
-   * still listening. The tool name is the caller's and is quoted, as the audit quotes it.
+   * Written here because the audit decides *what* — it holds the calls and the count of
+   * turns still able to read one — while this is what turns that into a log line. The tool
+   * name is the caller's and is quoted, as the audit quotes it.
    *
-   * **No turn ids on the line, and only once `running` reaches zero.** Both follow from the
-   * one thing that is not knowable here: a `tools/call` names no turn, so with two channels
-   * mid-turn nothing can say whose call is whose. Reporting at the end of *a* turn would
-   * therefore have blamed whichever turn happened to finish last — a line pointing at a turn
-   * that never made the call, which is worse than no line. What is left that is checkable is
-   * the process-wide claim, and it is the one that matters: this call is still running and
-   * there is nothing left to read its answer. An operator reads it against the `turn_done`
-   * and `turn_failed` lines immediately above it.
+   * **No turn ids on the line, and nothing at all until every turn has ended.** Both follow
+   * from the one thing that is not knowable here: a `tools/call` names no turn, so with two
+   * channels mid-turn nothing can say whose call is whose. Reporting at the end of *a* turn
+   * would therefore have blamed whichever turn happened to finish last — a line pointing at
+   * a turn that never made the call, which is worse than no line. What is left that is
+   * checkable is the process-wide claim, and it is the one that matters: this call is still
+   * running and there is nothing left to read its answer. An operator reads it against the
+   * `turn_done` and `turn_failed` lines immediately above it.
    *
    * The cost is that a call stranded while another channel is still busy is named later than
    * it happened, and one that lands in that window is not named at all. Late and true beats
    * prompt and wrong in an audit log.
    */
   private reportStranded(): void {
-    if (this.running > 0) return;
     for (const { tool, ms } of takeStranded()) {
       console.warn(`tool_call_stranded tool=${JSON.stringify(tool)} ms=${ms}`);
     }

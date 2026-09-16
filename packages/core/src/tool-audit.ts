@@ -92,6 +92,27 @@ const MAX_ITEMS = 8;
 /** Calls this process has started and not answered yet. See {@link takeStranded}. */
 const inFlight = new Set<{ tool: string; started: number; told: boolean }>();
 
+/** Turns still able to read a result. See {@link turnListening}. */
+let listening = 0;
+
+/**
+ * Registers a turn for as long as it will read what its calls return.
+ *
+ * Counted here, beside the calls, because the two are halves of one question — *is anyone
+ * left to hear this?* — and the calls are this process's, not any one gateway's. A gateway
+ * counting its own turns answers that question only while it is the only gateway; a second
+ * one ending a turn would then speak for calls the first was still waiting on.
+ *
+ * The returned closer must run on every exit path. A turn that never closes is a turn this
+ * believes is still listening, and nothing is ever reported again.
+ */
+export function turnListening(): () => void {
+  listening++;
+  return () => {
+    listening--;
+  };
+}
+
 /**
  * Runs one tool call and records it, however it ends.
  *
@@ -139,10 +160,11 @@ export async function auditToolCall<T>(call: ToolCall, run: () => Promise<T>): P
  * work out whether that was one call or three. Reported once, at the first moment it is
  * true — which is also the earliest anyone could have acted on it.
  *
- * Nothing here interprets the set. The gateway knows whether any turn is still listening;
- * this knows the calls, and a call names no turn.
+ * Empty while any turn is still listening, because then the claim is not yet true: a call
+ * in flight may be that turn's, and a call names no turn.
  */
 export function takeStranded(): { tool: string; ms: number }[] {
+  if (listening > 0) return [];
   const now = Date.now();
   const stranded = [];
   for (const call of inFlight) {
