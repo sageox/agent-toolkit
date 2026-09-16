@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Gateway } from "../src/gateway.ts";
+import { auditToolCall } from "../src/tool-audit.ts";
+import { TurnClock } from "../src/turn-clock.ts";
 import { SurfaceEgress } from "../src/surface-egress.ts";
 import { MockBrain } from "../src/brain.ts";
 import { loadManifest } from "../src/manifest.ts";
@@ -1166,5 +1168,156 @@ describe("Gateway.tick", () => {
     const outcome = await gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" });
     expect(outcome.sent).toBe(0);
     expect((outcome.error as Error).message).toMatch(/turn timed out/);
+  });
+});
+
+/**
+ * What a turn leaves running when it stops listening.
+ *
+ * A tool call already in flight when the turn times out keeps going and answers into
+ * nothing: the queue slot is released, the generator is returned, and the call's own audit
+ * line — written whenever it finally lands — says `outcome=ok`, because from the call's
+ * side that is true. Issue #44 is what that costs. Nothing in the gateway's log said the
+ * result reached nobody, so the only trace was the message the brain had already sent.
+ */
+describe("Gateway names what a turn left running", () => {
+  const ticking = (extra: string) =>
+    loadManifest(
+      "name: t\nbrain: {provider: mock}\nrespondTo: owner-only\nowner: [U08NOBODY]\n" +
+        "surfaces: [{kind: slack, channels: [{id: C01, name: hive, reply: private}]}]\n" +
+        extra,
+    );
+
+  /** Captures the gateway's own lines while `work` runs. */
+  async function logged(work: () => Promise<unknown>): Promise<string[]> {
+    const lines: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((l) => void lines.push(String(l)));
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await work();
+      return lines;
+    } finally {
+      warn.mockRestore();
+      info.mockRestore();
+    }
+  }
+
+  /** A turn that will not end on its own, so only its own clock can end it. */
+  const hangs: Brain = {
+    // eslint-disable-next-line require-yield
+    async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+      await new Promise(() => {});
+    },
+  };
+
+  /** One call the gateway is serving, registered exactly as a real one is. */
+  function serving(tool: string) {
+    let land!: () => void;
+    const held = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    return { call: auditToolCall({ tool }, () => held), land };
+  }
+
+  it("names the call a timed-out turn abandoned", async () => {
+    const f = postingAdapter([HIVE]);
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain: hangs,
+    });
+    await gw.start();
+    const held = serving("mcp__jobs__job_run");
+
+    const lines = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+
+    const stranded = lines.filter((line) => line.startsWith("tool_call_stranded"));
+    expect(stranded).toHaveLength(1);
+    // The tool, so an operator knows which one, and the turn's own ids, so this line reads
+    // beside the `turn_failed` it belongs to.
+    expect(stranded[0]).toContain('tool="mcp__jobs__job_run"');
+    expect(stranded[0]).toContain("surface=slack");
+
+    held.land();
+    await held.call;
+  });
+
+  it("takes its deadline off the clock when the turn ends", async () => {
+    // The countdown `job_run` reads. A turn that left its deadline behind would leave the
+    // job tool weighing every later call against a bound that expired — and, once two have
+    // piled up, against nothing at all, which is silently the old behaviour back.
+    const f = postingAdapter([HIVE]);
+    const turnClock = new TurnClock();
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain: hangs,
+      turnClock,
+    });
+    await gw.start();
+
+    await gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" });
+    // Null because it holds nothing. One left behind would answer with a number.
+    expect(turnClock.remaining()).toBeNull();
+  });
+
+  it("says nothing about a turn that left nothing running", async () => {
+    const f = postingAdapter([HIVE]);
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain: hangs,
+    });
+    await gw.start();
+
+    const lines = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+    expect(lines.filter((line) => line.startsWith("tool_call_stranded"))).toEqual([]);
+  });
+
+  it("stays quiet while another turn is running, because a call names no turn", async () => {
+    // The audit's registry is this process's and a `tools/call` carries nothing that says
+    // which turn it belongs to. With a second turn still going, the call in flight may well
+    // be its — and a stranded line about a healthy call sends an operator after the wrong one.
+    const f = postingAdapter([HIVE]);
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    // One brain, two turns: the one on the channel with time left holds open, and the one
+    // under test hangs until its own 20ms runs out.
+    const brain: Brain = {
+      // eslint-disable-next-line require-yield
+      async *runTurn(e: InboundEvent): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        if (e.channel.id !== "C02") return void (await new Promise(() => {}));
+        started();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+    };
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain,
+    });
+    await gw.start();
+
+    // A second channel, so the queue runs them at once, and a timeout it will not reach.
+    const long = gw.tick(
+      { ...tickEv("watch"), channel: { ...HIVE, id: "C02" } },
+      { surface: "slack", channel: "C01" },
+      60_000,
+    );
+    await running;
+    const held = serving("mcp__jobs__job_run");
+
+    const lines = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+    expect(lines.filter((line) => line.startsWith("tool_call_stranded"))).toEqual([]);
+
+    release();
+    await long;
+    held.land();
+    await held.call;
   });
 });

@@ -8,6 +8,7 @@ import { JobHost, type JobRun } from "../src/job-host.ts";
 import type { ActorRef, EventRef, InboundEvent } from "../src/events.ts";
 import type { SwitchSource } from "../src/kill-switch.ts";
 import { jobHandler, JOB_RUN_TOOL, JOB_RUN_TOOL_NAME } from "../src/job-server.ts";
+import { TurnClock } from "../src/turn-clock.ts";
 import { loadManifest, type JobConfig } from "../src/manifest.ts";
 import { ToolPolicy } from "../src/tool-policy.ts";
 
@@ -141,6 +142,7 @@ const call = async (
     answering = turnAuthor(),
     reply = undefined as ((home: InboundEvent, text: string) => Promise<void>) | undefined,
     owner = OWNER,
+    turnClock = undefined as TurnClock | undefined,
   } = {},
 ): Promise<string> => {
   const handle = jobHandler({
@@ -152,6 +154,7 @@ const call = async (
     reply,
     owner,
     turnTimeoutMs,
+    turnClock,
   });
   const result = await handle({
     id: 1,
@@ -544,6 +547,87 @@ describe("provenance", () => {
     expect(argv()).toEqual([]);
     expect(runs[0].requestedBy).toEqual({ kind: "agent", id: "whittle" });
     expect(runs[0].trigger).toBe("on-request");
+  });
+});
+
+/**
+ * The same two shapes, chosen against the number that actually bounds the wait.
+ *
+ * `turnTimeoutMs` is a *whole* turn and a `tools/call` always arrives partway into one, so
+ * a job weighed against it can be waited for in a sliver of turn that cannot hold it. That
+ * is issue #44 one clock further in: the tool was right about a number nobody had told it
+ * had already been spent. Here the turn is long enough for `SHIFT` many times over, and
+ * only what is left of it decides.
+ */
+describe("a job that outlasts what is left of the turn", () => {
+  /** Where the gateway publishes the deadline of the turn a call is inside. */
+  const midTurn = (msLeft: number) => {
+    const clock = new TurnClock();
+    clock.open(Date.now() + msLeft);
+    return clock;
+  };
+
+  it("starts a job the rest of this turn cannot hold, though a whole turn could", async () => {
+    const text = await call(
+      [withBody(jobs(SHIFT)[0], PROVES_SLOWLY)],
+      { job: "shift" },
+      { turnTimeoutMs: PATIENT_TURN, turnClock: midTurn(1000) },
+    );
+
+    // Weighed against `PATIENT_TURN` this waits and quotes a verdict, which is what it did
+    // before: the whole budget is ample and a second of it is not.
+    expect(text).toContain("job shift is running now");
+    expect(text).toContain("there is no verdict to read");
+    expect(runs).toEqual([]);
+
+    await vi.waitFor(() => expect(runs).toHaveLength(1), { timeout: 5000 });
+    expect(runs[0].outcome).toBe("completed");
+  });
+
+  it("says what it could not wait for rather than that the job outlasts a turn", async () => {
+    const text = await call(
+      [withBody(jobs(SHIFT)[0], PROVES_SLOWLY)],
+      { job: "shift" },
+      { turnTimeoutMs: PATIENT_TURN, turnClock: midTurn(1000) },
+    );
+
+    // The old sentence — "longer than this turn" — is false for exactly this job: its
+    // budget is a twentieth of the declared turn. A brain that reads it tells whoever asked
+    // that the job is too big, when what happened is that they asked too late in the turn.
+    expect(text).toContain("longer than this tool could wait");
+    expect(text).not.toContain("longer than this turn");
+    await vi.waitFor(() => expect(runs).toHaveLength(1), { timeout: 5000 });
+  });
+
+  it("still waits when the turn has room left for the job", async () => {
+    const text = await call(
+      [withBody(jobs(SHIFT)[0], PROVES)],
+      { job: "shift" },
+      { turnTimeoutMs: PATIENT_TURN, turnClock: midTurn(PATIENT_TURN) },
+    );
+
+    expect(text).toContain("job shift completed");
+    expect(argv()).toHaveLength(1);
+  });
+
+  it("weighs the whole turn when two are in flight and the call names neither", async () => {
+    // The gateway's own ambiguity rule: a channel runs its turns one at a time, two
+    // channels run at once, and a `tools/call` carries nothing that says which. Guessing
+    // the shorter one would detach a job that had a whole turn to finish in.
+    const clock = midTurn(1000);
+    clock.open(Date.now() + 1000);
+
+    const text = await call(
+      [withBody(jobs(SHIFT)[0], PROVES)],
+      { job: "shift" },
+      { turnTimeoutMs: PATIENT_TURN, turnClock: clock },
+    );
+    expect(text).toContain("job shift completed");
+  });
+
+  it("weighs the whole turn when no gateway published one", async () => {
+    const text = await call([withBody(jobs(SHIFT)[0], PROVES)], { job: "shift" });
+    expect(text).toContain("job shift completed");
   });
 });
 

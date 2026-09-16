@@ -89,6 +89,9 @@ const MAX_ARGS = 32;
  */
 const MAX_ITEMS = 8;
 
+/** Calls this process has started and not answered yet. See {@link callsInFlight}. */
+const inFlight = new Set<{ tool: string; started: number }>();
+
 /**
  * Runs one tool call and records it, however it ends.
  *
@@ -99,6 +102,11 @@ const MAX_ITEMS = 8;
  */
 export async function auditToolCall<T>(call: ToolCall, run: () => Promise<T>): Promise<T> {
   const started = Date.now();
+  // Held for exactly the span of the call, so a turn that stops listening can say what it
+  // left running. Removed on every path: an entry that outlived its call would be reported
+  // as stranded by whichever turn ended next.
+  const live = { tool: call.tool, started };
+  inFlight.add(live);
   try {
     const result = await run();
     write(call, "ok", Date.now() - started);
@@ -112,7 +120,27 @@ export async function auditToolCall<T>(call: ToolCall, run: () => Promise<T>): P
       error instanceof Error ? error.message : undefined,
     );
     throw error;
+  } finally {
+    inFlight.delete(live);
   }
+}
+
+/**
+ * The calls still running, for a caller that has stopped listening to them.
+ *
+ * A call in flight when its turn ends has nowhere to answer, and its own line cannot say
+ * so: that line is written whenever the call finally lands, and by then the turn is gone.
+ * `outcome=ok` is the truth about the call and tells an operator nothing about the fact
+ * that nobody read it — which is how a job could post a correct result three seconds after
+ * the brain had already told a channel it produced nothing, with a clean log either side.
+ *
+ * Nothing here interprets the set. The gateway knows which turn just ended and whether it
+ * was the only one; this knows the calls, and a call names no turn.
+ */
+export function callsInFlight(): { tool: string; ms: number }[] {
+  const now = Date.now();
+  // Bounded the same way the audit line's is, because it reaches a log line the same way.
+  return [...inFlight].map(({ tool, started }) => ({ tool: boundName(tool), ms: now - started }));
 }
 
 /**

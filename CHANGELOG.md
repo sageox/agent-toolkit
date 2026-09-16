@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`job_run` waits only for a job that fits in what is left of the turn, and a turn says
+  what it left running.** Both halves are the rest of #44, whose first half — the brain's
+  MCP client giving up on its own shorter clock — was closed in 0.3.1 by setting that clock
+  from `limits.turnTimeoutMs`.
+
+  The tool weighed a job's deadline against `limits.turnTimeoutMs`, which is a *whole* turn.
+  A `tools/call` always arrives partway into one, so a job that fits in a turn could still be
+  waited for in the sliver of turn that remained — the same arithmetic, right about a number
+  that no longer applied. A scheduled turn had it worse: one declaring `budget.wallClockMs`
+  shortens its own tick, and `job_run` inside it was still comparing against the manifest's
+  number, which that turn was never given. The gateway now publishes each turn's real
+  deadline and the tool reads it, so a job is started rather than waited for whenever what is
+  left cannot hold it. Nothing new to set; a job near the edge answers "running" where it used
+  to answer with a verdict, and its answer no longer says the job is "longer than this turn"
+  when what ran out was the turn.
+
+  The second half is the one #44 called the worse one: a call still in flight when its turn
+  stops listening is not cancelled, so it finishes and writes `tool_call outcome=ok`, and
+  **nothing recorded that its answer reached nobody.** The gateway now writes
+  `tool_call_stranded tool=… ms=… surface=… channel=… event=…` naming each call a turn left
+  running, with the turn's own ids so it greps beside `turn_failed`. Only when no other turn
+  is running: a `tools/call` carries nothing that says which turn it came from, and a
+  stranded line about a healthy call would send an operator after the wrong one.
+
 - **A large `read_channel` result remains readable after a brain harness spills it to a
   file.** The response is still one valid `{messages, more}` JSON object, but each message
   now occupies its own physical line, so a line-oriented file reader can page through it

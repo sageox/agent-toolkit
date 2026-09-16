@@ -7,6 +7,8 @@ import { evaluateEgress, type GuardVerdict } from "./guard.ts";
 import { SurfaceEgress, type LiveTurnHandle } from "./surface-egress.ts";
 import { TurnPolicy } from "./policy.ts";
 import { ChannelQueue } from "./queue.ts";
+import { TurnClock } from "./turn-clock.ts";
+import { callsInFlight } from "./tool-audit.ts";
 
 export interface GatewayOpts {
   manifest: AgentManifest;
@@ -38,6 +40,14 @@ export interface GatewayOpts {
    * has not.
    */
   capabilities?: () => readonly ProbeResult[];
+  /**
+   * Where this gateway publishes the deadline of each turn it runs.
+   *
+   * Written here and read by the job tool, which is built before this is — so a caller that
+   * wires both passes the same one to each. Built here when nobody did, which keeps a
+   * gateway with no job tool from needing to know this exists.
+   */
+  turnClock?: TurnClock;
 }
 
 /**
@@ -80,10 +90,14 @@ export class Gateway {
   private policy: TurnPolicy;
   private queue: ChannelQueue;
   private egress: SurfaceEgress;
+  private clock: TurnClock;
+  /** Turns this gateway is running right now — see {@link Gateway.reportStranded}. */
+  private running = 0;
   private stoppedReason?: string;
 
   constructor(private opts: GatewayOpts) {
     for (const a of opts.adapters) this.byKind.set(a.kind, a);
+    this.clock = opts.turnClock ?? new TurnClock();
     const limits = opts.manifest.limits;
     this.policy = opts.policy ?? new TurnPolicy(limits);
     this.egress =
@@ -400,6 +414,12 @@ export class Gateway {
       scheduled,
       capabilities: this.opts.capabilities?.(),
     });
+    // Published for exactly as long as the bound below applies, and from here rather than
+    // from `limits.turnTimeoutMs`, because this is the only place that knows both which
+    // turn is running and which of the two numbers it was given — a scheduled tick arrives
+    // with its own, shorter one.
+    const closeClock = this.clock.open(Date.now() + timeoutMs);
+    this.running++;
     try {
       return await withTimeout(
         this.drive(turn, e, send, tally),
@@ -407,6 +427,9 @@ export class Gateway {
         `turn timed out after ${timeoutMs}ms`,
       );
     } finally {
+      closeClock();
+      this.running--;
+      this.reportStranded(e);
       // An abandoned generator never runs its own `finally`, so the brain would never
       // close its ACP session on a failed send or a timeout. Returning it does.
       //
@@ -414,6 +437,34 @@ export class Gateway {
       // resumed, so awaiting its return would hang exactly where the timeout was meant
       // to rescue us. Cleanup runs if it can; releasing the channel does not wait for it.
       void turn.return(undefined).catch(() => {});
+    }
+  }
+
+  /**
+   * What a turn left running when it stopped listening.
+   *
+   * A turn that times out releases its channel and abandons the generator, but a tool call
+   * already in flight keeps going and answers into nothing. Its own audit line is written
+   * when it finally lands, reads `outcome=ok`, and cannot know that: by then the turn is
+   * over. Without this line the only trace of the whole failure is whatever the brain said
+   * in the channel before it was cut off — issue #44, where that was a message telling two
+   * people a job had produced nothing, three seconds before the job posted its result.
+   *
+   * Written here because the audit knows the calls and only this knows the turn. The turn's
+   * own ids go on it bare, as `turn_start` and `turn_failed` write them, so one grep reads
+   * the three together; the tool name is the caller's and is quoted, as the audit quotes it.
+   *
+   * **Only when no other turn is running.** The audit's registry is this process's, a call
+   * carries no turn, and a second channel's turn has calls in that same set — naming one of
+   * those would send an operator after a call that was fine.
+   */
+  private reportStranded(e: InboundEvent): void {
+    if (this.running > 0) return;
+    for (const { tool, ms } of callsInFlight()) {
+      console.warn(
+        `tool_call_stranded tool=${JSON.stringify(tool)} ms=${ms} ` +
+          `surface=${e.surface} channel=${e.channel.id} event=${e.id.nativeId}`,
+      );
     }
   }
 

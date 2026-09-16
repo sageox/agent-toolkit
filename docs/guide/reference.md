@@ -83,13 +83,17 @@ that published no record. A job that declares
 refused at the call if they do not match; they reach the body as `JOB_PARAM_<NAME>` in its
 environment. They name a **target** — which issue, which document, which environment — and
 never a behaviour: a job whose work a caller can switch is two jobs with two slugs. See
-[the job body contract](../job-contract.md). A job short enough to finish inside a turn is
-waited for and the tool answers with its verdict; a job whose `wallClockMs +
-deadlineHeadroomMs` is longer than `limits.turnTimeoutMs` is **started** instead, and the
+[the job body contract](../job-contract.md). A job short enough to finish in **what is left
+of the turn** is waited for and the tool answers with its verdict; a job whose `wallClockMs +
+deadlineHeadroomMs` is longer than that is **started** instead, and the
 tool answers with the run id and nothing that reads as a verdict — the verdict arrives later,
 posted back into the conversation that asked, in the thread it was asked in, and as the
 job's ordinary status post where `report` says. A run answered that way is announced as a
-waited-for one is, so a clean verdict is spared the channel. Give such a job a `report`
+waited-for one is, so a clean verdict is spared the channel. What is *left*, rather than
+`limits.turnTimeoutMs`: the call always arrives partway into a turn, and a scheduled turn
+that declared its own `budget.wallClockMs` was never given the manifest's number at all. So
+the same job can be waited for early in a turn and started late in one, and the tool's answer
+says which happened. Give such a job a `report`
 destination all the same: the reply can be refused by the home channel's guard, or the call
 may have arrived while no one conversation could be named, and then the post is the only
 answer — `doctor` says so when there is none. Add it with `sageox-agent mcp add jobs`, which
@@ -163,9 +167,23 @@ past the call you were looking for.
 
 | `outcome` | What happened |
 |---|---|
-| `ok` | The tool ran and answered. |
+| `ok` | The tool ran and answered. Whether anyone was still listening is a separate question — see `tool_call_stranded` below. |
 | `refused` | A gate stopped it before it ran — the tool policy, or a write tool that is not armed. `reason` names the rule. |
 | `failed` | It ran and did not work. `reason` is what it said. |
+
+One more line is written about tool calls, by the gateway rather than by the call:
+
+```
+tool_call_stranded tool="mcp__jobs__job_run" ms=87762 surface=slack channel=C01 event=1757...
+```
+
+A turn ended while that call was still running. Nothing here cancels it, so it finishes and
+writes its own `tool_call` line whenever it lands — reading `ok` if it worked, because from
+the call's side it did. Nobody read the answer: the turn released its channel before it
+arrived. The ids are the turn's, so this line greps beside the `turn_failed` it belongs to.
+It is written only when no other turn is running, because a `tools/call` carries nothing
+that says which turn it came from, and naming a healthy call would send you after the wrong
+one.
 
 **A refusal is the line to watch.** One means a bundle is misconfigured — the tool is in
 the manifest and not in the policy, and `doctor` will name it. A stream of them, on an
