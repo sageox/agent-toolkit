@@ -89,8 +89,8 @@ const MAX_ARGS = 32;
  */
 const MAX_ITEMS = 8;
 
-/** Calls this process has started and not answered yet. See {@link callsInFlight}. */
-const inFlight = new Set<{ tool: string; started: number }>();
+/** Calls this process has started and not answered yet. See {@link takeStranded}. */
+const inFlight = new Set<{ tool: string; started: number; told: boolean }>();
 
 /**
  * Runs one tool call and records it, however it ends.
@@ -102,10 +102,10 @@ const inFlight = new Set<{ tool: string; started: number }>();
  */
 export async function auditToolCall<T>(call: ToolCall, run: () => Promise<T>): Promise<T> {
   const started = Date.now();
-  // Held for exactly the span of the call, so a turn that stops listening can say what it
-  // left running. Removed on every path: an entry that outlived its call would be reported
-  // as stranded by whichever turn ended next.
-  const live = { tool: call.tool, started };
+  // Held for exactly the span of the call, so the gateway can say what is still running
+  // once nothing is listening. Removed on every path: an entry that outlived its call
+  // would be reported as stranded the next time every turn had ended.
+  const live = { tool: call.tool, started, told: false };
   inFlight.add(live);
   try {
     const result = await run();
@@ -126,21 +126,32 @@ export async function auditToolCall<T>(call: ToolCall, run: () => Promise<T>): P
 }
 
 /**
- * The calls still running, for a caller that has stopped listening to them.
+ * The calls still running that nobody has been told about yet, **marking what it returns.**
  *
- * A call in flight when its turn ends has nowhere to answer, and its own line cannot say
- * so: that line is written whenever the call finally lands, and by then the turn is gone.
- * `outcome=ok` is the truth about the call and tells an operator nothing about the fact
- * that nobody read it — which is how a job could post a correct result three seconds after
- * the brain had already told a channel it produced nothing, with a clean log either side.
+ * A call in flight when the last turn ends has nowhere to answer, and its own line cannot
+ * say so: that line is written whenever the call finally lands, and by then the turn is
+ * gone. `outcome=ok` is the truth about the call and says nothing about the fact that
+ * nobody read it — which is how a job could post a correct result three seconds after the
+ * brain had already told a channel it produced nothing, with a clean log either side.
  *
- * Nothing here interprets the set. The gateway knows which turn just ended and whether it
- * was the only one; this knows the calls, and a call names no turn.
+ * Marked, and hence `take`: a call slow enough to outlive one turn is slow enough to
+ * outlive the next two, and an operator reading the same call reported three times has to
+ * work out whether that was one call or three. Reported once, at the first moment it is
+ * true — which is also the earliest anyone could have acted on it.
+ *
+ * Nothing here interprets the set. The gateway knows whether any turn is still listening;
+ * this knows the calls, and a call names no turn.
  */
-export function callsInFlight(): { tool: string; ms: number }[] {
+export function takeStranded(): { tool: string; ms: number }[] {
   const now = Date.now();
-  // Bounded the same way the audit line's is, because it reaches a log line the same way.
-  return [...inFlight].map(({ tool, started }) => ({ tool: boundName(tool), ms: now - started }));
+  const stranded = [];
+  for (const call of inFlight) {
+    if (call.told) continue;
+    call.told = true;
+    // Bounded the same way the audit line's is, because it reaches a log line the same way.
+    stranded.push({ tool: boundName(call.tool), ms: now - call.started });
+  }
+  return stranded;
 }
 
 /**

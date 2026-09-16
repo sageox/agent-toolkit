@@ -93,7 +93,11 @@ waited-for one is, so a clean verdict is spared the channel. What is *left*, rat
 `limits.turnTimeoutMs`: the call always arrives partway into a turn, and a scheduled turn
 that declared its own `budget.wallClockMs` was never given the manifest's number at all. So
 the same job can be waited for early in a turn and started late in one, and the tool's answer
-says which happened. Give such a job a `report`
+says which happened. With two channels mid-turn at once, the bound is the **tightest** of
+them: a `tools/call` carries nothing that says which turn it came from, and the tightest is
+the only number every live turn satisfies. An agent answering two channels can therefore
+start a job it would have waited for on a quiet one — the verdict still lands where `report`
+says, which is why that is the safe way to be wrong. Give such a job a `report`
 destination all the same: the reply can be refused by the home channel's guard, or the call
 may have arrived while no one conversation could be named, and then the post is the only
 answer — `doctor` says so when there is none. Add it with `sageox-agent mcp add jobs`, which
@@ -174,16 +178,22 @@ past the call you were looking for.
 One more line is written about tool calls, by the gateway rather than by the call:
 
 ```
-tool_call_stranded tool="mcp__jobs__job_run" ms=87762 surface=slack channel=C01 event=1757...
+tool_call_stranded tool="mcp__jobs__job_run" ms=87762
 ```
 
-A turn ended while that call was still running. Nothing here cancels it, so it finishes and
-writes its own `tool_call` line whenever it lands — reading `ok` if it worked, because from
-the call's side it did. Nobody read the answer: the turn released its channel before it
-arrived. The ids are the turn's, so this line greps beside the `turn_failed` it belongs to.
-It is written only when no other turn is running, because a `tools/call` carries nothing
-that says which turn it came from, and naming a healthy call would send you after the wrong
-one.
+Every turn has ended and that call is still running. Nothing here cancels it, so it finishes
+and writes its own `tool_call` line whenever it lands — reading `ok` if it worked, because
+from the call's side it did. Nobody read the answer. Read it against the `turn_done` and
+`turn_failed` lines immediately above it.
+
+**No turn ids, deliberately.** A `tools/call` carries nothing that says which turn made it,
+so with two channels mid-turn there is no way to tell whose call is whose; a line naming the
+turn that happened to finish last would point at a turn that never made the call. What is
+left is the claim this can check — the call is running and nothing is left to hear it — and
+that is why it waits for the last turn to end rather than the first. A call stranded while
+another channel is still busy is named later than it happened, and one that lands inside
+that window is not named at all. Each call is named at most once, however many turns it
+outlives.
 
 **A refusal is the line to watch.** One means a bundle is misconfigured — the tool is in
 the manifest and not in the policy, and `doctor` will name it. A stream of them, on an

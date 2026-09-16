@@ -1,5 +1,5 @@
 /**
- * What is left of the turn in flight.
+ * What is left of the turns in flight.
  *
  * A `tools/call` carries nothing about the turn that produced it, and the gateway holds
  * both halves of the number a call has to fit inside: when the turn started, and how long
@@ -32,20 +32,29 @@ export class TurnClock {
   }
 
   /**
-   * How long the one turn in flight will still listen — `null` when there is none, or when
-   * there is more than one.
+   * How long the **soonest** turn in flight will still listen — `null` when none is.
    *
-   * The ambiguity rule `SurfaceEgress.liveTurn` already states, about the same ambiguity: a
-   * channel runs its turns one at a time, two channels run concurrently, and a tool call
-   * names neither. `null` rather than a guess, and a caller reads it as "no bound known"
-   * and falls back to what it knew before.
+   * The soonest, rather than the one this call belongs to, because nothing can say which
+   * that is: a `tools/call` names no turn, and a channel runs its turns one at a time while
+   * two channels run at once. So the answer is the tightest bound any live turn has, which
+   * is the only one every live turn satisfies.
+   *
+   * Answering `null` on that ambiguity was the first version, on the reasoning that a
+   * caller should fall back to what it knew before. What it knew before is
+   * `limits.turnTimeoutMs`, so under concurrency that reinstated #44 exactly: a job weighed
+   * against a whole turn and waited for inside a shortened scheduled tick. The two wrong
+   * answers here are not symmetric — guessing long loses a result and tells a channel
+   * something false about it, while guessing short costs a job its inline verdict and sends
+   * it to `report` instead — so this guesses short. That is a different question from the
+   * one `SurfaceEgress.liveTurn` refuses to guess at, which is *who* is asking, and where a
+   * wrong guess hands a sibling agent a person's authority.
    *
    * Negative once a turn has overrun. That is a true answer and the useful one: nothing can
    * still be waited for inside it.
    */
   remaining(now = Date.now()): number | null {
-    if (this.live.size !== 1) return null;
-    const [turn] = this.live;
-    return turn!.at - now;
+    let soonest: number | null = null;
+    for (const { at } of this.live) if (soonest === null || at < soonest) soonest = at;
+    return soonest === null ? null : soonest - now;
   }
 }

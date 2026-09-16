@@ -8,7 +8,7 @@ import { SurfaceEgress, type LiveTurnHandle } from "./surface-egress.ts";
 import { TurnPolicy } from "./policy.ts";
 import { ChannelQueue } from "./queue.ts";
 import { TurnClock } from "./turn-clock.ts";
-import { callsInFlight } from "./tool-audit.ts";
+import { takeStranded } from "./tool-audit.ts";
 
 export interface GatewayOpts {
   manifest: AgentManifest;
@@ -429,7 +429,7 @@ export class Gateway {
     } finally {
       closeClock();
       this.running--;
-      this.reportStranded(e);
+      this.reportStranded();
       // An abandoned generator never runs its own `finally`, so the brain would never
       // close its ACP session on a failed send or a timeout. Returning it does.
       //
@@ -441,7 +441,7 @@ export class Gateway {
   }
 
   /**
-   * What a turn left running when it stopped listening.
+   * The calls left running once this gateway has no turn left to hear them.
    *
    * A turn that times out releases its channel and abandons the generator, but a tool call
    * already in flight keeps going and answers into nothing. Its own audit line is written
@@ -450,21 +450,26 @@ export class Gateway {
    * in the channel before it was cut off — issue #44, where that was a message telling two
    * people a job had produced nothing, three seconds before the job posted its result.
    *
-   * Written here because the audit knows the calls and only this knows the turn. The turn's
-   * own ids go on it bare, as `turn_start` and `turn_failed` write them, so one grep reads
-   * the three together; the tool name is the caller's and is quoted, as the audit quotes it.
+   * Written here because the audit knows the calls and only this knows whether anyone is
+   * still listening. The tool name is the caller's and is quoted, as the audit quotes it.
    *
-   * **Only when no other turn is running.** The audit's registry is this process's, a call
-   * carries no turn, and a second channel's turn has calls in that same set — naming one of
-   * those would send an operator after a call that was fine.
+   * **No turn ids on the line, and only once `running` reaches zero.** Both follow from the
+   * one thing that is not knowable here: a `tools/call` names no turn, so with two channels
+   * mid-turn nothing can say whose call is whose. Reporting at the end of *a* turn would
+   * therefore have blamed whichever turn happened to finish last — a line pointing at a turn
+   * that never made the call, which is worse than no line. What is left that is checkable is
+   * the process-wide claim, and it is the one that matters: this call is still running and
+   * there is nothing left to read its answer. An operator reads it against the `turn_done`
+   * and `turn_failed` lines immediately above it.
+   *
+   * The cost is that a call stranded while another channel is still busy is named later than
+   * it happened, and one that lands in that window is not named at all. Late and true beats
+   * prompt and wrong in an audit log.
    */
-  private reportStranded(e: InboundEvent): void {
+  private reportStranded(): void {
     if (this.running > 0) return;
-    for (const { tool, ms } of callsInFlight()) {
-      console.warn(
-        `tool_call_stranded tool=${JSON.stringify(tool)} ms=${ms} ` +
-          `surface=${e.surface} channel=${e.channel.id} event=${e.id.nativeId}`,
-      );
+    for (const { tool, ms } of takeStranded()) {
+      console.warn(`tool_call_stranded tool=${JSON.stringify(tool)} ms=${ms}`);
     }
   }
 

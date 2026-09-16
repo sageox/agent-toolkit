@@ -1233,10 +1233,10 @@ describe("Gateway names what a turn left running", () => {
 
     const stranded = lines.filter((line) => line.startsWith("tool_call_stranded"));
     expect(stranded).toHaveLength(1);
-    // The tool, so an operator knows which one, and the turn's own ids, so this line reads
-    // beside the `turn_failed` it belongs to.
+    // The tool and how long it has been running, and deliberately no turn ids: nothing here
+    // can say which turn a `tools/call` came from, so a line naming one would be a guess.
     expect(stranded[0]).toContain('tool="mcp__jobs__job_run"');
-    expect(stranded[0]).toContain("surface=slack");
+    expect(stranded[0]).toMatch(/^tool_call_stranded tool="mcp__jobs__job_run" ms=\d+$/);
 
     held.land();
     await held.call;
@@ -1274,10 +1274,34 @@ describe("Gateway names what a turn left running", () => {
     expect(lines.filter((line) => line.startsWith("tool_call_stranded"))).toEqual([]);
   });
 
+  it("names a call that outlives several turns once", async () => {
+    // The registry holds a call until it settles, so every later turn that ended would find
+    // it again. Three lines about one slow call read as three slow calls, and an operator
+    // has to work out which — so the call is reported at the first moment the claim is true
+    // and not again.
+    const f = postingAdapter([HIVE]);
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain: hangs,
+    });
+    await gw.start();
+    const held = serving("mcp__jobs__job_run");
+
+    const first = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+    const again = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+
+    expect(first.filter((line) => line.startsWith("tool_call_stranded"))).toHaveLength(1);
+    expect(again.filter((line) => line.startsWith("tool_call_stranded"))).toEqual([]);
+
+    held.land();
+    await held.call;
+  });
+
   it("stays quiet while another turn is running, because a call names no turn", async () => {
-    // The audit's registry is this process's and a `tools/call` carries nothing that says
-    // which turn it belongs to. With a second turn still going, the call in flight may well
-    // be its — and a stranded line about a healthy call sends an operator after the wrong one.
+    // The line claims nobody is left to read the answer, and while a second turn is running
+    // that is not yet true — the call in flight may well be its. Said later rather than
+    // wrongly: the next turn to end with nothing after it is the one that says so.
     const f = postingAdapter([HIVE]);
     let started!: () => void;
     const running = new Promise<void>((resolve) => {

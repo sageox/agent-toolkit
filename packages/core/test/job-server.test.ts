@@ -610,12 +610,35 @@ describe("a job that outlasts what is left of the turn", () => {
     expect(argv()).toHaveLength(1);
   });
 
-  it("weighs the whole turn when two are in flight and the call names neither", async () => {
-    // The gateway's own ambiguity rule: a channel runs its turns one at a time, two
-    // channels run at once, and a `tools/call` carries nothing that says which. Guessing
-    // the shorter one would detach a job that had a whole turn to finish in.
-    const clock = midTurn(1000);
+  it("weighs the tightest turn in flight, since a call names none of them", async () => {
+    // Two channels mid-turn at once and a `tools/call` that says which one it came from:
+    // there is no such field. Answering "no bound known" here was the first version, and
+    // the fallback it sent a caller to is `turnTimeoutMs` — so under any concurrency it
+    // reinstated #44 exactly. The two wrong answers are not symmetric: guessing long loses
+    // a result and tells a channel something false about it, guessing short costs an inline
+    // verdict and sends it to `report`. So the tightest bound wins even though the roomy
+    // turn here might be the one that asked.
+    const clock = midTurn(PATIENT_TURN);
     clock.open(Date.now() + 1000);
+
+    const text = await call(
+      [withBody(jobs(SHIFT)[0], PROVES_SLOWLY)],
+      { job: "shift" },
+      { turnTimeoutMs: PATIENT_TURN, turnClock: clock },
+    );
+    expect(text).toContain("job shift is running now");
+    expect(runs).toEqual([]);
+
+    await vi.waitFor(() => expect(runs).toHaveLength(1), { timeout: 5000 });
+    expect(runs[0].outcome).toBe("completed");
+  });
+
+  it("still waits when every turn in flight has room for the job", async () => {
+    // The other half of taking the tightest: it is a bound, not a reason to detach. Two
+    // roomy turns detach nothing, or an agent answering two channels would stop quoting
+    // verdicts for as long as it was busy.
+    const clock = midTurn(PATIENT_TURN);
+    clock.open(Date.now() + PATIENT_TURN);
 
     const text = await call(
       [withBody(jobs(SHIFT)[0], PROVES)],
