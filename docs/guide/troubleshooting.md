@@ -40,6 +40,16 @@ it may ever arm or delete a switch.
 Brain-side. The error follows on the same line. A turn that exceeds `limits.turnTimeoutMs`
 (default 120s) is cancelled rather than wedging the gateway.
 
+**`tool_call_stranded` in the log.**
+A tool call is still running with no turn left to hear it, so its answer reaches nobody —
+and the brain, cut off before it arrived, will have said whatever it could without it. The
+call is not cancelled: it finishes and writes its own `tool_call` line afterwards, reading
+`ok` if it worked, which is why this line exists at all. It names no turn, because a
+`tools/call` carries nothing that says which turn made it; the `turn_done` and `turn_failed`
+lines just above it are where to look. Either the call is slower than `limits.turnTimeoutMs`
+and that number should go up, or the work belongs in a job with a `report` destination,
+which answers after the turn by design.
+
 **The team brain says it could not read team memory.**
 It will not tell you what `ox` said, and that is deliberate: a failing `ox query` can quote
 the query back, and the query is whatever the channel talked the agent into asking. The

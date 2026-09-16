@@ -7,6 +7,8 @@ import { evaluateEgress, type GuardVerdict } from "./guard.ts";
 import { SurfaceEgress, type LiveTurnHandle } from "./surface-egress.ts";
 import { TurnPolicy } from "./policy.ts";
 import { ChannelQueue } from "./queue.ts";
+import { TurnClock } from "./turn-clock.ts";
+import { takeStranded, turnListening } from "./tool-audit.ts";
 
 export interface GatewayOpts {
   manifest: AgentManifest;
@@ -38,6 +40,14 @@ export interface GatewayOpts {
    * has not.
    */
   capabilities?: () => readonly ProbeResult[];
+  /**
+   * Where this gateway publishes the deadline of each turn it runs.
+   *
+   * Written here and read by the job tool, which is built before this is — so a caller that
+   * wires both passes the same one to each. Built here when nobody did, which keeps a
+   * gateway with no job tool from needing to know this exists.
+   */
+  turnClock?: TurnClock;
 }
 
 /**
@@ -80,10 +90,12 @@ export class Gateway {
   private policy: TurnPolicy;
   private queue: ChannelQueue;
   private egress: SurfaceEgress;
+  private clock: TurnClock;
   private stoppedReason?: string;
 
   constructor(private opts: GatewayOpts) {
     for (const a of opts.adapters) this.byKind.set(a.kind, a);
+    this.clock = opts.turnClock ?? new TurnClock();
     const limits = opts.manifest.limits;
     this.policy = opts.policy ?? new TurnPolicy(limits);
     this.egress =
@@ -400,6 +412,12 @@ export class Gateway {
       scheduled,
       capabilities: this.opts.capabilities?.(),
     });
+    // Published for exactly as long as the bound below applies, and from here rather than
+    // from `limits.turnTimeoutMs`, because this is the only place that knows both which
+    // turn is running and which of the two numbers it was given — a scheduled tick arrives
+    // with its own, shorter one.
+    const closeClock = this.clock.open(Date.now() + timeoutMs);
+    const closeAudit = turnListening();
     try {
       return await withTimeout(
         this.drive(turn, e, send, tally),
@@ -407,6 +425,9 @@ export class Gateway {
         `turn timed out after ${timeoutMs}ms`,
       );
     } finally {
+      closeClock();
+      closeAudit();
+      this.reportStranded();
       // An abandoned generator never runs its own `finally`, so the brain would never
       // close its ACP session on a failed send or a timeout. Returning it does.
       //
@@ -414,6 +435,39 @@ export class Gateway {
       // resumed, so awaiting its return would hang exactly where the timeout was meant
       // to rescue us. Cleanup runs if it can; releasing the channel does not wait for it.
       void turn.return(undefined).catch(() => {});
+    }
+  }
+
+  /**
+   * The calls left running once this gateway has no turn left to hear them.
+   *
+   * A turn that times out releases its channel and abandons the generator, but a tool call
+   * already in flight keeps going and answers into nothing. Its own audit line is written
+   * when it finally lands, reads `outcome=ok`, and cannot know that: by then the turn is
+   * over. Without this line the only trace of the whole failure is whatever the brain said
+   * in the channel before it was cut off — issue #44, where that was a message telling two
+   * people a job had produced nothing, three seconds before the job posted its result.
+   *
+   * Written here because the audit decides *what* — it holds the calls and the count of
+   * turns still able to read one — while this is what turns that into a log line. The tool
+   * name is the caller's and is quoted, as the audit quotes it.
+   *
+   * **No turn ids on the line, and nothing at all until every turn has ended.** Both follow
+   * from the one thing that is not knowable here: a `tools/call` names no turn, so with two
+   * channels mid-turn nothing can say whose call is whose. Reporting at the end of *a* turn
+   * would therefore have blamed whichever turn happened to finish last — a line pointing at
+   * a turn that never made the call, which is worse than no line. What is left that is
+   * checkable is the process-wide claim, and it is the one that matters: this call is still
+   * running and there is nothing left to read its answer. An operator reads it against the
+   * `turn_done` and `turn_failed` lines immediately above it.
+   *
+   * The cost is that a call stranded while another channel is still busy is named later than
+   * it happened, and one that lands in that window is not named at all. Late and true beats
+   * prompt and wrong in an audit log.
+   */
+  private reportStranded(): void {
+    for (const { tool, ms } of takeStranded()) {
+      console.warn(`tool_call_stranded tool=${JSON.stringify(tool)} ms=${ms}`);
     }
   }
 

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`job_run` waits only for a job that fits in what is left of the turn, and a turn says
+  what it left running.** Both halves are the rest of #44, whose first half — the brain's
+  MCP client giving up on its own shorter clock — was closed in 0.3.1 by setting that clock
+  from `limits.turnTimeoutMs`.
+
+  The tool weighed a job's deadline against `limits.turnTimeoutMs`, which is a *whole* turn.
+  A `tools/call` always arrives partway into one, so a job that fits in a turn could still be
+  waited for in the sliver of turn that remained — the same arithmetic, right about a number
+  that no longer applied. A scheduled turn had it worse: one declaring `budget.wallClockMs`
+  shortens its own tick, and `job_run` inside it was still comparing against the manifest's
+  number, which that turn was never given. The gateway now publishes each turn's real
+  deadline and the tool reads it, so a job is started rather than waited for whenever what is
+  left cannot hold it. Nothing new to set; a job near the edge answers "running" where it used
+  to answer with a verdict, and its answer no longer says the job is "longer than this turn"
+  when what ran out was the turn.
+
+  With two channels mid-turn at once the bound is the **tightest** of them, because a
+  `tools/call` carries nothing that says which turn made it and the tightest is the only
+  number every live turn satisfies. So a busy agent can start a job it would have waited for
+  on a quiet one. That is the safe way to be wrong here: a job started still posts its verdict
+  where `report` says and back into the conversation that asked, while a job waited for in a
+  turn that cannot hold it loses its result outright, which is what #44 was.
+
+  The second half is the one #44 called the worse one: a call still in flight when its turn
+  stops listening is not cancelled, so it finishes and writes `tool_call outcome=ok`, and
+  **nothing recorded that its answer reached nobody.** The gateway now writes
+  `tool_call_stranded tool=… ms=…` for each call still running once every turn has ended,
+  and each call is named at most once however many turns it outlives.
+
+  The line carries no turn ids on purpose. A `tools/call` says nothing about the turn that
+  made it, so naming the turn that happened to finish last would point an operator at a turn
+  that never made the call. The claim it does make is checkable — this call is running and
+  nothing is left to read its answer — at the cost of naming a call stranded during a busy
+  stretch later than it happened, and not naming one that lands inside that window at all.
+  Read it against the `turn_done` and `turn_failed` lines above it.
+
 - **A large `read_channel` result remains readable after a brain harness spills it to a
   file.** The response is still one valid `{messages, more}` JSON object, but each message
   now occupies its own physical line, so a line-oriented file reader can page through it

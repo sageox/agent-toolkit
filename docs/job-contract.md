@@ -537,7 +537,9 @@ body or opens a door this tier does not: `run`, `worker`, `parameters`, `model` 
 runs on `brain.model`), `output`, `report.probe`, `report.history` (the brain has its own
 channel reads), `trigger.onRequest` and `trigger.webhook`. `budget` is optional and can only
 shorten the turn: `wallClockMs` below `limits.turnTimeoutMs` wins, and above it does
-nothing. A job declaring both bodies, or neither, is refused.
+nothing. The shortened number is the turn's real one, so a `job_run` made inside such a tick
+is weighed against what is left of *it* — not against `limits.turnTimeoutMs`, which this
+turn never had. A job declaring both bodies, or neither, is refused.
 
 `sageox-agent doctor` and `sageox-agent validate` list every prompt job with where its
 words came from, their size, and its next fire time in the declared zone — the resolved

@@ -41,6 +41,7 @@ import {
   stdioTransport,
   serveBrokerServer,
   SurfaceEgress,
+  TurnClock,
   serveSurfaceEgress,
   serveSurfaceRead,
   SURFACE_EGRESS_SERVER,
@@ -287,6 +288,7 @@ async function buildBrain(
   codeWorkspace?: RepoWorkspace,
   policy?: ToolPolicy,
   switchSource?: SwitchSource,
+  turnClock?: TurnClock,
 ): Promise<{
   brain: Brain;
   closeHosted: () => Promise<void>;
@@ -456,6 +458,9 @@ async function buildBrain(
         // what it found in its report channel. The tool reads both numbers off what is
         // already declared, so there is nothing here for an operator to set a third way.
         turnTimeoutMs: manifest.limits.turnTimeoutMs,
+        // Which is a whole turn, and never what a call arriving mid-turn has left. The
+        // gateway publishes the real number here; without one this falls back to the above.
+        turnClock,
         host: jobs,
         agentName: manifest.name,
         // Who the run record says asked. A `tools/call` carries nothing about the turn that
@@ -1455,6 +1460,9 @@ async function runCmd(argv: string[]): Promise<void> {
   const state = loadState(statePath);
   const adapters = await buildAdapters(manifest, { secretsDir, since: state.since });
   const egress = new SurfaceEgress({ manifest, adapters });
+  // Written by the gateway below, read by the job tool built above it: a job is waited for
+  // only if it fits in what is left of the turn asking, not in a whole one.
+  const turnClock = new TurnClock();
   // One reader for both things that admit a job here — the chat door and the ticker below
   // — so a parked switch means the same thing to each.
   const switchSource = await jobSwitchSource(manifest, secretsDir);
@@ -1466,6 +1474,7 @@ async function runCmd(argv: string[]): Promise<void> {
     codeWorkspace,
     policy,
     switchSource,
+    turnClock,
   );
 
   // One lookup, so a credential that was already dead at deploy time is not first noticed
@@ -1509,6 +1518,7 @@ async function runCmd(argv: string[]): Promise<void> {
     // succeeds, and a latched one handed over as a value would outlive the credential that
     // was rotated to clear it.
     capabilities: () => [...(codeWorkspace?.readings() ?? []), ...(team?.readings() ?? [])],
+    turnClock,
   });
 
   // Read before anything starts listening: a schedule whose prompt file is missing,

@@ -83,13 +83,21 @@ that published no record. A job that declares
 refused at the call if they do not match; they reach the body as `JOB_PARAM_<NAME>` in its
 environment. They name a **target** — which issue, which document, which environment — and
 never a behaviour: a job whose work a caller can switch is two jobs with two slugs. See
-[the job body contract](../job-contract.md). A job short enough to finish inside a turn is
-waited for and the tool answers with its verdict; a job whose `wallClockMs +
-deadlineHeadroomMs` is longer than `limits.turnTimeoutMs` is **started** instead, and the
+[the job body contract](../job-contract.md). A job short enough to finish in **what is left
+of the turn** is waited for and the tool answers with its verdict; a job whose `wallClockMs +
+deadlineHeadroomMs` is longer than that is **started** instead, and the
 tool answers with the run id and nothing that reads as a verdict — the verdict arrives later,
 posted back into the conversation that asked, in the thread it was asked in, and as the
 job's ordinary status post where `report` says. A run answered that way is announced as a
-waited-for one is, so a clean verdict is spared the channel. Give such a job a `report`
+waited-for one is, so a clean verdict is spared the channel. What is *left*, rather than
+`limits.turnTimeoutMs`: the call always arrives partway into a turn, and a scheduled turn
+that declared its own `budget.wallClockMs` was never given the manifest's number at all. So
+the same job can be waited for early in a turn and started late in one, and the tool's answer
+says which happened. With two channels mid-turn at once, the bound is the **tightest** of
+them: a `tools/call` carries nothing that says which turn it came from, and the tightest is
+the only number every live turn satisfies. An agent answering two channels can therefore
+start a job it would have waited for on a quiet one — the verdict still lands where `report`
+says, which is why that is the safe way to be wrong. Give such a job a `report`
 destination all the same: the reply can be refused by the home channel's guard, or the call
 may have arrived while no one conversation could be named, and then the post is the only
 answer — `doctor` says so when there is none. Add it with `sageox-agent mcp add jobs`, which
@@ -163,9 +171,29 @@ past the call you were looking for.
 
 | `outcome` | What happened |
 |---|---|
-| `ok` | The tool ran and answered. |
+| `ok` | The tool ran and answered. Whether anyone was still listening is a separate question — see `tool_call_stranded` below. |
 | `refused` | A gate stopped it before it ran — the tool policy, or a write tool that is not armed. `reason` names the rule. |
 | `failed` | It ran and did not work. `reason` is what it said. |
+
+One more line is written about tool calls, by the gateway rather than by the call:
+
+```
+tool_call_stranded tool="mcp__jobs__job_run" ms=87762
+```
+
+Every turn this process was running has ended and that call is still going. Nothing here cancels it, so it finishes
+and writes its own `tool_call` line whenever it lands — reading `ok` if it worked, because
+from the call's side it did. Nobody read the answer. Read it against the `turn_done` and
+`turn_failed` lines immediately above it.
+
+**No turn ids, deliberately.** A `tools/call` carries nothing that says which turn made it,
+so with two channels mid-turn there is no way to tell whose call is whose; a line naming the
+turn that happened to finish last would point at a turn that never made the call. What is
+left is the claim this can check — the call is running and nothing is left to hear it — and
+that is why it waits for the last turn to end rather than the first. A call stranded while
+another channel is still busy is named later than it happened, and one that lands inside
+that window is not named at all. Each call is named at most once, however many turns it
+outlives.
 
 **A refusal is the line to watch.** One means a bundle is misconfigured — the tool is in
 the manifest and not in the policy, and `doctor` will name it. A stream of them, on an
