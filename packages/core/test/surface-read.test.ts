@@ -83,21 +83,23 @@ const askableSurfaces = (declared: Declared[]) => [
 function server(adapter: SurfaceAdapter, policy = allowAll()) {
   const egress = new SurfaceEgress({ manifest, adapters: [adapter] });
   const handle = surfaceReadHandler(egress, policy);
+  const callText = async (name: string, args: Record<string, unknown>) => {
+    const result = await handle({
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    });
+    return ((result?.content as Array<{ text: string }>) ?? [])[0]?.text ?? "";
+  };
   return {
     egress,
     tools: async () =>
       (((await handle({ id: 1, method: "tools/list" }))?.tools ?? []) as { name: string }[]).map(
         (tool) => tool.name,
       ),
-    call: async (name: string, args: Record<string, unknown>) => {
-      const result = await handle({
-        id: 1,
-        method: "tools/call",
-        params: { name, arguments: args },
-      });
-      const text = ((result?.content as Array<{ text: string }>) ?? [])[0]?.text ?? "";
-      return JSON.parse(text) as Record<string, unknown>;
-    },
+    callText,
+    call: async (name: string, args: Record<string, unknown>) =>
+      JSON.parse(await callText(name, args)) as Record<string, unknown>,
   };
 }
 
@@ -135,6 +137,65 @@ describe("the surface read server", () => {
       messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
       more: true,
     });
+  });
+
+  it("puts each message on its own line, so a spilled result can be read in chunks", async () => {
+    const messages = [
+      { author: IDA, text: "first\nline", ts: "2026-08-30T09:00:00.000Z" },
+      { author: IDA, text: "second", ts: "2026-08-30T10:00:00.000Z" },
+    ];
+    const { callText } = server(
+      reader({ readChannel: async () => ({ messages, more: false }) }).value,
+    );
+
+    const text = await callText("read_channel", { surface: "buzz", channel: "hive" });
+    expect(text.split("\n")).toEqual([
+      '{"messages":[',
+      `${JSON.stringify(messages[0])},`,
+      JSON.stringify(messages[1]),
+      '],"more":false}',
+    ]);
+    expect(JSON.parse(text)).toEqual({ messages, more: false });
+  });
+
+  it("bounds each message's text and marks only the messages it shortened", async () => {
+    const messages = [
+      { author: IDA, text: "hello 🐝 world", ts: "2026-08-30T09:00:00.000Z" },
+      { author: IDA, text: "short", ts: "2026-08-30T10:00:00.000Z" },
+    ];
+    const surface = reader({ readChannel: async () => ({ messages, more: false }) });
+    const { call } = server(surface.value);
+
+    expect(
+      await call("read_channel", {
+        surface: "buzz",
+        channel: "hive",
+        maxTextChars: 7,
+      }),
+    ).toEqual({
+      messages: [
+        { ...messages[0], text: "hello 🐝", truncated: true },
+        messages[1],
+      ],
+      more: false,
+    });
+    expect(await handleTools(surface.value)).toContainEqual(
+      expect.objectContaining({
+        name: "read_channel",
+        inputSchema: expect.objectContaining({
+          properties: expect.objectContaining({
+            maxTextChars: expect.objectContaining({ type: "integer", minimum: 1 }),
+          }),
+        }),
+      }),
+    );
+
+    await expect(
+      call("read_channel", { surface: "buzz", channel: "hive", maxTextChars: 0 }),
+    ).rejects.toThrow();
+    await expect(
+      call("read_channel", { surface: "buzz", channel: "hive", maxTextChars: 1.5 }),
+    ).rejects.toThrow();
   });
 
   it("names a channel read by display name, and only among configured ones", async () => {
