@@ -116,7 +116,7 @@ describe("the surface read server", () => {
     });
     expect(await call("describe_actor", { surface: "buzz", id: IDA.id })).toEqual({ actor: IDA });
     expect(await call("read_channel", { surface: "buzz", channel: "hive" })).toEqual({
-      messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
+      messages: [{ from: "ida", text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
       more: false,
     });
   });
@@ -134,7 +134,7 @@ describe("the surface read server", () => {
     // and "I stopped after one thing" the same answer, which is the whole reason the
     // adapter goes to the trouble of distinguishing them.
     expect(await call("read_channel", { surface: "buzz", channel: "hive" })).toEqual({
-      messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
+      messages: [{ from: "ida", text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
       more: true,
     });
   });
@@ -149,13 +149,33 @@ describe("the surface read server", () => {
     );
 
     const text = await callText("read_channel", { surface: "buzz", channel: "hive" });
+    const compact = messages.map(({ text, ts }) => ({ from: "ida", text, ts }));
     expect(text.split("\n")).toEqual([
       '{"messages":[',
-      `${JSON.stringify(messages[0])},`,
-      JSON.stringify(messages[1]),
+      `${JSON.stringify(compact[0])},`,
+      JSON.stringify(compact[1]),
       '],"more":false}',
     ]);
-    expect(JSON.parse(text)).toEqual({ messages, more: false });
+    expect(JSON.parse(text)).toEqual({ messages: compact, more: false });
+  });
+
+  it("uses a compact id when the surface has no display name", async () => {
+    const id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const message = {
+      author: { ...IDA, id, name: undefined },
+      text: "hello",
+      ts: "2026-08-30T09:00:00.000Z",
+    };
+    const { callText } = server(
+      reader({ readChannel: async () => ({ messages: [message], more: false }) }).value,
+    );
+
+    const text = await callText("read_channel", { surface: "buzz", channel: "hive" });
+    expect(JSON.parse(text)).toEqual({
+      messages: [{ from: "0123456789ab…", text: "hello", ts: message.ts }],
+      more: false,
+    });
+    expect(text).not.toContain(id);
   });
 
   it("bounds each message's text and marks only the messages it shortened", async () => {
@@ -174,8 +194,8 @@ describe("the surface read server", () => {
       }),
     ).toEqual({
       messages: [
-        { ...messages[0], text: "hello 🐝", truncated: true },
-        messages[1],
+        { from: "ida", text: "hello 🐝", ts: messages[0].ts, truncated: true },
+        { from: "ida", text: "short", ts: messages[1].ts },
       ],
       more: false,
     });

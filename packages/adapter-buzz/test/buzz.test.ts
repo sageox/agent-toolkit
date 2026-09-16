@@ -1320,14 +1320,17 @@ describe("BuzzAdapter reads the surface it is on", () => {
 
   it("reads a channel oldest first and asks the relay for only the newest few", async () => {
     relay = await FakeRelay.start();
+    relay.backlog.push(directoryRecord(userSk, "marie"));
     const a = newAdapter();
-    await a.start();
+    await a.start(() => {});
+    await settle();
     relay.backlog.push(inChannel("hive", "second", now + 20));
     relay.backlog.push(inChannel("hive", "first", now + 10));
     relay.backlog.push(inChannel("ops", "elsewhere", now + 30));
 
     const whole = await a.readChannel!({ surface: "buzz", id: "hive", isPublic: false });
     expect(whole.messages.map((message) => message.text)).toEqual(["first", "second"]);
+    expect(whole.messages.map((message) => message.author.name)).toEqual(["marie", "marie"]);
     // A REQ ends on the relay's EOSE, so what came back is the whole of what it stores for
     // the filter — there is no cursor to stop early on and nothing left behind.
     expect(whole.more).toBe(false);

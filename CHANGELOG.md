@@ -10,9 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A large `read_channel` result remains readable after a brain harness spills it to a
   file.** The response is still one valid `{messages, more}` JSON object, but each message
   now occupies its own physical line, so a line-oriented file reader can page through it
-  instead of meeting one line larger than its token cap. Callers can also pass
-  `maxTextChars` to bound every message's text; a shortened message carries
-  `truncated: true`, while `more` keeps its existing meaning of older messages omitted.
+  instead of meeting one line larger than its token cap. Each line is compact
+  `{from, text, ts}`: `from` uses the display name when known and an abbreviated id
+  otherwise, replacing the per-message `author` object rather than repeating its full
+  transport envelope. Callers can also pass `maxTextChars` to bound every message's text;
+  a shortened message carries `truncated: true`, while `more` keeps its existing meaning
+  of older messages omitted.
 
 ## [0.6.0] - 2026-09-14
 

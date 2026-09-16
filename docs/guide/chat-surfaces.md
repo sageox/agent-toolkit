@@ -721,13 +721,17 @@ day the channel has had as silence. The read succeeds, the job passes, and the o
 summary that says the opposite of the truth. The window also keeps the answer small, which
 is the difference between a result the agent reads and one it has to slice up first.
 
-Message count is not result size. A caller with a fixed context budget can also pass
-`maxTextChars`: each message's text is shortened to that many characters, and only a
-shortened message carries `truncated: true`. This does not change `more`, which still says
-whether older messages were omitted rather than whether text was shortened. The result
-remains valid JSON, with each message on its own physical line. If a brain harness spills a
-large answer to a file, its line-based reader can therefore recover it a message at a time;
-newlines inside message text are JSON-escaped and do not split a message across lines.
+Message count is not result size. `read_channel` therefore returns compact
+`{from, text, ts}` messages rather than repeating the transport-qualified actor object on
+every line. `from` is the author's display name when the surface knows it, or the first
+twelve characters of its id followed by `…`; it is an attribution label, not an id to pass
+to another tool. A caller with a fixed context budget can also pass `maxTextChars`: each
+message's text is shortened to that many characters, and only a shortened message carries
+`truncated: true`. This does not change `more`, which still says whether older messages were
+omitted rather than whether text was shortened. The result remains valid JSON, with each
+message on its own physical line. If a brain harness spills a large answer to a file, its
+line-based reader can therefore recover it a message at a time; newlines inside message
+text are JSON-escaped and do not split a message across lines.
 
 That is why `read_channel` answers `more` beside its `messages`. A short list and a quiet
 channel are the same list, and only that field separates them — `more: true` means there
