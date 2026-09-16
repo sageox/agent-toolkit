@@ -64,7 +64,11 @@ const allowAll = () =>
     [],
   );
 
-type Declared = { name: string; inputSchema: { properties: { surface: { description: string } } } };
+type Declared = {
+  name: string;
+  description: string;
+  inputSchema: { properties: { surface: { description: string } } };
+};
 
 /** The full tool declarations, for assertions about what a description actually says. */
 async function handleTools(adapter: SurfaceAdapter): Promise<Declared[]> {
@@ -332,6 +336,15 @@ describe("the surface read server", () => {
     await expect(blind.call("describe_actor", { surface: "buzz", id: IDA.id })).rejects.toThrow(
       /cannot look an id up/,
     );
+  });
+
+  it("does not advertise a compact channel attribution label as an actor id", async () => {
+    const description = (await handleTools(reader().value)).find(
+      (tool) => tool.name === "describe_actor",
+    )?.description;
+
+    expect(description).toContain("full id");
+    expect(description).toContain("compact `read_channel.from` label is attribution only");
   });
 
   it("offers and serves only the reads the policy allows", async () => {

@@ -247,8 +247,10 @@ function tools(egress: SurfaceEgress): ToolDecl[] {
     {
       name: DESCRIBE_ACTOR,
       description:
-        "Look one id up on the surface that issued it — the id on the `from` line of a " +
-        "message, or one you were given. Answers `{actor}`, either " +
+        "Look one full id up on the surface that issued it — for example, the id in the " +
+        "current turn's `from` header, a `list_members` actor, or one you were given. " +
+        "The compact `read_channel.from` label is attribution only and cannot be looked " +
+        "up. Answers `{actor}`, either " +
         "`{surface, id, isSelf, isAgent, name?}` or null when that surface has never heard " +
         "of the id. Use it to put a name to an id, or to tell an agent from a person.",
       inputSchema: {
