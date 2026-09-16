@@ -140,10 +140,16 @@ export function surfaceReadHandler(egress: SurfaceEgress, policy: ToolPolicy): M
       );
       const messages = history.messages.map((message) => {
         if (maxTextChars === undefined) return message;
-        const chars = [...message.text];
-        return chars.length <= maxTextChars
-          ? message
-          : { ...message, text: chars.slice(0, maxTextChars).join(""), truncated: true };
+        let end = 0;
+        let count = 0;
+        for (const char of message.text) {
+          if (count === maxTextChars) {
+            return { ...message, text: message.text.slice(0, end), truncated: true };
+          }
+          end += char.length;
+          count++;
+        }
+        return message;
       });
       return [
         '{"messages":[',
