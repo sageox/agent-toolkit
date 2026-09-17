@@ -6,6 +6,6 @@
   "main": "./src/index.ts",
   "dependencies": {
     "@sageox/agent-toolkit-core": "workspace:*",
-    "nostr-tools": "^2.24.2"
+    "nostr-tools": "^2.25.2"
   }
 }
