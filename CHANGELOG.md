@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-16
+
+Everything below shipped after `v0.6.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.6.1` takes `:latest` and advances `:0.6`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
 - **`job_run` waits only for a job that fits in what is left of the turn, and a turn says
   what it left running.** Both halves are the rest of #44, whose first half — the brain's
   MCP client giving up on its own shorter clock — was closed in 0.3.1 by setting that clock
@@ -52,7 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport envelope. Callers can also pass `maxTextChars` to bound every message's text;
   a shortened message carries `truncated: true`, while `more` keeps its existing meaning
   of older messages omitted.
-
 ## [0.6.0] - 2026-09-14
 
 Everything below shipped after `v0.5.2`.
