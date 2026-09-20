@@ -1150,6 +1150,71 @@ describe("Gateway.tick", () => {
     expect(f.posts).toHaveLength(0);
   });
 
+  it("admits a tick's own answer through the same caps, and starts no turn for it", async () => {
+    const f = postingAdapter([HIVE]);
+    const brain: Brain = {
+      // eslint-disable-next-line require-yield
+      async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        throw new Error("a host-written line must not start a brain turn");
+      },
+    };
+    const gw = new Gateway({
+      manifest: ticking("limits: {perChannelPerMinute: 1}\n"),
+      adapters: [f.adapter],
+      brain,
+    });
+    await gw.start();
+    const to = { surface: "slack", channel: "C01" };
+
+    expect(await gw.say(tickEv("nothing to report"), to, "quiet day")).toEqual({ asked: 1, sent: 1 });
+    // The cap a digest tick meets in this channel, so one job's output is admitted one way
+    // whether a turn wrote it or the host did.
+    expect(await gw.say(tickEv("nothing to report"), to, "quiet day")).toEqual({
+      asked: 0,
+      sent: 0,
+      skipped: "limit:perChannelPerMinute",
+    });
+    gw.stopServing("operator");
+    expect(await gw.say(tickEv("nothing to report"), to, "quiet day")).toEqual({
+      asked: 0,
+      sent: 0,
+      skipped: "kill_switch",
+    });
+    expect(f.posts.map((post) => post.msg.text)).toEqual(["quiet day"]);
+  });
+
+  it("drops a line whose tick ran out of clock while the channel was busy", async () => {
+    const f = postingAdapter([HIVE]);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let chatStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      chatStarted = resolve;
+    });
+    const brain: Brain = {
+      async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        chatStarted();
+        await held;
+        yield { type: "reply", msg: { text: "done" } };
+      },
+    };
+    const gw = new Gateway({ manifest: ticking("", "anyone"), adapters: [f.adapter], brain });
+    await gw.start();
+
+    // The channel is busy, so the line waits — and its tick's clock is running while it does.
+    f.inject({ ...tickEv("a message"), author: { surface: "slack", id: "u1", isSelf: false, isAgent: false } });
+    await started;
+    const said = gw.say(tickEv("nothing to report"), { surface: "slack", channel: "C01" }, "quiet day", 20);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    release();
+
+    expect(await said).toEqual({ asked: 0, sent: 0, skipped: "deadline" });
+    // Only the chat turn's own reply was attempted; the stale line never reached the surface.
+    expect(f.posts).toHaveLength(0);
+  });
+
   it("answers a turn that never finished with the tally and the failure", async () => {
     const f = postingAdapter([HIVE]);
     const brain: Brain = {

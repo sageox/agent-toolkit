@@ -13,9 +13,10 @@ import { join, resolve, sep } from "node:path";
 import { Cron } from "croner";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { acceptDigest, digestBrief, digestData } from "./digest.ts";
 import { errorLine, errorText } from "./errors.ts";
-import type { ChannelRef, InboundEvent } from "./events.ts";
-import type { Gateway, TickOutcome } from "./gateway.ts";
+import type { ChannelHistory, ChannelRef, InboundEvent } from "./events.ts";
+import { withTimeout, type Gateway, type TickOutcome } from "./gateway.ts";
 import { admitJob, type SwitchSource } from "./kill-switch.ts";
 import {
   announces,
@@ -25,9 +26,10 @@ import {
   type JobRun,
 } from "./job-host.ts";
 import { JOB_ARTIFACT_LIMIT_BYTES } from "./job-output.ts";
-import type { PromptJob } from "./manifest.ts";
+import type { JobSource, PromptJob } from "./manifest.ts";
+import type { ChannelWindow } from "./surface-read.ts";
 import { combineVerdicts, verdictFromGate } from "./verdict.ts";
-import type { WorkStart } from "./work-events.ts";
+import type { WorkCheck, WorkReport, WorkStart } from "./work-events.ts";
 
 /**
  * The light tier of scheduled work: a clock tick that runs an ordinary guarded brain turn
@@ -36,8 +38,8 @@ import type { WorkStart } from "./work-events.ts";
  * Everything around it is the envelope `jobs[]` already has — the trigger, the switch,
  * `suspend`, `report`, the run record — and only the body differs. What that buys is the
  * work a job cannot do and a turn cannot be woken for: read one surface's channel,
- * summarize it with the agent's own tools, and post the summary on another, at 18:00,
- * without anybody posting a mention at 18:00.
+ * summarize it, and post the summary on another, at 18:00, without anybody posting a
+ * mention at 18:00.
  *
  * The credential line is unmoved in both directions. This tier holds none — it is a turn,
  * so it reaches exactly what the brain already reaches through the guard — and a `run`
@@ -255,7 +257,12 @@ export interface ScheduledTurn {
 export interface ScheduledTurnsOptions {
   turns: readonly ScheduledTurn[];
   /** Where a tick's turn actually runs. The gateway, in this process. */
-  gateway: Pick<Gateway, "tick">;
+  gateway: Pick<Gateway, "tick" | "say" | "serving">;
+  /**
+   * How a job's `source` is read: `read_channel`'s own read, bound by the caller. Unset
+   * means nothing here can read one, and such a job fails its read.
+   */
+  read?: (source: ChannelWindow) => Promise<ChannelHistory>;
   /** The ceiling on a turn, which a job's own `budget.wallClockMs` may lower. */
   turnTimeoutMs: number;
   /**
@@ -436,48 +443,168 @@ export class ScheduledTurns {
       const deadlineMs = Math.min(this.opts.turnTimeoutMs, job.budget?.wallClockMs ?? Infinity);
       this.observe(() => this.opts.onStart?.({ ...base, admittedAt: Date.now(), deadlineMs }));
 
-      const outcome = await this.opts.gateway.tick(
-        tickEvent(job, prompt, channel, runId, at),
-        job.report,
-        deadlineMs,
-      );
+      const done = job.source
+        ? await this.digest(turn, job.source, runId, at, deadlineMs)
+        : ticked(
+            job,
+            await this.opts.gateway.tick(
+              tickEvent(job, prompt.body, channel, runId, at),
+              job.report,
+              deadlineMs,
+            ),
+          );
 
       // A tick the gateway would not start is the caps doing their job, and it is told the
       // same way a dropped job tick is: recorded, and silent.
-      if (outcome.skipped) {
+      if ("skipped" in done) {
+        const refused = `the gateway did not start this tick (${done.skipped})`;
+        const checks = [...(done.checks ?? []), didNotRun];
         this.record({
           ...base,
           outcome: "skipped-overlap",
           switch: admission.switch,
           bypassedSwitch: false,
-          gates: [verdictFromGate(didNotRun)],
-          checks: [didNotRun],
-          reason: `the gateway did not start this tick (${outcome.skipped})`,
+          gates: checks.map(verdictFromGate),
+          checks,
+          reason: done.reason ? `${done.reason}; ${refused}` : refused,
+          work: done.work,
           deadlineMs,
         });
         return;
       }
 
-      const check = { gate: jobGate(job), executed: true, exitCode: exitCodeFor(outcome) };
       const run = this.record({
         ...base,
         // A timed-out turn and a brain that threw are one fact here: nobody will learn what
         // this tick found. `budget-bowout` is a process body's word — it names a clock this
         // host stopped a spawned body on — and the reason line below says which happened.
-        outcome: outcome.error ? "crashed" : "completed",
+        outcome: done.outcome,
         switch: admission.switch,
         bypassedSwitch: false,
-        gates: [verdictFromGate(check)],
-        checks: [check],
-        reason: describeTick(outcome),
+        gates: done.checks.map(verdictFromGate),
+        checks: done.checks,
+        reason: done.reason,
+        work: done.work,
         deadlineMs,
       });
-      await this.announce(turn, run);
+      // A tick this gateway abandoned is recorded and not announced, exactly as one it
+      // refused before the turn is: the surfaces are closing behind it.
+      if (done.outcome !== "abandoned") await this.announce(turn, run);
     } catch (error) {
       // Nothing above is allowed to take the process down: this runs on a timer, so a
       // throw here would be an unhandled rejection and the whole of what anyone saw.
       console.warn(`tick_lost job=${job.slug} runId=${runId} reason=${errorLine(error)}`);
     }
+  }
+
+  /**
+   * A job with a `source`: the host reads, the brain only summarizes what it is handed, and
+   * only an answer that checks out against the read is posted. Each step is a gate of its
+   * own, so PASS needs all of them — and a notice that the work failed is never the work.
+   */
+  private async digest(
+    turn: ScheduledTurn,
+    source: JobSource,
+    runId: string,
+    at: Date,
+    deadlineMs: number,
+  ): Promise<Done> {
+    const { job, prompt, channel } = turn;
+    const ends = Date.now() + deadlineMs;
+    const from = `${source.surface}:${source.channel}`;
+    const step = (name: string, exitCode: number | null, executed = true): WorkCheck => ({
+      gate: `${jobGate(job)}:${name}`,
+      executed,
+      exitCode,
+      source: "host",
+    });
+    // Checked where `tick` checks it, before anything runs: the empty notice below is
+    // posted without a turn.
+    if (!this.opts.gateway.serving) return { skipped: "kill_switch" };
+
+    let history: ChannelHistory;
+    try {
+      if (!this.opts.read) throw new Error("nothing here can read a channel");
+      const read = this.opts.read(source);
+      history = await withTimeout(read, deadlineMs, `no answer in ${deadlineMs}ms`);
+    } catch (error) {
+      const reason = `the read of ${from} failed: ${errorLine(error)}`;
+      return { outcome: "completed", checks: [step("read", 1)], reason };
+    }
+    const work: WorkReport = { usage: { scanned: history.messages.length }, partial: history.more };
+
+    // A read can take the whole deadline, and a shutdown can land while it is out. `fire`
+    // asks this before a turn; nothing below may post once it is true. The kill switch and
+    // the caps are asked by `tick` and `say` themselves, on the same admission.
+    if (this.stopped) {
+      const reason =
+        `this gateway was asked to stop while ${job.slug} was reading ${from}, so nothing ` +
+        "was posted";
+      const checks = [step("read", 0), step("post", null, false)];
+      return { outcome: "abandoned", checks, reason, work };
+    }
+
+    if (!history.messages.length) {
+      // A read that stopped early and found nothing is no finding about the window.
+      if (history.more) {
+        const reason = `the read of ${from} stopped before the window's end and returned nothing`;
+        return { outcome: "completed", checks: [step("read", null)], reason, work };
+      }
+      // Through the gateway rather than posted from here: the notice is this run's answer,
+      // and it is admitted exactly as the digest below would be.
+      const notice = await this.opts.gateway.say(
+        tickEvent(job, source.empty, channel, runId, at),
+        job.report,
+        source.empty,
+        ends - Date.now(),
+      );
+      const empty = `${from} held nothing in the last ${source.withinHours}h`;
+      if (notice.skipped) {
+        return { skipped: notice.skipped, checks: [step("read", 0)], reason: empty, work };
+      }
+      const posted = notice.sent
+        ? `${empty}; posted the empty notice`
+        : `${empty}; the empty notice ${describePost(notice)}`;
+      return {
+        outcome: notice.error ? "crashed" : "completed",
+        checks: [step("read", 0), step("post", notice.sent ? 0 : notice.error ? null : 1)],
+        reason: posted,
+        work,
+      };
+    }
+
+    let accepted = 0;
+    let refused = "";
+    const outcome = await this.opts.gateway.tick(
+      tickEvent(job, digestData(history, source.maxTextChars), channel, runId, at),
+      job.report,
+      ends - Date.now(),
+      {
+        instructions: digestBrief(prompt.body, source, history),
+        accept: (text) => {
+          const checked = acceptDigest(text, history);
+          if (checked.ok) accepted++;
+          else refused = checked.reason;
+          return checked;
+        },
+      },
+    );
+    const read = `read ${history.messages.length} message(s) from ${from}`;
+    if (outcome.skipped) {
+      return { skipped: outcome.skipped, checks: [step("read", 0)], reason: read, work };
+    }
+    const unfinished = outcome.error ? null : 1;
+    return {
+      outcome: outcome.error ? "crashed" : "completed",
+      checks: [
+        step("read", 0),
+        step("summary", accepted ? 0 : unfinished),
+        // Owed only by an answer that checked out; with none, it never started.
+        accepted ? step("post", outcome.sent ? 0 : unfinished) : step("post", null, false),
+      ],
+      reason: `${read}; ${describeDigest(outcome, accepted, refused)}`,
+      work,
+    };
   }
 
   /** Says the tick out loud, when the host has something the turn did not say itself. */
@@ -492,9 +619,8 @@ export class ScheduledTurns {
   }
 
   private record(run: Omit<JobRun, "endedAt" | "verdict">): JobRun {
-    // Combined even though there is only ever one gate here, because `JobRun.verdict` is
-    // documented as exactly `combineVerdicts(gates)` — a record whose sum a reader cannot
-    // check is a record they have to take on trust.
+    // `JobRun.verdict` is documented as exactly `combineVerdicts(gates)` — a record whose
+    // sum a reader cannot check is a record they have to take on trust.
     const complete: JobRun = { ...run, endedAt: Date.now(), verdict: combineVerdicts(run.gates) };
     this.observe(() => this.opts.onRun?.(complete));
     return complete;
@@ -516,11 +642,34 @@ export class ScheduledTurns {
   }
 }
 
+/** What a tick came to, before it is recorded. */
+type Done =
+  // A refused tick still carries what the host saw before the refusal: a read that finished
+  // happened, whether or not a turn followed it.
+  | { skipped: string; checks?: WorkCheck[]; reason?: string; work?: WorkReport }
+  | {
+      outcome: "completed" | "crashed" | "abandoned";
+      checks: WorkCheck[];
+      reason: string;
+      work?: WorkReport;
+    };
+
+/** A tick with no `source`: one gate, the turn. */
+function ticked(job: PromptJob, outcome: TickOutcome): Done {
+  if (outcome.skipped) return { skipped: outcome.skipped };
+  return {
+    outcome: outcome.error ? "crashed" : "completed",
+    checks: [{ gate: jobGate(job), executed: true, exitCode: exitCodeFor(outcome) }],
+    reason: describeTick(outcome),
+  };
+}
+
 /**
  * What the turn proved, in the one vocabulary a job record has.
  *
- * `0` — the turn ran to the end. That covers a turn that posted and a turn that chose not
- * to: silence is the message, and a digest with nothing to report is a success.
+ * `0` — the turn ran to the end, whether it posted or chose not to: silence is the message.
+ * That is all a turn's words can prove, so a job that must show it read something declares
+ * a `source` instead.
  * `1` — the brain asked to post and nothing reached the channel. Every ask was refused by
  * the guard, which is a run that tried to speak and failed to.
  * `null` — the turn timed out or threw, so it never got to say what it found.
@@ -540,6 +689,25 @@ function describeTick(outcome: TickOutcome): string {
     : "the turn finished with nothing to say";
 }
 
+/** Why a post the host wrote itself did not reach the channel. */
+function describePost(outcome: TickOutcome): string {
+  // A post that threw may still have landed, so this never says it did not.
+  return outcome.error
+    ? `was not confirmed posted: ${errorLine(outcome.error)}`
+    : "was refused by the guard";
+}
+
+/** What a sourced tick's summary and post came to. */
+function describeDigest(outcome: TickOutcome, accepted: number, refused: string): string {
+  if (outcome.sent) return "posted a digest of them";
+  if (outcome.error) {
+    const what = accepted ? "the digest was not confirmed posted" : "the turn did not finish";
+    return `${what}: ${errorLine(outcome.error)}`;
+  }
+  if (accepted) return "the guard refused every digest the turn wrote";
+  return refused ? `no answer was a digest of them — ${refused}` : "the turn gave no answer";
+}
+
 /**
  * The tick as the gateway sees it: a synthetic inbound event, exactly as the design doc's
  * §10.1 describes one.
@@ -552,7 +720,7 @@ function describeTick(outcome: TickOutcome): string {
  */
 function tickEvent(
   job: PromptJob,
-  prompt: JobPrompt,
+  text: string,
   channel: ChannelRef,
   runId: string,
   at: Date,
@@ -562,7 +730,7 @@ function tickEvent(
     surface: channel.surface,
     channel,
     author: { surface: channel.surface, id: `schedule:${job.slug}`, isSelf: false, isAgent: false },
-    text: prompt.body,
+    text,
     mentionsMe: true,
     ts: at.toISOString(),
     // No adapter produced this, so there is no surface payload to escape into.

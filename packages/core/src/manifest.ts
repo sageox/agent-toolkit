@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { parse as parseYaml } from "yaml";
 import { SECRET_REF } from "./secrets.ts";
+import { HistoryArgs } from "./surface-read.ts";
 
 /**
  * A name a spawned child will really see — and deliberately not the POSIX identifier
@@ -912,6 +913,18 @@ export const JobSchema = z
       ])
       .optional(),
     /**
+     * The channel window a `prompt` body summarizes, read by the host before the brain is
+     * invoked, so whether the read happened is something the host saw rather than something
+     * the brain said. See `docs/job-contract.md`, "A job that reads before it speaks".
+     *
+     * `read_channel`'s own arguments and bounds, with the window required: without one an
+     * empty read is a fact about the channel's whole history, not about a period. `empty` is
+     * what is posted, with no turn at all, when the whole window was read and held nothing.
+     */
+    source: HistoryArgs.required({ withinHours: true })
+      .extend({ empty: z.string().trim().min(1) })
+      .optional(),
+    /**
      * Values a caller may hand one run of this job, by name. See {@link JobParameterSchema}.
      *
      * The default is none, and none is the safe default: a job that declares no parameters
@@ -1062,6 +1075,13 @@ export const JobSchema = z
           ["budget"],
         );
       }
+      if (job.source) {
+        refuse(
+          `job "${job.slug}" declares a \`run\` body, so it declares no \`source\` — the host ` +
+            "reads one only for a `prompt` body; a process body reads through `report.history`",
+          ["source"],
+        );
+      }
       return;
     }
 
@@ -1092,13 +1112,14 @@ export const JobSchema = z
       [
         "report.history",
         job.report?.history,
-        "the brain reads the channel with its own read tools",
+        "the brain reads a channel with its own read tools, and the host reads one named as " +
+          "`source`",
       ],
       [
         "report.proven",
         job.report?.proven !== undefined,
-        "it renders the threaded gate lines, and a tick mints one gate — so there is no " +
-          "thread and nothing for this to phrase",
+        "it renders the threaded gate lines, and a tick posts its headline alone — so there " +
+          "is no thread and nothing for this to phrase",
       ],
     ] as const) {
       if (declared) {
@@ -1222,6 +1243,21 @@ const ManifestSchema = z
   })
   .refine((m) => m.respondTo !== "allowlist" || (m.allowlist?.length ?? 0) > 0, {
     message: "respondTo: allowlist requires a non-empty `allowlist`",
+  })
+  // A `source` job summarizes in a turn with no tools, and only the Claude adapter can be
+  // held to that: it takes the MCP servers a session declares and switches its own tools off
+  // per session. Codex reads its MCP servers from the config written for the whole process
+  // and keeps them for a session that declares none, and it asks this client's permission
+  // for command execution, file changes and added permissions alone — never for an ordinary
+  // MCP tool call. So a turn there would keep `post_message` and could publish an answer
+  // that never passed the check, which is the failure `source` exists to close. Refused here
+  // rather than run under a guarantee it does not have.
+  .refine((m) => m.brain.provider !== "codex-acp" || m.jobs.every((job) => !job.source), {
+    message:
+      "a job declaring `source` summarizes in a turn with no tools, which the codex-acp " +
+      "brain cannot provide — its MCP servers belong to the whole process. Run this agent " +
+      "on claude-acp, or drop `source` and lose the guarantee that the digest was read",
+    path: ["jobs"],
   })
   .refine(
     (m) =>
@@ -1477,6 +1513,7 @@ export type PromptJob = JobConfig & {
   prompt: NonNullable<JobConfig["prompt"]>;
   report: NonNullable<JobConfig["report"]>;
 };
+export type JobSource = NonNullable<JobConfig["source"]>;
 
 /**
  * Narrowing, not a test: `JobSchema` already refused a job with neither body or both, and

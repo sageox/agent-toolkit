@@ -1119,6 +1119,43 @@ describe("a job whose body is a prompt", () => {
     ).toThrow(/`run` body but no `budget`/);
   });
 
+  it("takes a source as read_channel's arguments, with a window and an empty notice", () => {
+    const source = "{surface: slack, channel: C01, withinHours: 24, empty: 'Quiet day.'}";
+    expect(loadManifest(withJob({ source })).jobs[0]!.source).toEqual({
+      surface: "slack",
+      channel: "C01",
+      withinHours: 24,
+      empty: "Quiet day.",
+    });
+    for (const bad of [
+      "{surface: slack, channel: C01, empty: 'Quiet day.'}", // no window for an empty read to be about
+      "{surface: slack, channel: C01, withinHours: 24}", // nothing to post for an empty window
+      "{surface: slack, channel: C01, withinHours: 9000, empty: x}", // over read_channel's year
+      "{surface: slack, channel: C01, withinHours: 24, empty: x, since: 3}", // not an argument it takes
+    ]) {
+      expect(() => loadManifest(withJob({ source: bad })), bad).toThrow();
+    }
+    expect(() =>
+      loadManifest(
+        withJob({ prompt: undefined, run: "{command: node}", budget: "{wallClockMs: 1000}", source }),
+      ),
+    ).toThrow(/`run` body, so it declares no `source`/);
+  });
+
+  it("refuses a source on the brain whose turn cannot be sealed", () => {
+    // Codex takes its MCP servers from the process config whatever a session declares, and
+    // asks about commands and file changes rather than each tool call — so a turn there
+    // would keep `post_message` and could post an answer that never passed the check.
+    const source = "{surface: slack, channel: C01, withinHours: 24, empty: 'Quiet day.'}";
+    const codex = (yaml: string) => yaml.replace("provider: mock", "provider: codex-acp");
+    expect(() => loadManifest(codex(withJob({ source })))).toThrow(/codex-acp brain cannot/);
+    // The same agent without one is unaffected, and so is Claude with one.
+    expect(() => loadManifest(codex(withJob()))).not.toThrow();
+    expect(() =>
+      loadManifest(withJob({ source }).replace("provider: mock", "provider: claude-acp")),
+    ).not.toThrow();
+  });
+
   it("refuses every field that belongs to a process body, by name", () => {
     for (const [field, over] of [
       ["worker", { worker: `{image: "example/w@sha256:${"a".repeat(64)}", directory: /app}` }],

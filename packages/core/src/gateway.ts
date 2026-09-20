@@ -73,6 +73,22 @@ export interface TurnTally {
   sent: number;
 }
 
+/**
+ * A tick handed its data instead of the tools to fetch it, whose reply is checked before
+ * anything is posted. See `BrainContext.sealed`.
+ */
+export interface SealedTick {
+  /** The turn's whole brief. */
+  instructions: string;
+  /**
+   * The message a reply becomes, or why it is refused. A refusal goes back to the brain as
+   * the guard's does, so any repair is bounded by the turn's own clock and retry count.
+   */
+  accept(
+    text: string,
+  ): { ok: true; msg: GuardedMessage } | { ok: false; rule: string; reason: string };
+}
+
 /** {@link Gateway.tick}'s answer: whether the turn ran at all, and what it did. */
 export interface TickOutcome extends TurnTally {
   /** Why no turn ran, in {@link Gateway}'s own skip vocabulary. Absent when one did. */
@@ -237,11 +253,15 @@ export class Gateway {
    * The answer is a top-level post into `to`, which the guard admits exactly as it admits
    * the brain's own `post_message`: a channel the agent has no consent to speak in is one
    * this cannot reach either.
+   *
+   * With `sealed`, the turn has no tools, and a reply reaches `to` only as the message
+   * `accept` makes of it, once.
    */
   async tick(
     event: InboundEvent,
     to: { surface: string; channel: string },
     timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
+    sealed?: SealedTick,
   ): Promise<TickOutcome> {
     const tally: TurnTally = { asked: 0, sent: 0 };
     if (!this.serving) return { ...tally, skipped: "kill_switch" };
@@ -256,10 +276,19 @@ export class Gateway {
       // turn's late reply threads under the message it answers and contradicts nothing, so
       // this is the scheduled path's to close and not the shared loop's.
       let live = true;
-      const send: Send = async (msg) =>
-        live
-          ? this.egress.postReply(to.surface, to.channel, msg)
-          : { ok: false, rule: "turnEnded", reason: "this tick was recorded before the step arrived" };
+      const send: Send = async (msg) => {
+        if (!live) {
+          const reason = "this tick was recorded before the step arrived";
+          return { ok: false, rule: "turnEnded", reason };
+        }
+        if (!sealed) return this.egress.postReply(to.surface, to.channel, msg);
+        // A second answer is a second copy of what was already posted, not a correction.
+        if (tally.sent) {
+          return { ok: false, rule: "answered", reason: "this turn has already posted its answer" };
+        }
+        const accepted = sealed.accept(msg.text);
+        return accepted.ok ? this.egress.postReply(to.surface, to.channel, accepted.msg) : accepted;
+      };
 
       this.queue.submit(`${event.surface}:${event.channel.id}`, async () => {
         const started = Date.now();
@@ -270,8 +299,10 @@ export class Gateway {
           console.info(
             `tick_start surface=${event.surface} channel=${event.channel.id} author=${event.author.id}`,
           );
-          const scheduled = true; // the prompt is the bundle's, so the turn is not fenced
-          await this.runTurn(event, send, tally, timeoutMs, scheduled);
+          await this.runTurn(event, send, tally, timeoutMs, {
+            scheduled: true, // the prompt is the bundle's, so the turn is not fenced
+            sealed: sealed?.instructions,
+          });
           console.info(
             `tick_done surface=${event.surface} channel=${event.channel.id} ` +
               `author=${event.author.id} sent=${tally.sent} ms=${Date.now() - started}`,
@@ -292,6 +323,58 @@ export class Gateway {
         }
       // Shed rather than run: the queue is full of live chat in this channel, which is the
       // `channelQueueLimit` cap doing its job. The tick is owed a record either way.
+      }, () => resolve({ ...tally, skipped: "limit:channelQueueLimit" }));
+    });
+  }
+
+  /**
+   * A tick's answer that needed no turn: a job posting what the host already knows.
+   *
+   * {@link tick}'s door without the brain — the kill switch, the caps, and the destination
+   * channel's queue — so one job's output is admitted the same way whether or not a turn
+   * wrote it. A digest's empty-window notice would otherwise post while a real digest in
+   * the same channel was being rate-limited, shed, or held behind a live conversation.
+   *
+   * `timeoutMs` bounds the whole of it rather than the post alone, because the caller has
+   * nothing else to spend it on: a line queued behind a busy channel until after its tick's
+   * clock ran out is yesterday's news, and is dropped rather than published late.
+   */
+  async say(
+    event: InboundEvent,
+    to: { surface: string; channel: string },
+    text: string,
+    timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
+  ): Promise<TickOutcome> {
+    const tally: TurnTally = { asked: 0, sent: 0 };
+    if (!this.serving) return { ...tally, skipped: "kill_switch" };
+    const admission = this.policy.admit(event);
+    if (!admission.ok) return { ...tally, skipped: `limit:${admission.rule}` };
+
+    // Taken before the queue, which is the wait this has to survive.
+    const ends = Date.now() + timeoutMs;
+    return new Promise<TickOutcome>((resolve) => {
+      this.queue.submit(`${event.surface}:${event.channel.id}`, async () => {
+        const left = ends - Date.now();
+        if (left <= 0) return resolve({ ...tally, skipped: "deadline" });
+        tally.asked++;
+        try {
+          const verdict = await withTimeout(
+            this.egress.postReply(to.surface, to.channel, { text }),
+            left,
+            `the post did not finish in ${left}ms`,
+          );
+          if (verdict.ok) tally.sent++;
+          else {
+            console.warn(
+              `egress_blocked surface=${event.surface} channel=${event.channel.id} ` +
+                `rule=${verdict.rule} reason="${verdict.reason}"`,
+            );
+          }
+          resolve(tally);
+        } catch (error) {
+          // A post that threw may still have landed, so the caller records it as unknown.
+          resolve({ ...tally, error });
+        }
       }, () => resolve({ ...tally, skipped: "limit:channelQueueLimit" }));
     });
   }
@@ -401,7 +484,7 @@ export class Gateway {
     send: Send,
     tally: TurnTally = { asked: 0, sent: 0 },
     timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
-    scheduled = false,
+    tick: Pick<BrainContext, "scheduled" | "sealed"> = {},
   ): Promise<TurnTally> {
     const turn = this.opts.brain.runTurn(e, {
       agentName: this.opts.manifest.name,
@@ -409,7 +492,7 @@ export class Gateway {
       memory: this.opts.memory,
       postMessage: this.opts.postMessage,
       react: this.opts.react,
-      scheduled,
+      ...tick,
       capabilities: this.opts.capabilities?.(),
     });
     // Published for exactly as long as the bound below applies, and from here rather than

@@ -12,13 +12,27 @@ import {
   type ScheduledTurnsOptions,
 } from "../src/scheduled-turn.ts";
 import { Gateway, type TickOutcome } from "../src/gateway.ts";
-import { MockBrain } from "../src/brain.ts";
+import {
+  MockBrain,
+  type Brain,
+  type BrainContext,
+  type BrainStep,
+  type GuardFeedback,
+} from "../src/brain.ts";
 import type { SurfaceAdapter } from "../src/adapter.ts";
-import type { ChannelRef, GuardedMessage, InboundEvent } from "../src/events.ts";
+import type {
+  ActorRef,
+  ChannelHistory,
+  ChannelRef,
+  GuardedMessage,
+  InboundEvent,
+} from "../src/events.ts";
 import { isPromptJob, loadManifest, type PromptJob } from "../src/manifest.ts";
 import { JOB_ARTIFACT_LIMIT_BYTES } from "../src/job-output.ts";
 import type { JobPoster, JobRun } from "../src/job-host.ts";
 import type { SwitchLookup, SwitchSource } from "../src/kill-switch.ts";
+import { SurfaceEgress } from "../src/surface-egress.ts";
+import { readChannelWindow } from "../src/surface-read.ts";
 import { combineVerdicts } from "../src/verdict.ts";
 import { jobWorkEvents } from "../src/work-events.ts";
 
@@ -285,18 +299,24 @@ describe("readJobPrompt", () => {
   });
 });
 
-type Clock = Pick<Gateway, "tick">;
+type Clock = Pick<Gateway, "tick" | "say" | "serving">;
 
 /** A gateway stand-in: the ticker's one seam, so no brain or turn clock is in the way. */
 function fakeGateway(outcome: TickOutcome = { asked: 1, sent: 1 }) {
   const ticks: { event: InboundEvent; to: { surface: string; channel: string }; timeoutMs?: number }[] = [];
+  const said: string[] = [];
   const gateway: Clock = {
+    serving: true,
     tick: async (event, to, timeoutMs) => {
       ticks.push({ event, to, timeoutMs });
       return outcome;
     },
+    say: async (_event, _to, text) => {
+      said.push(text);
+      return { asked: 1, sent: 1 };
+    },
   };
-  return { ticks, gateway };
+  return { ticks, said, gateway };
 }
 
 function ticker(
@@ -445,7 +465,11 @@ describe("ScheduledTurns", () => {
     const post = vi.fn<JobPoster>(async () => undefined);
     await runOneTick(
       ticker(promptJob(), {
-        gateway: { tick: async () => ({ asked: 0, sent: 0, skipped: "limit:perChannelPerMinute" }) },
+        gateway: {
+          serving: true,
+          tick: async () => ({ asked: 0, sent: 0, skipped: "limit:perChannelPerMinute" }),
+          say: async () => ({ asked: 0, sent: 0 }),
+        },
         switchSource: armed,
         post,
         onRun: (run) => runs.push(run),
@@ -548,6 +572,8 @@ describe("ScheduledTurns", () => {
     });
     const turns = ticker(promptJob(), {
       gateway: {
+        serving: true,
+        say: async () => ({ asked: 0, sent: 0 }),
         tick: async () => {
           await held;
           return { asked: 1, sent: 1 };
@@ -648,5 +674,373 @@ describe("a scheduled turn end to end", () => {
     expect(posts[0]!.channel.id).toBe("C01");
     expect(runs[0]).toMatchObject({ outcome: "completed", trigger: "schedule" });
     expect(runs[0]!.verdict.status).toBe("PASS");
+  });
+});
+
+/**
+ * Issue #111: a digest that skipped its read, posted an excuse, and recorded PASS.
+ *
+ * Every case fires through the real ticker, gateway, egress and guard. Only the brain and the
+ * surface are stand-ins, and no case needs a brain that misbehaves on its own: each one
+ * scripts the misbehaviour and asserts what reached the channel and what the run recorded.
+ */
+describe("a job with a source", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const HIVE: ChannelRef = { surface: "slack", id: "C01", isPublic: false, name: "hive" };
+  const STATUS: ChannelRef = { surface: "slack", id: "C02", isPublic: false, name: "status" };
+  const author = (id: string, name: string): ActorRef => ({
+    surface: "slack",
+    id,
+    isSelf: false,
+    isAgent: true,
+    name,
+  });
+  const DAY: ChannelHistory = {
+    messages: [
+      { author: author("U0ADA", "ada"), text: "merged <https://example.test/pr/7|#7>", ts: "2026-09-10T09:00:00.000Z" },
+      { author: author("U0BO", "bo"), text: "the deploy is green", ts: "2026-09-10T10:00:00.000Z" },
+    ],
+    more: false,
+  };
+  const digest = (...items: unknown[]) => JSON.stringify({ items });
+  const GOOD = digest(
+    { text: "merged the fix (https://example.test/pr/7).", refs: [1] },
+    { text: "the deploy is green", refs: [2, 2] },
+  );
+  const POSTED = "• merged the fix (https://example.test/pr/7). — ada\n• the deploy is green — bo";
+
+  /** A reply, or one that arrives only when `ms` of the test's clock has passed. */
+  const late = (ms: number, text: string) => () =>
+    new Promise<string>((resolve) => setTimeout(() => resolve(text), ms));
+
+  async function fire(
+    opts: {
+      /** Yielded in order whatever the gateway answers, as a brain that will not stop would. */
+      replies?: (string | (() => Promise<string>))[];
+      /** Handed the live gateway, so a case can close a door while the read is still out. */
+      read?: (gateway: Gateway) => Promise<ChannelHistory>;
+      post?: SurfaceAdapter["post"];
+      limits?: string;
+      stopped?: boolean;
+      /** More of the test's clock to run after the tick, for what arrives late. */
+      after?: number;
+    } = {},
+  ) {
+    const manifest = loadManifest(
+      `${base.replace(
+        "channels: [{id: C01, name: hive, reply: private}]",
+        "channels: [{id: C01, name: hive, reply: private}, {id: C02, name: status, reply: private}]",
+      )}${opts.limits ?? ""}` +
+        `jobs: [{slug: daily-digest, archetype: watch, description: 'One post.', ` +
+        `trigger: {schedules: ["0 18 * * *"], timezone: UTC}, killSwitch: {failDirection: closed}, ` +
+        `prompt: 'Summarize the day.', ` +
+        `source: {surface: slack, channel: status, withinHours: 24, empty: 'Nothing in status today.'}, ` +
+        `report: {surface: slack, channel: hive}}]\n`,
+    );
+    const [job] = manifest.jobs;
+    if (!job || !isPromptJob(job)) throw new Error("this fixture declares no prompt body");
+
+    const posts: { channel: string; text: string }[] = [];
+    const reads: string[] = [];
+    const adapter: SurfaceAdapter = {
+      kind: "slack",
+      start: async () => {},
+      send: async () => {
+        throw new Error("a scheduled turn must not reply through the inbound path");
+      },
+      postTargets: () => [HIVE, STATUS],
+      post:
+        opts.post ??
+        (async (channel, msg) => {
+          posts.push({ channel: channel.id, text: msg.text });
+          return { surface: "slack", nativeId: `p${posts.length}` };
+        }),
+      readChannel: async (channel) => {
+        reads.push(channel.id);
+        return (opts.read ?? (async () => DAY))(gateway);
+      },
+      stop: async () => {},
+    };
+
+    const asked: {
+      event: InboundEvent;
+      ctx: BrainContext;
+      yielded: string[];
+      feedback: (GuardFeedback | undefined)[];
+    }[] = [];
+    const brain: Brain = {
+      async *runTurn(event, ctx): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        const turn = { event, ctx, yielded: [] as string[], feedback: [] as (GuardFeedback | undefined)[] };
+        asked.push(turn);
+        for (const reply of opts.replies ?? []) {
+          const text = typeof reply === "string" ? reply : await reply();
+          turn.yielded.push(text);
+          turn.feedback.push(yield { type: "reply", msg: { text } });
+        }
+      },
+    };
+    const egress = new SurfaceEgress({ manifest, adapters: [adapter] });
+    const gateway = new Gateway({ manifest, adapters: [adapter], brain, egress });
+    await gateway.start();
+    if (opts.stopped) gateway.stopServing("operator");
+
+    const runs: JobRun[] = [];
+    const events: Record<string, unknown>[] = [];
+    const work = jobWorkEvents("demo", { AGENT_WORK_EVENTS: "1" }, (line) =>
+      events.push(JSON.parse(line).sageox_work_event),
+    );
+    const turns = new ScheduledTurns({
+      turns: [{ job, prompt: readJobPrompt(job, "/nowhere"), channel: HIVE }],
+      gateway,
+      read: (source) => readChannelWindow(egress, source),
+      post: (report, text) => egress.post(report.surface, report.channel, { text }),
+      turnTimeoutMs: manifest.limits.turnTimeoutMs,
+      switchSource: armed,
+      onStart: work.onStart,
+      onRun: (run) => {
+        runs.push(run);
+        work.onRun?.(run);
+      },
+    });
+    await runOneTick(turns);
+    await vi.advanceTimersByTimeAsync(opts.after ?? 0);
+    await turns.drained();
+
+    const run = runs[0]!;
+    return {
+      posts,
+      reads,
+      asked,
+      run,
+      gates: run.gates.map((gate) => `${gate.gate} ${gate.status}`),
+      completed: events.find((event) => event.event === "run.completed")!,
+    };
+  }
+
+  /** The host's own status line, which is how a run that proved nothing is heard. */
+  const hostLine = (posts: { text: string }[]) =>
+    posts.length === 1 && posts[0]!.text.startsWith("job daily-digest ");
+
+  it("posts a digest of what the host read, rendered by the host", async () => {
+    const r = await fire({ replies: [GOOD] });
+
+    expect(r.reads).toEqual(["C02"]);
+    expect(r.posts).toEqual([{ channel: "C01", text: POSTED }]);
+    expect(r.gates).toEqual([
+      "job:daily-digest:read PASS",
+      "job:daily-digest:summary PASS",
+      "job:daily-digest:post PASS",
+    ]);
+    // Sealed, with the read as fenced data and the job's words ahead of the answer's shape.
+    const [{ event, ctx }] = r.asked;
+    expect(ctx.sealed).toMatch(/^Summarize the day\.\n[\s\S]*"refs"/);
+    expect(event.text.split("\n")).toEqual([
+      JSON.stringify({ ref: 1, from: "ada", text: DAY.messages[0]!.text, ts: DAY.messages[0]!.ts }),
+      JSON.stringify({ ref: 2, from: "bo", text: DAY.messages[1]!.text, ts: DAY.messages[1]!.ts }),
+    ]);
+    expect(r.completed).toMatchObject({
+      verdict: "PASS",
+      usage: { scanned: 2 },
+      partial: false,
+      checks: [
+        { gate: "job:daily-digest:read", executed: true, exit_code: 0, source: "host" },
+        { gate: "job:daily-digest:summary", executed: true, exit_code: 0, source: "host" },
+        { gate: "job:daily-digest:post", executed: true, exit_code: 0, source: "host" },
+      ],
+    });
+  });
+
+  it.each([
+    ["an excuse in place of a digest", ["I could not access the status channel today."], /the answer is not JSON/],
+    ["no answer at all, as after tool discovery and nothing else", [], /the turn gave no answer/],
+  ])("never counts %s as a digest", async (_, replies, why) => {
+    const r = await fire({ replies });
+
+    // The read is the host's, so it happened whatever the brain did.
+    expect(r.reads).toEqual(["C02"]);
+    expect(hostLine(r.posts)).toBe(true);
+    expect(r.posts[0]!.text).not.toContain("could not access");
+    expect(r.gates).toEqual([
+      "job:daily-digest:read PASS",
+      "job:daily-digest:summary FAIL",
+      "job:daily-digest:post UNKNOWN",
+    ]);
+    expect(r.run.reason).toMatch(why);
+    expect(r.completed).toMatchObject({ verdict: "FAIL" });
+  });
+
+  it.each([
+    ["an error", async () => Promise.reject(new Error("not_in_channel")), /failed: not_in_channel/],
+    ["no answer", () => new Promise<ChannelHistory>(() => {}), /failed: no answer in 1000ms/],
+  ])("fails a read that ends in %s, and never wakes the brain", async (_, read, why) => {
+    const r = await fire({ read, replies: [GOOD], limits: "limits: {turnTimeoutMs: 1000}\n" });
+
+    expect(r.asked).toEqual([]);
+    expect(hostLine(r.posts)).toBe(true);
+    expect(r.gates).toEqual(["job:daily-digest:read FAIL"]);
+    expect(r.run.reason).toMatch(why);
+  });
+
+  it("posts the empty notice for a whole window that held nothing, with no turn", async () => {
+    const r = await fire({ read: async () => ({ messages: [], more: false }), replies: [GOOD] });
+
+    expect(r.asked).toEqual([]);
+    expect(r.posts).toEqual([{ channel: "C01", text: "Nothing in status today." }]);
+    expect(r.gates).toEqual(["job:daily-digest:read PASS", "job:daily-digest:post PASS"]);
+  });
+
+  it("says nothing is quiet when the read stopped short and found nothing", async () => {
+    const r = await fire({ read: async () => ({ messages: [], more: true }), replies: [GOOD] });
+
+    expect(r.asked).toEqual([]);
+    expect(hostLine(r.posts)).toBe(true);
+    expect(r.posts[0]!.text).not.toContain("Nothing in status today.");
+    expect(r.gates).toEqual(["job:daily-digest:read UNKNOWN"]);
+  });
+
+  it("keeps a digest of a partial read visibly partial", async () => {
+    const r = await fire({ read: async () => ({ ...DAY, more: true }), replies: [GOOD] });
+
+    expect(r.asked[0]!.ctx.sealed).toContain("Do not describe anyone as quiet or absent");
+    expect(r.posts).toEqual([
+      {
+        channel: "C01",
+        text: `${POSTED}\n(Partial: this covers only the 2 most recent messages in the window.)`,
+      },
+    ]);
+    expect(r.completed).toMatchObject({ verdict: "PASS", partial: true });
+  });
+
+  it.each([
+    ["not JSON", "```\nitems: merged the fix\n```", /not JSON/],
+    ["a field it does not take", digest({ text: "all quiet", refs: [1], quiet: ["bo"] }), /items\.0 does not fit/],
+    ["a message the read did not return", digest({ text: "shipped", refs: [3] }), /cites ref 3, and the read returned 2/],
+    ["a link no cited message carries", digest({ text: "see https://example.test/pr/8", refs: [1] }), /has a link/],
+    ["a link only an uncited message carries", digest({ text: "see https://example.test/pr/7", refs: [2] }), /has a link/],
+  ])("posts nothing for an answer with %s", async (_, answer, why) => {
+    const r = await fire({ replies: [answer] });
+
+    expect(hostLine(r.posts)).toBe(true);
+    expect(r.gates[1]).toBe("job:daily-digest:summary FAIL");
+    expect(r.run.reason).toMatch(why);
+  });
+
+  it("lets the turn repair a refused answer, and tells it why", async () => {
+    const r = await fire({ replies: [digest({ text: "shipped", refs: [3] }), GOOD] });
+
+    expect(r.asked[0]!.feedback[0]).toMatchObject({ blocked: true, rule: "digest" });
+    expect(r.posts).toEqual([{ channel: "C01", text: POSTED }]);
+    expect(r.run.verdict.status).toBe("PASS");
+  });
+
+  it("posts one digest however many the turn writes", async () => {
+    const r = await fire({ replies: [GOOD, GOOD, "and one more thing, in prose"] });
+
+    expect(r.posts).toEqual([{ channel: "C01", text: POSTED }]);
+    expect(r.asked[0]!.feedback.slice(1)).toEqual([
+      expect.objectContaining({ rule: "answered" }),
+      expect.objectContaining({ rule: "answered" }),
+    ]);
+  });
+
+  it("records a digest whose post failed as unproven, and never posts it again", async () => {
+    const posts: { channel: string; text: string }[] = [];
+    let calls = 0;
+    const r = await fire({
+      replies: [GOOD, GOOD],
+      post: async (channel, msg) => {
+        // The digest's post is the first; the surface may or may not have taken it.
+        if (++calls === 1) throw new Error("socket hang up");
+        posts.push({ channel: channel.id, text: msg.text });
+        return { surface: "slack", nativeId: `p${calls}` };
+      },
+    });
+
+    expect(calls).toBe(2);
+    expect(hostLine(posts)).toBe(true);
+    expect(r.gates).toEqual([
+      "job:daily-digest:read PASS",
+      "job:daily-digest:summary PASS",
+      "job:daily-digest:post UNKNOWN",
+    ]);
+    expect(r.run.reason).toMatch(/the digest was not confirmed posted: socket hang up/);
+  });
+
+  it("never posts a digest that arrives after the run was recorded", async () => {
+    const r = await fire({
+      replies: [late(5_000, GOOD)],
+      limits: "limits: {turnTimeoutMs: 1000}\n",
+      after: 10_000,
+    });
+
+    // The brain did come back with a digest, and the only thing in the channel is the
+    // host's line saying this run proved nothing.
+    expect(r.asked[0]!.yielded).toEqual([GOOD]);
+    expect(hostLine(r.posts)).toBe(true);
+    expect(r.run.outcome).toBe("crashed");
+    expect(r.gates[1]).toBe("job:daily-digest:summary UNKNOWN");
+  });
+
+  it("posts nothing and starts no turn once it is told to stop while reading", async () => {
+    // `runOneTick` stops the ticker at the end of the fire, while this read is still out —
+    // which is where a SIGTERM lands, since a read may take the whole deadline.
+    const r = await fire({
+      replies: [GOOD],
+      read: () => new Promise((resolve) => setTimeout(() => resolve(DAY), 2_000)),
+      after: 5_000,
+    });
+
+    expect(r.asked).toEqual([]);
+    expect(r.posts).toEqual([]);
+    expect(r.run.outcome).toBe("abandoned");
+    expect(r.run.verdict.status).toBe("UNKNOWN");
+  });
+
+  it("posts no empty notice once the kill switch closed while it was reading", async () => {
+    const r = await fire({
+      read: async (gateway) => {
+        gateway.stopServing("operator");
+        return { messages: [], more: false };
+      },
+    });
+
+    expect(r.posts).toEqual([]);
+    expect(r.run.reason).toContain("kill_switch");
+  });
+
+  it("keeps the read on the record when the gateway refuses the turn after it", async () => {
+    // A refusal after the read — a cap, a full queue, the switch — is still a run that read
+    // the window, and the record has to say what it saw.
+    const r = await fire({
+      replies: [GOOD],
+      read: async (gateway) => {
+        gateway.stopServing("operator");
+        return DAY;
+      },
+    });
+
+    expect(r.asked).toEqual([]);
+    expect(r.posts).toEqual([]);
+    expect(r.run.outcome).toBe("skipped-overlap");
+    expect(r.gates).toEqual(["job:daily-digest:read PASS", "job:daily-digest UNKNOWN"]);
+    expect(r.run.reason).toBe(
+      "read 2 message(s) from slack:status; the gateway did not start this tick (kill_switch)",
+    );
+    expect(r.completed).toMatchObject({ verdict: "UNKNOWN", usage: { scanned: 2 }, partial: false });
+  });
+
+  it("reads nothing while the agent is told to stop serving", async () => {
+    const r = await fire({ replies: [GOOD], stopped: true });
+
+    expect(r.reads).toEqual([]);
+    expect(r.posts).toEqual([]);
+    expect(r.run).toMatchObject({ outcome: "skipped-overlap" });
+    expect(r.run.reason).toContain("kill_switch");
   });
 });

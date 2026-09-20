@@ -119,6 +119,15 @@ export class AcpBrain implements Brain {
    * another, and idle ones are evicted so a long-running agent does not accumulate them.
    */
   private sessions = new Map<string, ChannelSession>();
+  /**
+   * Sessions opened for a sealed turn, whose every permission request is refused.
+   *
+   * That covers what each adapter asks about: for Claude, every tool call. Codex asks only
+   * about command execution, file changes and added permissions, and takes its MCP servers
+   * from the process config whatever a session declares — so a sealed turn cannot be sealed
+   * there, and `loadManifest` refuses the pairing rather than leaving this to hold it.
+   */
+  private sealed = new Set<string>();
 
   constructor(private opts: AcpBrainOptions = {}) {}
 
@@ -152,9 +161,11 @@ export class AcpBrain implements Brain {
       // Codex's MCP approval omits the tool name. Let that attempt reach the gateway,
       // where the HTTP endpoint checks the actual tool before executing it. The adapter
       // marks MCP approvals explicitly; native permission escalation is always refused.
-      const allowed = this.opts.provider === "codex-acp"
-        ? ctx.params._meta?.is_mcp_tool_approval === true
-        : this.opts.toolPolicy?.allowsTool(toolName).ok === true;
+      const allowed =
+        !this.sealed.has(ctx.params.sessionId) &&
+        (this.opts.provider === "codex-acp"
+          ? ctx.params._meta?.is_mcp_tool_approval === true
+          : this.opts.toolPolicy?.allowsTool(toolName).ok === true);
 
       if (allowed) {
         const allow = ctx.params.options.find(
@@ -244,9 +255,13 @@ export class AcpBrain implements Brain {
     this.evictIdleSessions();
 
     const key = `${event.surface}:${event.channel.id}`;
-    const existing = this.sessions.get(key);
-    const session = existing?.session ?? (await this.openSession());
-    this.sessions.set(key, { session, lastUsed: Date.now() });
+    const sealed = ctx.sealed !== undefined;
+    // A sealed turn takes a session of its own and closes it, so it inherits neither the
+    // channel's tools nor its conversation.
+    const existing = sealed ? undefined : this.sessions.get(key);
+    const session = existing?.session ?? (await this.openSession(sealed));
+    if (sealed) this.sealed.add(session.sessionId);
+    else this.sessions.set(key, { session, lastUsed: Date.now() });
 
     try {
       // Steering goes in only on the first turn of a session; after that the agent has
@@ -267,17 +282,25 @@ export class AcpBrain implements Brain {
         text = await readFinalText(session);
       }
     } finally {
-      // The session stays open — it is this channel's memory. Closing happens on
+      // An ordinary session stays open — it is this channel's memory. Closing happens on
       // eviction or shutdown.
+      if (sealed) {
+        this.sealed.delete(session.sessionId);
+        void this.closeSession({ session, lastUsed: 0 });
+      }
     }
   }
 
-  private async openSession() {
-    let builder = this.conn!.agent.buildSession(this.codexHome ?? this.opts.cwd ?? process.cwd());
-    for (const server of this.opts.mcpServers ?? []) {
-      builder = builder.withMcpServer(server);
-    }
-    return builder.start();
+  private async openSession(sealed = false) {
+    return this.conn!.agent
+      .buildSession({
+        cwd: this.codexHome ?? this.opts.cwd ?? process.cwd(),
+        mcpServers: sealed ? [] : [...(this.opts.mcpServers ?? [])],
+        // claude-agent-acp's switch for its own tools. An adapter that does not know it
+        // ignores it, which leaves the permission refusal as the gate.
+        ...(sealed ? { _meta: { disableBuiltInTools: true } } : {}),
+      })
+      .start();
   }
 
   /** Drops conversations nobody has touched for a while, so memory stays bounded. */
