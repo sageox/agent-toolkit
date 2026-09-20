@@ -577,7 +577,9 @@ Each tick is three steps, each its own gate, and PASS needs every gate the run m
 | `job:<slug>:post` | Posts what it rendered from that reply, through the guard. |
 
 **An empty window is the host's to report**, with no turn at all: a read that returned
-nothing and did not stop early posts `empty`. One that stopped early (`more: true`) and
+nothing and did not stop early posts `empty` — through the same admission a digest goes
+through, so the kill switch, the rate caps and the destination channel's queue hold it
+exactly as they would hold a turn's answer. One that stopped early (`more: true`) and
 returned nothing is no finding about the window, so nothing is posted and the read is UNKNOWN.
 
 **The turn is sealed** — its own session, closed when it ends, so it inherits neither the

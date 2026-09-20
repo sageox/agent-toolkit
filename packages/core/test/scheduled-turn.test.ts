@@ -299,19 +299,24 @@ describe("readJobPrompt", () => {
   });
 });
 
-type Clock = Pick<Gateway, "tick" | "serving">;
+type Clock = Pick<Gateway, "tick" | "say" | "serving">;
 
 /** A gateway stand-in: the ticker's one seam, so no brain or turn clock is in the way. */
 function fakeGateway(outcome: TickOutcome = { asked: 1, sent: 1 }) {
   const ticks: { event: InboundEvent; to: { surface: string; channel: string }; timeoutMs?: number }[] = [];
+  const said: string[] = [];
   const gateway: Clock = {
     serving: true,
     tick: async (event, to, timeoutMs) => {
       ticks.push({ event, to, timeoutMs });
       return outcome;
     },
+    say: async (_event, _to, text) => {
+      said.push(text);
+      return { asked: 1, sent: 1 };
+    },
   };
-  return { ticks, gateway };
+  return { ticks, said, gateway };
 }
 
 function ticker(
@@ -463,6 +468,7 @@ describe("ScheduledTurns", () => {
         gateway: {
           serving: true,
           tick: async () => ({ asked: 0, sent: 0, skipped: "limit:perChannelPerMinute" }),
+          say: async () => ({ asked: 0, sent: 0 }),
         },
         switchSource: armed,
         post,
@@ -567,6 +573,7 @@ describe("ScheduledTurns", () => {
     const turns = ticker(promptJob(), {
       gateway: {
         serving: true,
+        say: async () => ({ asked: 0, sent: 0 }),
         tick: async () => {
           await held;
           return { asked: 1, sent: 1 };

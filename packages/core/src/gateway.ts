@@ -328,6 +328,50 @@ export class Gateway {
   }
 
   /**
+   * A tick's answer that needed no turn: a job posting what the host already knows.
+   *
+   * {@link tick}'s door without the brain — the kill switch, the caps, and the destination
+   * channel's queue — so one job's output is admitted the same way whether or not a turn
+   * wrote it. A digest's empty-window notice would otherwise post while a real digest in
+   * the same channel was being rate-limited, shed, or held behind a live conversation.
+   */
+  async say(
+    event: InboundEvent,
+    to: { surface: string; channel: string },
+    text: string,
+    timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
+  ): Promise<TickOutcome> {
+    const tally: TurnTally = { asked: 0, sent: 0 };
+    if (!this.serving) return { ...tally, skipped: "kill_switch" };
+    const admission = this.policy.admit(event);
+    if (!admission.ok) return { ...tally, skipped: `limit:${admission.rule}` };
+
+    return new Promise<TickOutcome>((resolve) => {
+      this.queue.submit(`${event.surface}:${event.channel.id}`, async () => {
+        tally.asked++;
+        try {
+          const verdict = await withTimeout(
+            this.egress.postReply(to.surface, to.channel, { text }),
+            timeoutMs,
+            `the post did not finish in ${timeoutMs}ms`,
+          );
+          if (verdict.ok) tally.sent++;
+          else {
+            console.warn(
+              `egress_blocked surface=${event.surface} channel=${event.channel.id} ` +
+                `rule=${verdict.rule} reason="${verdict.reason}"`,
+            );
+          }
+          resolve(tally);
+        } catch (error) {
+          // A post that threw may still have landed, so the caller records it as unknown.
+          resolve({ ...tally, error });
+        }
+      }, () => resolve({ ...tally, skipped: "limit:channelQueueLimit" }));
+    });
+  }
+
+  /**
    * Tells the channel the agent has picked the message up and is working.
    *
    * Both signals are best-effort and never awaited into the turn: a failed emoji must

@@ -1150,6 +1150,39 @@ describe("Gateway.tick", () => {
     expect(f.posts).toHaveLength(0);
   });
 
+  it("admits a tick's own answer through the same caps, and starts no turn for it", async () => {
+    const f = postingAdapter([HIVE]);
+    const brain: Brain = {
+      // eslint-disable-next-line require-yield
+      async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        throw new Error("a host-written line must not start a brain turn");
+      },
+    };
+    const gw = new Gateway({
+      manifest: ticking("limits: {perChannelPerMinute: 1}\n"),
+      adapters: [f.adapter],
+      brain,
+    });
+    await gw.start();
+    const to = { surface: "slack", channel: "C01" };
+
+    expect(await gw.say(tickEv("nothing to report"), to, "quiet day")).toEqual({ asked: 1, sent: 1 });
+    // The cap a digest tick meets in this channel, so one job's output is admitted one way
+    // whether a turn wrote it or the host did.
+    expect(await gw.say(tickEv("nothing to report"), to, "quiet day")).toEqual({
+      asked: 0,
+      sent: 0,
+      skipped: "limit:perChannelPerMinute",
+    });
+    gw.stopServing("operator");
+    expect(await gw.say(tickEv("nothing to report"), to, "quiet day")).toEqual({
+      asked: 0,
+      sent: 0,
+      skipped: "kill_switch",
+    });
+    expect(f.posts.map((post) => post.msg.text)).toEqual(["quiet day"]);
+  });
+
   it("answers a turn that never finished with the tally and the failure", async () => {
     const f = postingAdapter([HIVE]);
     const brain: Brain = {

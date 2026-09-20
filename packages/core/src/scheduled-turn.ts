@@ -257,7 +257,7 @@ export interface ScheduledTurn {
 export interface ScheduledTurnsOptions {
   turns: readonly ScheduledTurn[];
   /** Where a tick's turn actually runs. The gateway, in this process. */
-  gateway: Pick<Gateway, "tick" | "serving">;
+  gateway: Pick<Gateway, "tick" | "say" | "serving">;
   /**
    * How a job's `source` is read: `read_channel`'s own read, bound by the caller. Unset
    * means nothing here can read one, and such a job fails its read.
@@ -530,9 +530,9 @@ export class ScheduledTurns {
     }
     const work: WorkReport = { usage: { scanned: history.messages.length }, partial: history.more };
 
-    // A read can take the whole deadline, and either door can close while it is out — so
-    // both are asked again here, ahead of everything below that posts. `fire` asks the same
-    // shutdown question before a turn, and `tick` asks the same switch question on admission.
+    // A read can take the whole deadline, and a shutdown can land while it is out. `fire`
+    // asks this before a turn; nothing below may post once it is true. The kill switch and
+    // the caps are asked by `tick` and `say` themselves, on the same admission.
     if (this.stopped) {
       const reason =
         `this gateway was asked to stop while ${job.slug} was reading ${from}, so nothing ` +
@@ -540,7 +540,6 @@ export class ScheduledTurns {
       const checks = [step("read", 0), step("post", null, false)];
       return { outcome: "abandoned", checks, reason, work };
     }
-    if (!this.opts.gateway.serving) return { skipped: "kill_switch" };
 
     if (!history.messages.length) {
       // A read that stopped early and found nothing is no finding about the window.
@@ -548,23 +547,25 @@ export class ScheduledTurns {
         const reason = `the read of ${from} stopped before the window's end and returned nothing`;
         return { outcome: "completed", checks: [step("read", null)], reason, work };
       }
+      // Through the gateway rather than posted from here: the notice is this run's answer,
+      // and it is admitted exactly as the digest below would be.
+      const notice = await this.opts.gateway.say(
+        tickEvent(job, source.empty, channel, runId, at),
+        job.report,
+        source.empty,
+        ends - Date.now(),
+      );
+      if (notice.skipped) return { skipped: notice.skipped };
       const empty = `${from} held nothing in the last ${source.withinHours}h`;
-      if (!this.opts.post) {
-        const reason = `${empty}, and nothing here can post`;
-        const checks = [step("read", 0), step("post", null, false)];
-        return { outcome: "completed", checks, reason, work };
-      }
-      try {
-        const posted = this.opts.post(job.report, source.empty);
-        await withTimeout(posted, ends - Date.now(), "no answer in time");
-        const reason = `${empty}; posted the empty notice`;
-        return { outcome: "completed", checks: [step("read", 0), step("post", 0)], reason, work };
-      } catch (error) {
-        // A post that failed may still have landed, so this is unknown rather than failed.
-        const reason = `${empty}; the empty notice was not confirmed posted: ${errorLine(error)}`;
-        const checks = [step("read", 0), step("post", null)];
-        return { outcome: "completed", checks, reason, work };
-      }
+      const posted = notice.sent
+        ? `${empty}; posted the empty notice`
+        : `${empty}; the empty notice ${describePost(notice)}`;
+      return {
+        outcome: notice.error ? "crashed" : "completed",
+        checks: [step("read", 0), step("post", notice.sent ? 0 : notice.error ? null : 1)],
+        reason: posted,
+        work,
+      };
     }
 
     let accepted = 0;
@@ -678,6 +679,14 @@ function describeTick(outcome: TickOutcome): string {
   return outcome.sent > 0
     ? `the turn posted ${outcome.sent} message(s)`
     : "the turn finished with nothing to say";
+}
+
+/** Why a post the host wrote itself did not reach the channel. */
+function describePost(outcome: TickOutcome): string {
+  // A post that threw may still have landed, so this never says it did not.
+  return outcome.error
+    ? `was not confirmed posted: ${errorLine(outcome.error)}`
+    : "was refused by the guard";
 }
 
 /** What a sourced tick's summary and post came to. */
