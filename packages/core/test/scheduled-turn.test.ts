@@ -1014,6 +1014,27 @@ describe("a job with a source", () => {
     expect(r.run.reason).toContain("kill_switch");
   });
 
+  it("keeps the read on the record when the gateway refuses the turn after it", async () => {
+    // A refusal after the read — a cap, a full queue, the switch — is still a run that read
+    // the window, and the record has to say what it saw.
+    const r = await fire({
+      replies: [GOOD],
+      read: async (gateway) => {
+        gateway.stopServing("operator");
+        return DAY;
+      },
+    });
+
+    expect(r.asked).toEqual([]);
+    expect(r.posts).toEqual([]);
+    expect(r.run.outcome).toBe("skipped-overlap");
+    expect(r.gates).toEqual(["job:daily-digest:read PASS", "job:daily-digest UNKNOWN"]);
+    expect(r.run.reason).toBe(
+      "read 2 message(s) from slack:status; the gateway did not start this tick (kill_switch)",
+    );
+    expect(r.completed).toMatchObject({ verdict: "UNKNOWN", usage: { scanned: 2 }, partial: false });
+  });
+
   it("reads nothing while the agent is told to stop serving", async () => {
     const r = await fire({ replies: [GOOD], stopped: true });
 

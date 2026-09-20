@@ -457,14 +457,17 @@ export class ScheduledTurns {
       // A tick the gateway would not start is the caps doing their job, and it is told the
       // same way a dropped job tick is: recorded, and silent.
       if ("skipped" in done) {
+        const refused = `the gateway did not start this tick (${done.skipped})`;
+        const checks = [...(done.checks ?? []), didNotRun];
         this.record({
           ...base,
           outcome: "skipped-overlap",
           switch: admission.switch,
           bypassedSwitch: false,
-          gates: [verdictFromGate(didNotRun)],
-          checks: [didNotRun],
-          reason: `the gateway did not start this tick (${done.skipped})`,
+          gates: checks.map(verdictFromGate),
+          checks,
+          reason: done.reason ? `${done.reason}; ${refused}` : refused,
+          work: done.work,
           deadlineMs,
         });
         return;
@@ -555,8 +558,10 @@ export class ScheduledTurns {
         source.empty,
         ends - Date.now(),
       );
-      if (notice.skipped) return { skipped: notice.skipped };
       const empty = `${from} held nothing in the last ${source.withinHours}h`;
+      if (notice.skipped) {
+        return { skipped: notice.skipped, checks: [step("read", 0)], reason: empty, work };
+      }
       const posted = notice.sent
         ? `${empty}; posted the empty notice`
         : `${empty}; the empty notice ${describePost(notice)}`;
@@ -584,7 +589,10 @@ export class ScheduledTurns {
         },
       },
     );
-    if (outcome.skipped) return { skipped: outcome.skipped };
+    const read = `read ${history.messages.length} message(s) from ${from}`;
+    if (outcome.skipped) {
+      return { skipped: outcome.skipped, checks: [step("read", 0)], reason: read, work };
+    }
     const unfinished = outcome.error ? null : 1;
     return {
       outcome: outcome.error ? "crashed" : "completed",
@@ -594,9 +602,7 @@ export class ScheduledTurns {
         // Owed only by an answer that checked out; with none, it never started.
         accepted ? step("post", outcome.sent ? 0 : unfinished) : step("post", null, false),
       ],
-      reason:
-        `read ${history.messages.length} message(s) from ${from}; ` +
-        describeDigest(outcome, accepted, refused),
+      reason: `${read}; ${describeDigest(outcome, accepted, refused)}`,
       work,
     };
   }
@@ -638,7 +644,9 @@ export class ScheduledTurns {
 
 /** What a tick came to, before it is recorded. */
 type Done =
-  | { skipped: string }
+  // A refused tick still carries what the host saw before the refusal: a read that finished
+  // happened, whether or not a turn followed it.
+  | { skipped: string; checks?: WorkCheck[]; reason?: string; work?: WorkReport }
   | {
       outcome: "completed" | "crashed" | "abandoned";
       checks: WorkCheck[];
