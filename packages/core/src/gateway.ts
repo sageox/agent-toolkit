@@ -334,6 +334,10 @@ export class Gateway {
    * channel's queue — so one job's output is admitted the same way whether or not a turn
    * wrote it. A digest's empty-window notice would otherwise post while a real digest in
    * the same channel was being rate-limited, shed, or held behind a live conversation.
+   *
+   * `timeoutMs` bounds the whole of it rather than the post alone, because the caller has
+   * nothing else to spend it on: a line queued behind a busy channel until after its tick's
+   * clock ran out is yesterday's news, and is dropped rather than published late.
    */
   async say(
     event: InboundEvent,
@@ -346,14 +350,18 @@ export class Gateway {
     const admission = this.policy.admit(event);
     if (!admission.ok) return { ...tally, skipped: `limit:${admission.rule}` };
 
+    // Taken before the queue, which is the wait this has to survive.
+    const ends = Date.now() + timeoutMs;
     return new Promise<TickOutcome>((resolve) => {
       this.queue.submit(`${event.surface}:${event.channel.id}`, async () => {
+        const left = ends - Date.now();
+        if (left <= 0) return resolve({ ...tally, skipped: "deadline" });
         tally.asked++;
         try {
           const verdict = await withTimeout(
             this.egress.postReply(to.surface, to.channel, { text }),
-            timeoutMs,
-            `the post did not finish in ${timeoutMs}ms`,
+            left,
+            `the post did not finish in ${left}ms`,
           );
           if (verdict.ok) tally.sent++;
           else {
