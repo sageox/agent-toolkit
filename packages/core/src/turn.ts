@@ -188,6 +188,22 @@ export function assembleTurnPrompt(
 ): string {
   const body = event.text.split(UNTRUSTED_CLOSE).join("[redacted-fence-marker]");
 
+  // A sealed turn's brief replaces the chat mechanics rather than following them: those
+  // describe tools and a reply path this turn does not have. No header either — the event's
+  // channel is where the answer goes, not where the data came from.
+  if (ctx.sealed !== undefined) {
+    return [
+      ctx.persona?.trim() || `You are ${ctx.agentName}.`,
+      "",
+      ctx.sealed,
+      UNTRUSTED_DATA,
+      "",
+      UNTRUSTED_OPEN,
+      body,
+      UNTRUSTED_CLOSE,
+    ].join("\n");
+  }
+
   // Steering is sent once per conversation. Repeating it every message would waste
   // tokens and read as the agent being re-briefed mid-sentence.
   const steering =

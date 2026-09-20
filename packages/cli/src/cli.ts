@@ -44,6 +44,7 @@ import {
   TurnClock,
   serveSurfaceEgress,
   serveSurfaceRead,
+  readChannelWindow,
   SURFACE_EGRESS_SERVER,
   SURFACE_EGRESS_TOOL,
   SURFACE_EGRESS_TOOL_NAMES,
@@ -1629,6 +1630,7 @@ function scheduledTurns(
   const clock = new ScheduledTurns({
     turns,
     gateway,
+    read: (source) => readChannelWindow(egress, source),
     turnTimeoutMs: manifest.limits.turnTimeoutMs,
     switchSource,
     post: jobPoster(egress),
@@ -1650,7 +1652,8 @@ function scheduledTurns(
 }
 
 /**
- * Why a prompt job's `report` destination is not a channel it can post into, or nothing.
+ * Why a prompt job's `report` destination is not a channel it can post into, or its
+ * `source` not one it can read, or nothing.
  *
  * Read off the manifest rather than off the live surfaces, so `validate` can ask it with no
  * agent home, no credential and no relay — which is the whole point of that command. `run`
@@ -1665,15 +1668,29 @@ function unreachableReport(manifest: AgentManifest, job: PromptJob): string | un
   if (!carriesTopLevelPosts(job.report.surface)) {
     return `${named}, but the ${job.report.surface} surface carries no top-level posts — ${nowhere}`;
   }
-  const surface = manifest.surfaces.find((declared) => declared.kind === job.report.surface);
-  const targets = (surface?.channels ?? []).map((channel) => ({
-    surface: job.report.surface,
-    id: channel.id,
-    isPublic: channel.reply === "public",
-    name: channel.name,
+  if (!listsChannel(manifest, job.report.surface, job.report.channel)) {
+    return `${named}, which that surface does not list as a channel — ${nowhere}`;
+  }
+  // A read is held to the configured channels, exactly as a post is.
+  if (job.source && !listsChannel(manifest, job.source.surface, job.source.channel)) {
+    return (
+      `job "${job.slug}" reads its source from ${job.source.surface}:${job.source.channel}, ` +
+      "which that surface does not list as a channel, so every read would be refused"
+    );
+  }
+  return undefined;
+}
+
+/** Whether `surface` configures `channel`, by id or unambiguous name, as a post resolves it. */
+function listsChannel(manifest: AgentManifest, surface: string, channel: string): boolean {
+  const declared = manifest.surfaces.find((candidate) => candidate.kind === surface);
+  const targets = (declared?.channels ?? []).map((listed) => ({
+    surface,
+    id: listed.id,
+    isPublic: listed.reply === "public",
+    name: listed.name,
   }));
-  if (resolveTarget(targets, job.report.surface, job.report.channel)) return undefined;
-  return `${named}, which that surface does not list as a channel — ${nowhere}`;
+  return resolveTarget(targets, surface, channel) !== undefined;
 }
 
 /**

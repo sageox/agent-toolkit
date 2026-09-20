@@ -218,6 +218,21 @@ describe("sageox-agent validate", () => {
     expect(stdout).toContain("does not list as a channel");
   });
 
+  it("fails on a source channel the surface does not list, which every read would refuse", async () => {
+    writeSkill();
+    const path = write(
+      "agent.yaml",
+      withChannel(AGENT_YAML("demo")) +
+        PROMPT_JOB +
+        "    source: {surface: slack, channel: nowhere, withinHours: 24, empty: Nothing today.}\n",
+    );
+
+    const { code, stdout } = await validate([path]);
+
+    expect(code).not.toBe(0);
+    expect(stdout).toContain("reads its source from slack:nowhere");
+  });
+
   it("fails on a report surface that carries no top-level post at all", async () => {
     // The half a channel list cannot answer: console lists the channel and still has no way
     // to publish a new top-level message in it, which is how a scheduled turn answers.

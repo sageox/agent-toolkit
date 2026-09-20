@@ -439,6 +439,8 @@ jobs:
     trigger: { schedules: ["0 18 * * *"], timezone: America/Los_Angeles }
     killSwitch: { key: mem/daily-digest/enabled, failDirection: closed }
     prompt: { skill: daily-digest }           # or an inline string, for a one-liner
+    # Read by the host before the brain is woken — see "A job that reads before it speaks".
+    source: { surface: buzz, channel: status, withinHours: 24, empty: "Nothing was posted in status today." }
     report: { surface: slack, channel: "C0123456789" }
 ```
 
@@ -453,10 +455,8 @@ bundle:
 name: daily-digest
 description: One short post per day summarizing what the other agents did.
 ---
-It is the scheduled daily digest. Read the status channel with read_channel, asking for
-withinHours: 24 rather than working the window out yourself. Write one line per agent that
-did something and keep the links those lines carry. Name agents with nothing as quiet. If
-`more` was true, say the window was busier than one read covers. Post nothing else.
+It is the scheduled daily digest. Write one line for each thing an agent got done, and keep
+the link that shows it.
 ```
 
 **Named, not pointed at.** A name is what a person says and what a tool argument carries,
@@ -534,8 +534,8 @@ a process job's.
 
 Each of these is refused at load on a prompt job, by name, because it belongs to a process
 body or opens a door this tier does not: `run`, `worker`, `parameters`, `model` (the turn
-runs on `brain.model`), `output`, `report.probe`, `report.history` (the brain has its own
-channel reads), `trigger.onRequest` and `trigger.webhook`. `budget` is optional and can only
+runs on `brain.model`), `output`, `report.probe`, `report.history` (the brain reads with its
+own tools, and the host reads a `source`), `trigger.onRequest` and `trigger.webhook`. `budget` is optional and can only
 shorten the turn: `wallClockMs` below `limits.turnTimeoutMs` wins, and above it does
 nothing. The shortened number is the turn's real one, so a `job_run` made inside such a tick
 is weighed against what is left of *it* — not against `limits.turnTimeoutMs`, which this
@@ -548,6 +548,73 @@ the kind of thing nobody notices until the 3am post reads wrong.
 `sageox-agent job run` refuses a prompt job: there is no process to spawn, and the gateway
 holds the clock. `sageox-agent job park <slug>` stops it without a deploy, as it stops any
 other job.
+
+## A job that reads before it speaks
+
+A turn's words prove only that it finished — so a digest that never read its channel, wrote
+that it could not, and had the excuse posted for it records `PASS`. A prompt job whose work
+is *summarize this channel* names the channel instead, and the host does every part of the
+work it can see:
+
+```yaml
+    source: { surface: buzz, channel: status, withinHours: 24, empty: "Nothing was posted in status today." }
+```
+
+`source` is `read_channel`'s own arguments and bounds — `surface`, `channel`, `withinHours`,
+optionally `limit` and `maxTextChars` — with the window required, because an empty read
+without one is a fact about the channel's whole history rather than about a period. The read
+is the host's: held to the configured channels, cut on the host's clock, capped at 200
+messages, and granted by this line rather than by the brain's tool policy. `validate`,
+`doctor` and `run` refuse a channel its surface does not list, and a `run` body refuses
+`source` — it reads through `report.history`.
+
+Each tick is three steps, each its own gate, and PASS needs every gate the run minted:
+
+| Gate | What the host does |
+|---|---|
+| `job:<slug>:read` | Reads the window before any brain is woken. An error, or no answer inside the turn's budget, fails it and ends the run. |
+| `job:<slug>:summary` | Hands the messages to a sealed turn, and takes its reply only if it checks out against the read. |
+| `job:<slug>:post` | Posts what it rendered from that reply, through the guard. |
+
+**An empty window is the host's to report**, with no turn at all: a read that returned
+nothing and did not stop early posts `empty`. One that stopped early (`more: true`) and
+returned nothing is no finding about the window, so nothing is posted and the read is UNKNOWN.
+
+**The turn is sealed** — its own session, closed when it ends, so it inherits neither the
+channel's tools nor its conversation, and no tools of its own: no MCP server attached, the
+adapter's own tools switched off, and every permission it asks for refused. Its brief is the
+job's words then the answer's shape, and the messages follow fenced as untrusted data, one
+JSON object per line, each with a `ref`.
+
+That holds on `claude-acp`, which takes the servers a session declares and switches its tools
+off per session. **`source` is refused at load on `codex-acp`**, which reads its MCP servers
+from the process config whatever a session declares, and asks this client about command
+execution, file changes and added permissions rather than about each tool call — so a turn
+there would keep `post_message` and could publish an answer that never passed the check.
+
+**The answer is data, checked against the read:**
+
+```json
+{ "items": [ { "text": "merged the release fix (https://example.test/pull/110)", "refs": [3, 5] } ] }
+```
+
+One to 50 items, each `text` one line of at most 500 characters, each `refs` naming at least
+one message this read returned — so there is no line for an author who posted nothing — and
+every link in a line present in a message that line cites. Anything else is not a digest, and
+the refusal goes back to the turn as a guard refusal does, to be repaired inside its own clock
+and retry count. The host renders what passes: one line per item, credited to the authors it
+cites, and after a partial read a last line saying the digest covers only the most recent
+messages. The words are the job's; the shape and the credits are the host's.
+
+**One post, and never a late one.** The first digest the guard admits is the only one, a reply
+that arrives after the run was recorded is refused, and a post that failed is recorded as
+unknown — the surface may have taken it — and never retried. A delivered failure notice is
+still not a digest: `announce` posts the host's line as it does for any job, and that moves no
+gate. The run's work event carries each gate as a `host` check, `usage.scanned` as the
+messages read, and `partial` for a read that stopped early.
+
+A prompt job without `source` is unchanged: its turn keeps the agent's tools, its reply is
+posted as written, and the turn finishing is its one gate.
 
 ## Structured work events (schema 1)
 

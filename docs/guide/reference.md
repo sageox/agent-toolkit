@@ -130,6 +130,7 @@ jobs:
     trigger: { schedules: ["0 18 * * *"], timezone: America/Los_Angeles }
     killSwitch: { failDirection: closed }
     prompt: { skill: daily-digest }           # or an inline string, for a one-liner
+    source: { surface: buzz, channel: status, withinHours: 24, empty: "Nothing in status today." }
     report: { surface: slack, channel: "C0123456789" }
 ```
 
@@ -137,6 +138,15 @@ Reach for it when the work needs the brain and no write credential — a daily d
 surface's channel posted on another, a reminder into a channel, *check X with your tools
 and post what you find*. Reach for `run:` when the work is deterministic, needs a
 credential, or is long.
+
+A digest declares `source`, and then the host does the read, not the brain. A turn's words
+prove only that it finished, so a turn left to read for itself can skip the read, post an
+excuse, and still record a pass. With `source`, the host reads the window first, posts
+`empty` itself when the window held nothing, and hands the messages to a sealed turn: its own
+session, holding no tools at all. (`source` needs the `claude-acp` brain — see the contract.)
+It posts that turn's answer only when the answer is a digest of those messages, and the run
+passes only when every one of those steps succeeded. See
+[a job that reads before it speaks](../job-contract.md#a-job-that-reads-before-it-speaks).
 
 The tick posts at top level in `report.channel`, through the same guard the brain's own
 `post_message` clears; an empty reply posts nothing. The kill switch, `suspend`, `doctor`,

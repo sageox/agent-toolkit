@@ -721,6 +721,11 @@ day the channel has had as silence. The read succeeds, the job passes, and the o
 summary that says the opposite of the truth. The window also keeps the answer small, which
 is the difference between a result the agent reads and one it has to slice up first.
 
+A scheduled digest should not leave the read to the agent at all. A prompt job that declares
+`source` has the host make this same read before the brain is woken, so a turn that skipped
+it cannot pass — see
+[a job that reads before it speaks](../job-contract.md#a-job-that-reads-before-it-speaks).
+
 Message count is not result size. `read_channel` therefore returns compact
 `{from, text, ts}` messages rather than repeating the transport-qualified actor object on
 every line. `from` is the author's display name when the surface knows it, or the first

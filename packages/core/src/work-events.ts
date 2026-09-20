@@ -60,7 +60,13 @@ export const VerdictArtifactSchema = WorkReportSchema.extend({
     detail: z.string().optional(),
   }).strict()),
 }).strict();
-export type WorkCheck = { gate: string; executed: boolean; exitCode: number | null };
+/** `source` defaults by position: the first check is the host's, the rest a producer's. */
+export type WorkCheck = {
+  gate: string;
+  executed: boolean;
+  exitCode: number | null;
+  source?: "host" | "producer";
+};
 export type WorkStart = Pick<JobRun, "jobSlug" | "runId" | "trigger" | "startedAt"> & {
   admittedAt: number;
   deadlineMs: number;
@@ -172,8 +178,8 @@ export function jobWorkEvents(
     onRun: (run) => {
       const report = WorkReportSchema.safeParse(run.work ?? {});
       // Gate names are identifiers; historical free-text names are omitted, not copied.
-      const checks = (run.checks ?? []).map(({ gate, executed, exitCode }, index) => ({
-        gate, executed, exit_code: exitCode, source: index === 0 ? "host" : "producer",
+      const checks = (run.checks ?? []).map(({ gate, executed, exitCode, source }, index) => ({
+        gate, executed, exit_code: exitCode, source: source ?? (index === 0 ? "host" : "producer"),
       })).filter((c) => /^[a-zA-Z0-9_.:-]{1,128}$/.test(c.gate));
       emit({ ...identity(run), event: "run.completed", occurred_at: new Date(run.endedAt).toISOString(),
         outcome: run.outcome, verdict: run.verdict.status, checks,

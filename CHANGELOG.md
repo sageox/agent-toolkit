@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A scheduled digest proves it read its channel before anything counts as a digest
+  (#111).** A prompt job's run passed whenever its turn finished. A digest that skipped its
+  channel read, wrote that it could not reach the channel, and had that excuse posted for it
+  therefore recorded `PASS`.
+
+  A prompt job may now declare `source` — `read_channel`'s arguments with the window
+  required, plus the `empty` notice — and the host does every step it can observe. It reads
+  the window before any brain is woken, and posts `empty` itself, with no turn, for a whole
+  window that held nothing. It hands the messages to a sealed turn — a session of its own,
+  holding no tools at all, with the messages fenced as data. It posts that turn's answer
+  only when it is
+  JSON whose every line cites messages this read returned and carries no link those
+  messages did not. The host renders the post and credits each line to the cited authors.
+  The read, the summary and the post are separate gates, so a failure notice never counts
+  as a digest, and a read that stopped early is marked partial rather than read as quiet.
+
+  Operators with a digest should move it to `source` and drop the reading instructions from
+  its skill. A prompt job without `source` behaves exactly as before. The host's read is
+  granted by the `source` line, not by the brain's tool policy. `validate`, `doctor` and
+  `run` refuse a `source` channel its surface does not list.
+
 ## [0.6.1] - 2026-09-16
 
 Everything below shipped after `v0.6.0`.

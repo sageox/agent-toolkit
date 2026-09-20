@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ChannelHistory, ThreadReply } from "./events.ts";
 import type { SurfaceEgress } from "./surface-egress.ts";
 import {
   mcpToolServer,
@@ -123,40 +124,12 @@ export function surfaceReadHandler(egress: SurfaceEgress, policy: ToolPolicy): M
       }
       if (tool !== READ_CHANNEL) throw new Error(`unknown tool ${tool}`);
 
-      const { surface, channel, limit, withinHours, maxTextChars } = HistoryArgs.parse(args);
-      // One clock reading, taken here. A brain given the period instead builds the window
-      // out of the date in its prompt and the timezone its job was scheduled in, and those
-      // are a calendar day apart for anything firing in the evening west of UTC — a window
-      // opened in the future reads a channel's busiest day as silence, and nothing errors.
-      //
+      const read = HistoryArgs.parse(args);
       // `more` travels with the messages rather than being dropped here: a short answer
       // that stopped early and one that reached the end of a quiet channel are the same
       // list, and only this field tells the brain which it is holding.
-      const history = await egress.readChannel(
-        surface,
-        channel,
-        Math.min(limit ?? MAX_MESSAGES, MAX_MESSAGES),
-        withinHours === undefined ? undefined : Date.now() - withinHours * MS_PER_HOUR,
-      );
-      const messages = history.messages.map((message) => {
-        const from =
-          message.author.name ??
-          (message.author.id.length > 12
-            ? `${message.author.id.slice(0, 12)}…`
-            : message.author.id);
-        const compact = { from, text: message.text, ts: message.ts };
-        if (maxTextChars === undefined) return compact;
-        let end = 0;
-        let count = 0;
-        for (const char of message.text) {
-          if (count === maxTextChars) {
-            return { ...compact, text: message.text.slice(0, end), truncated: true };
-          }
-          end += char.length;
-          count++;
-        }
-        return compact;
-      });
+      const history = await readChannelWindow(egress, read);
+      const messages = history.messages.map((message) => channelLine(message, read.maxTextChars));
       return [
         '{"messages":[',
         ...messages.map(
@@ -179,10 +152,54 @@ const ChannelArgs = SurfaceArgs.extend({
 const ActorArgs = SurfaceArgs.extend({ id: z.string().min(1) });
 // Its own schema rather than a field on `ChannelArgs`: a roster read has no window to ask
 // for, and a tool that quietly accepted one would be answering a question it did not apply.
-const HistoryArgs = ChannelArgs.extend({
+// Exported because a prompt job's `source` is these same arguments, bounded the same way.
+export const HistoryArgs = ChannelArgs.extend({
   withinHours: z.number().positive().max(MAX_WINDOW_HOURS).optional(),
   maxTextChars: z.number().int().min(1).optional(),
 });
+export type ChannelWindow = z.infer<typeof HistoryArgs>;
+
+/**
+ * The one `read_channel` read: the brain's tool, and the host's own read of a prompt job's
+ * `source`. Both get the configured-channel bound, the page cap, and this clock's window.
+ */
+export function readChannelWindow(
+  egress: SurfaceEgress,
+  { surface, channel, limit, withinHours }: ChannelWindow,
+): Promise<ChannelHistory> {
+  // One clock reading, taken here. A brain given the period instead builds the window
+  // out of the date in its prompt and the timezone its job was scheduled in, and those
+  // are a calendar day apart for anything firing in the evening west of UTC — a window
+  // opened in the future reads a channel's busiest day as silence, and nothing errors.
+  return egress.readChannel(
+    surface,
+    channel,
+    Math.min(limit ?? MAX_MESSAGES, MAX_MESSAGES),
+    withinHours === undefined ? undefined : Date.now() - withinHours * MS_PER_HOUR,
+  );
+}
+
+/** One message as `read_channel` answers it. `from` attributes it; it is not an address. */
+export function channelLine(
+  message: ThreadReply,
+  maxTextChars?: number,
+): { from: string; text: string; ts: string; truncated?: true } {
+  const from =
+    message.author.name ??
+    (message.author.id.length > 12 ? `${message.author.id.slice(0, 12)}…` : message.author.id);
+  const compact = { from, text: message.text, ts: message.ts };
+  if (maxTextChars === undefined) return compact;
+  let end = 0;
+  let count = 0;
+  for (const char of message.text) {
+    if (count === maxTextChars) {
+      return { ...compact, text: message.text.slice(0, end), truncated: true };
+    }
+    end += char.length;
+    count++;
+  }
+  return compact;
+}
 
 type ToolDecl = { name: string; description: string; inputSchema: unknown };
 
