@@ -396,6 +396,9 @@ export interface TeamBrain extends TeamOx {
  * brain never sees it.
  */
 export function makeOxTeam(scope: OxScope = {}): TeamBrain {
+  // A team brain always speaks for an agent, so without a token provider it gets no
+  // credential at all rather than the operator's; see oxEnv.
+  scope = { ...scope, token: scope.token ?? (() => undefined) };
   const remotes = scope.ledgerSync ?? [];
   if (remotes.length && (!scope.dataHome || remotes.some((remote) =>
     scope.repositories?.filter((repo) => repo.name === remote.repo).length !== 1))) {

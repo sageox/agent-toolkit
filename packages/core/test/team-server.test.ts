@@ -121,6 +121,24 @@ echo '{"team_context":{"results":[]}}'`,
     }
   });
 
+  it("gives a team brain built without a token provider no credential, never the operator's", async () => {
+    try {
+      vi.stubEnv("SAGEOX_TOKEN", "operator-token");
+      vi.stubEnv("XDG_CONFIG_HOME", "/home/operator/.config");
+      const { value: seen } = await withFakeOx(
+        `printf '%s\\n' "SAGEOX_TOKEN=$SAGEOX_TOKEN" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" > ./seen
+echo '{"team_context":{"results":[]}}'`,
+        async (brain, bin) => {
+          await brain.search("team", 1);
+          return readFileSync(join(bin, "seen"), "utf8");
+        },
+      );
+      expect(seen).toBe(`SAGEOX_TOKEN=\nXDG_CONFIG_HOME=${devNull}\n`);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("offers the read verbs the fleet uses, and no way to write", async () => {
     const listed = (await teamBrainHandler(fakeOx())({ id: 1, method: "tools/list" })) as {
       tools: Array<{ name: string; inputSchema: unknown }>;
