@@ -277,6 +277,9 @@ brains:
     configHome: /mnt/secrets-store/ox   # holds sageox/auth.json
 ```
 
+That login answers team search only. ox takes a team access token for [ledger sync](#ledger-sync)
+and never a disk login, so an agent granting `team_sessions` or `team_recent` needs `token` too.
+
 Set `BRAIN_MCP_HOST` when the brain runs in a separate container and needs a routable
 address; it defaults to `127.0.0.1`.
 

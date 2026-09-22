@@ -323,6 +323,8 @@ export const BrainSchema = z.discriminatedUnion("preset", [
      * `ox login`. In a container there is no interactive login, so the token file is
      * mounted as a secret and this points at it. A file, not an env var: env leaks
      * through `docker inspect`, `/proc/<pid>/environ`, and crash dumps (§7.3).
+     *
+     * It answers team search only: ox takes `token` for ledger sync and never a disk login.
      */
     configHome: z.string().optional(),
     /**
