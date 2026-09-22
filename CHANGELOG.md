@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-21
+
+Everything below shipped after `v0.6.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.7.0` takes `:latest` and `:0.7`. `:0.6` stays on 0.6.1. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
 - **A scheduled digest proves it read its channel before anything counts as a digest
   (#111).** A prompt job's run passed whenever its turn finished. A digest that skipped its
   channel read, wrote that it could not reach the channel, and had that excuse posted for it
@@ -35,7 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields on 0.17.0, so nothing that reads them changes. A job body that runs ox itself gets
   0.17.0 too: a plain `ox status` now exits non-zero when signed out or outside an
   initialized repository, while `ox status --json` still exits zero.
-
 ## [0.6.1] - 2026-09-16
 
 Everything below shipped after `v0.6.0`.
