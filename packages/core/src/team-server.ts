@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
 import { opendir, readFile, realpath } from "node:fs/promises";
@@ -11,7 +12,7 @@ import {
   type McpHandler,
   type ServeOptions,
 } from "./mcp-http.ts";
-import { probeOk, probeUnavailable, type ProbeFailure, type ProbeResult } from "./health.ts";
+import { probeOk, probeUnavailable, probeWarming, type ProbeFailure, type ProbeResult } from "./health.ts";
 import { createLedgerSync, type LedgerRemote } from "./ledger-sync.ts";
 import { passthroughEnv } from "./brain-env.ts";
 
@@ -49,11 +50,17 @@ const ProjectConfig = z.object({
 const LedgerLocation = z.object({
   ledger: z.object({ configured: z.boolean(), exists: z.boolean(), path: z.string().optional() }),
 });
-const LedgerSync = z.object({
-  project: z.object({
-    ledger: z.object({ status: z.string(), path: z.string(), last_sync: z.string().optional() }).optional(),
-  }).optional(),
+// The receipt `ox sync --read-only --json` prints on success and failure alike. ox may add
+// fields and failure classes within schema version 1.
+const ReadSyncResult = z.object({
+  schema_version: z.literal(1),
+  endpoint: z.string().optional(),
+  ready: z.boolean(),
+  last_successful_sync: z.string().nullish(),
+  error_class: z.string().optional(),
+  resumable: z.boolean().optional(),
 });
+type ReadSyncResult = z.infer<typeof ReadSyncResult>;
 const SessionsResponse = z.object({
   repo_id: z.string(),
   ledger_available: z.boolean(),
@@ -105,6 +112,22 @@ const RecentResponse = z.object({
 const MAX_LEDGER_AGE_MS = 5 * 60_000;
 const LEDGER_UNAVAILABLE = "This repository's ledger could not be verified. Check its SageOx team binding and ledger sync; this is not an empty session list or activity window.";
 const LEDGER_STALE = "This repository's ledger has no successful refresh within five minutes. Session history and recent activity may be incomplete; wait for ledger sync to recover.";
+const LEDGER_FRESH = "This repository's ledger has a successful refresh within five minutes.";
+// Older read sync leaves objects unhydrated under server backpressure, rejects files whose
+// bytes look like a pointer, and needs most of an hour for a warm refresh of a large ledger.
+const MIN_OX_VERSION = [0, 17, 0];
+// One attempt's budget. A first sync of a large ledger outlasts it; ox keeps the transferred
+// objects and the next attempt resumes from them.
+const LEDGER_SYNC_BUDGET = "30m";
+const LEDGER_FIRST_SYNC = "This repository's first ledger sync has not finished. A large ledger's first sync can take most of an hour; each attempt resumes where the last one stopped.";
+const LEDGER_DENIED = "SageOx refused this gateway's credential for ledger sync. It needs a current team access token (oxt_) with access to this repository; sync retries when the mounted credential changes.";
+const LEDGER_NOT_OFFERED = "SageOx did not offer this repository's ledger to this gateway's team token. Ledger reads may not be enabled for the team, or the repository has no ready ledger.";
+const LEDGER_INCOMPLETE = "Some of this ledger's objects could not be downloaded, so it is not served. The gateway log names them; an object SageOx refuses stays missing until it is repaired.";
+const LEDGER_DIRTY = "ox will not refresh this repository's ledger checkout because it holds content ox did not write. An operator must inspect the gateway's data directory.";
+const LEDGER_SYNC_FAILED = "The last ledger sync failed; the gateway log names the cause. The next attempt starts within a minute.";
+const LEDGER_OX_TOO_OLD = `Ledger sync needs ox ${MIN_OX_VERSION.join(".")} or newer, and this gateway's ox is older or reported no version.`;
+const LEDGER_NOT_AUTHORIZED = "SageOx did not confirm this gateway's current access to this repository, so its local ledger is not served. This is not an empty session list or activity window.";
+const LEDGER_UNREAD = "This repository's ledger could not be read in this call, most likely because a refresh held it. This is not an empty session list or activity window; ask again shortly.";
 const SearchResponse = z.object({
   team_context: z.object({
     results: z.array(z.object({
@@ -141,12 +164,15 @@ const SearchResponse = z.object({
  * flag-audit discipline stops being a standing human obligation and becomes a property of
  * the interface.
  *
- * `team_sessions` reads only repositories configured in the gateway. An operator's ox
- * daemon or the gateway must have synced the selected ledger within five minutes;
- * code-index readiness and global daemon health are not that evidence. Without
- * a clone, `ox session list` prints `{"sessions": [], "ledger_available": false}` and exits
- * 0, so the reader checks availability again after the command. Missing and stale data
- * are refused rather than described as an empty week. `team_recent` uses the same checks
+ * `team_sessions` reads only repositories configured in the gateway, and only a ledger the
+ * gateway synced within five minutes; code-index readiness is not that evidence. A read
+ * first asks SageOx whether the mounted credential may read that exact repository, because
+ * a team token can outlive a repository's link to its team, then reads through ox's guarded
+ * reader, which holds the checkout lock against a refresh. A `ledgerSync` repository instead
+ * keeps the gateway's own Git checkout, where `ox session list` prints
+ * `{"sessions": [], "ledger_available": false}` and exits 0 without a clone, so that reader
+ * checks availability again after the command. Missing and stale data are refused rather
+ * than described as an empty week. `team_recent` uses the same checks
  * for bounded murmur/session activity. It always supplies an explicit time window, so
  * ox's local glance checkpoint never decides what this caller sees.
  *
@@ -213,13 +239,11 @@ export const TEAM_TOOLS: readonly TeamTool[] = [
         team_search: failure
           ? { status: "unavailable", failure, detail: OX_FAILURE_TEXT[failure] }
           : { status: "available", detail: "This gateway's team search answered this check." },
-        ledger_sync: repositories.length ? {
-          status: repositories.some((repo) => repo.sync_owner === "gateway") ? "managed" : "external", repositories,
-        } : {
+        ledger_sync: repositories.length ? { status: "managed", repositories } : {
           status: "not_configured",
           detail:
-            "No repositories are configured for ledger reads. Add repositories with repos add and " +
-            "arrange ledger sync. Recent activity and session history cannot be inferred from an empty search.",
+            "No repository has ledger reads. Add repositories with repos add and grant team_sessions " +
+            "or team_recent. Recent activity and session history cannot be inferred from an empty search.",
         },
       });
     },
@@ -286,11 +310,48 @@ export interface TeamOx {
 
 export interface TeamLedgerStatus {
   repo: string;
-  sync_owner?: "gateway";
-  status: "available" | "unavailable";
-  failure?: "ledger-unavailable" | "ledger-stale";
+  status: "available" | "initializing" | "unavailable";
+  failure?: LedgerFailure;
   last_sync?: string;
+  /** When syncing began, while the first sync has not finished. */
+  since?: string;
   detail: string;
+}
+
+type LedgerFailure = "ledger-unavailable" | "ledger-stale" | "not-authenticated" | "not-installed";
+
+const LEDGER_REMEDY: Record<LedgerFailure, string> = {
+  "ledger-unavailable": "check SageOx ledger sync and its configured credential for this repository",
+  "ledger-stale": "check SageOx ledger sync and its configured credential for this repository",
+  "not-authenticated": "mount a current SageOx team access token (oxt_) with access to this repository",
+  "not-installed": `install ox ${MIN_OX_VERSION.join(".")} or newer in this agent's image, then restart`,
+};
+
+/** What the gateway knows about a ledger it syncs over the team token. */
+interface HostedLedger {
+  since: string;
+  /** Undefined before the first attempt; null when the checkout is not bound to this team. */
+  repoId?: string | null;
+  /** The latest completed `ox sync --read-only`. */
+  last?: ReadSyncResult;
+  /** Remote observation time of the latest successful sync. */
+  lastSync?: string;
+  /** Fingerprint of the credential ox last refused. */
+  refused?: string;
+}
+
+/** Turns a reader's output into the tool's reply, or throws. */
+type Reply = (out: unknown, repoId: string, lastSync: string | undefined) => Promise<string>;
+
+/** A remote observation time, when it parses and is not in the future. */
+function observedAt(value: string | null | undefined): string | undefined {
+  const at = Date.parse(value ?? "");
+  return Number.isFinite(at) && at <= Date.now() ? new Date(at).toISOString() : undefined;
+}
+
+function isFresh(lastSync: string | undefined): boolean {
+  const age = Date.now() - Date.parse(lastSync ?? "");
+  return age >= 0 && age < MAX_LEDGER_AGE_MS;
 }
 
 export interface TeamRepository {
@@ -341,7 +402,21 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
   }
   const sync = remotes.length ? createLedgerSync(scope.dataHome!, remotes) : undefined;
   let syncFailure: string | undefined;
+  const isLegacy = (repo: TeamRepository) => remotes.some((remote) => remote.repo === repo.name);
+  // Serializes a `ledgerSync` repository's reads with its refresh; ox's checkout lock does
+  // the same for every other repository.
   const read = <T>(work: () => Promise<T>): Promise<T> => sync ? sync.exclusive(work) : work();
+  // Every other configured repository syncs through ox over the team token, and only when a
+  // reader is granted: a first sync transfers every object its ledger covers.
+  const hosted = new Map<string, HostedLedger>(
+    (scope.syncLedgers && scope.dataHome ? scope.repositories ?? [] : [])
+      .filter((repo) => !isLegacy(repo))
+      .map((repo) => [repo.name, { since: new Date().toISOString() }]),
+  );
+  const ledgerRepos = (scope.repositories ?? []).filter((repo) => isLegacy(repo) || hosted.has(repo.name));
+  const stopping = new AbortController();
+  let hostedLoops: Promise<void> | undefined;
+  let oxTooOld = false;
   let reading: ProbeResult | undefined;
   const ledgerReadings = new Map<string, { status: TeamLedgerStatus; lookup: number }>();
   let ledgerLookup = 0;
@@ -400,14 +475,36 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
 
   /** Keep newer ledger verdicts when concurrent lookups finish out of order. */
   const recordLedger = (status: TeamLedgerStatus, lookup: number): TeamLedgerStatus => {
-    if (remotes.some((remote) => remote.repo === status.repo)) status = { ...status, sync_owner: "gateway" };
     if ((ledgerReadings.get(status.repo)?.lookup ?? 0) <= lookup) {
       ledgerReadings.set(status.repo, { status, lookup });
     }
     return status;
   };
 
-  /** Verify project identity and a fresh matching receipt, optionally refreshing an owned ledger first. */
+  /**
+   * The checkout's tracked SageOx binding, when the checkout is the configured one and the
+   * binding names this brain's team. The cwd comes from repos.conf, never from tool arguments.
+   */
+  const binding = async (repo: TeamRepository) => {
+    try {
+      const origin = await run("git", ["remote", "get-url", "origin"], {
+        cwd: repo.path, timeout: 30_000,
+        env: { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined },
+      });
+      if (origin.stdout.trim() !== repo.url) return undefined;
+      const config = ProjectConfig.parse(JSON.parse(await readFile(join(repo.path, ".sageox/config.json"), "utf8")));
+      // The id reaches ox's argv and, for `ledgerSync`, a path under the data home.
+      if (config.team_id !== scope.team || (scope.repo && config.repo_id !== scope.repo) ||
+          !/^repo_[A-Za-z0-9_-]+$/.test(config.repo_id)) {
+        return undefined;
+      }
+      return config;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** Verify a `ledgerSync` repository's binding and a fresh matching receipt, optionally refreshing it first. */
   const inspectLedger = async (repo: TeamRepository, refresh = false) => {
     const lookup = ++ledgerLookup;
     let repoId: string | undefined;
@@ -415,40 +512,25 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       repo: repo.name, status: "unavailable", failure: "ledger-unavailable", detail: LEDGER_UNAVAILABLE,
     };
     try {
-      const origin = await run("git", ["remote", "get-url", "origin"], {
-        cwd: repo.path, timeout: 30_000,
-        env: { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined },
-      });
-      if (origin.stdout.trim() !== repo.url) return { status: recordLedger(status, lookup), lookup };
-      const config = ProjectConfig.parse(JSON.parse(await readFile(join(repo.path, ".sageox/config.json"), "utf8")));
-      // The cwd comes from repos.conf, never from tool arguments. Check its tracked
-      // identity before handing ox the credential; a foreign endpoint must not select
-      // an ambient disk login, and a repository from another team is outside this brain.
-      if (config.team_id !== scope.team || (scope.repo && config.repo_id !== scope.repo) ||
-          (config.endpoint && config.endpoint.replace(/\/$/, "") !== "https://sageox.ai")) {
+      const config = await binding(repo);
+      // ox runs in this checkout below, so a foreign endpoint must not select an ambient
+      // disk login.
+      if (!config || (config.endpoint && config.endpoint.replace(/\/$/, "") !== "https://sageox.ai")) {
         return { status: recordLedger(status, lookup), lookup };
       }
       repoId = config.repo_id;
-      let managed;
-      if (sync && remotes.some((remote) => remote.repo === repo.name)) {
-        // ox 0.14.3's canonical ledger directory. Never turn a repository's config
-        // into an arbitrary destination, and never adopt an operator-owned clone.
-        if (!/^repo_[A-Za-z0-9_-]+$/.test(repoId)) throw new Error(LEDGER_UNAVAILABLE);
-        const path = join(scope.dataHome!, "sageox", "sageox.ai", "ledgers", repoId);
-        if (refresh) await sync.pull(repo.name, path).catch(() => {});
-        managed = sync.receipt(repo.name);
-        if (!managed?.last_sync) {
-          status.detail = managed?.detail ?? syncFailure ?? "The gateway has not successfully refreshed this ledger yet.";
-          return { status: recordLedger(status, lookup), repoId, lookup };
-        }
+      // ox 0.14.3's canonical ledger directory. Never adopt an operator-owned clone.
+      const path = join(scope.dataHome!, "sageox", "sageox.ai", "ledgers", repoId);
+      if (refresh) await sync!.pull(repo.name, path).catch(() => {});
+      const managed = sync!.receipt(repo.name);
+      if (!managed?.last_sync) {
+        status.detail = managed?.detail ?? syncFailure ?? "The gateway has not successfully refreshed this ledger yet.";
+        return { status: recordLedger(status, lookup), repoId, lookup };
       }
       const location = LedgerLocation.parse(await runOx(["status", "--json"], scope, repo.path)).ledger;
       if (!location.configured || !location.exists || !location.path) return { status: recordLedger(status, lookup), lookup };
-      const receipt = managed ? { ...managed, status: "ok" }
-        : LedgerSync.parse(await runOx(["daemon", "status", "--json"], scope, repo.path)).project?.ledger;
-      // Top-level daemon health/last_sync may describe another checkout. Match the
-      // ledger that this cwd's read commands actually resolve, then use only its receipt.
-      if (!receipt || receipt.status !== "ok" || await realpath(receipt.path) !== await realpath(location.path)) {
+      // Match the ledger that this cwd's read commands actually resolve to the one refreshed.
+      if (await realpath(managed.path) !== await realpath(location.path)) {
         return { status: recordLedger(status, lookup), lookup };
       }
       // ox 0.14.3 ignores ledger ListSessions errors. Verify directory readability so
@@ -459,74 +541,259 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
-      const at = receipt.last_sync ? Date.parse(receipt.last_sync) : NaN;
-      const age = Date.now() - at;
-      status = { ...status, failure: "ledger-stale", detail: LEDGER_STALE };
-      if (Number.isFinite(at) && age >= 0) status.last_sync = new Date(at).toISOString();
-      if (Number.isFinite(at) && age >= 0 && age < MAX_LEDGER_AGE_MS) {
-        status = { repo: repo.name, status: "available", last_sync: status.last_sync,
-          detail: "This repository's ledger has a successful refresh within five minutes." };
-      }
+      const last_sync = observedAt(managed.last_sync);
+      status = { ...status, failure: "ledger-stale", detail: LEDGER_STALE, ...(last_sync ? { last_sync } : {}) };
+      if (isFresh(last_sync)) status = { repo: repo.name, status: "available", last_sync, detail: LEDGER_FRESH };
     } catch {
       // Paths, config parse errors and ox diagnostics are never copied into a turn.
     }
     return { status: recordLedger(status, lookup), repoId, lookup };
   };
 
-  /** Inspect configured aliases and report each repository's source failure separately. */
-  const ledgerStatus = async (): Promise<TeamLedgerStatus[]> => {
-    const statuses: TeamLedgerStatus[] = [];
-    for (const repo of scope.repositories ?? []) statuses.push((await inspectLedger(repo)).status);
-    return statuses;
+  /** Where a hosted ledger stands after its latest completed sync. Reads nothing. */
+  const hostedStatus = (name: string): TeamLedgerStatus => {
+    const ledger = hosted.get(name)!;
+    const last = ledger.last;
+    const last_sync = observedAt(ledger.lastSync);
+    const unavailable = (detail: string, failure: LedgerFailure = "ledger-unavailable"): TeamLedgerStatus =>
+      ({ repo: name, status: "unavailable", failure, detail, ...(last_sync ? { last_sync } : {}) });
+    if (oxTooOld) return unavailable(LEDGER_OX_TOO_OLD, "not-installed");
+    if (ledger.repoId === null) return unavailable(LEDGER_UNAVAILABLE);
+    if (!last || (last.error_class === "interrupted" && last.resumable)) {
+      return { repo: name, status: "initializing", since: ledger.since, detail: LEDGER_FIRST_SYNC };
+    }
+    if (last.ready && !last.error_class) {
+      return isFresh(last_sync)
+        ? { repo: name, status: "available", last_sync, detail: LEDGER_FRESH }
+        : unavailable(LEDGER_STALE, "ledger-stale");
+    }
+    switch (last.error_class) {
+      case "denied": return unavailable(LEDGER_DENIED, "not-authenticated");
+      case "unavailable": case "missing_ledger": return unavailable(LEDGER_NOT_OFFERED);
+      case "missing_hydration": return unavailable(LEDGER_INCOMPLETE);
+      case "dirty": return unavailable(LEDGER_DIRTY);
+      default: return unavailable(LEDGER_SYNC_FAILED);
+    }
   };
 
-  /** List recent sessions only after live access and fresh ledger checks succeed. */
-  const sessions = async (name: string, limit: number): Promise<string> => {
-    SessionsArgs.parse({ repo: name, limit });
-    const matches = (scope.repositories ?? []).filter((repo) => repo.name === name);
-    if (matches.length !== 1) throw new Error("No unique configured repository matches that name. Use team_status to list repository names.");
-    const repo = matches[0];
+  /**
+   * One `ox sync --read-only` with the credential mounted now. Returns the receipt of a failed
+   * attempt for the operator log: ox keeps credentials out of it, and it names what failed.
+   */
+  const refreshHosted = async (repo: TeamRepository): Promise<string | undefined> => {
+    const ledger = hosted.get(repo.name)!;
+    const token = scope.token?.();
+    const fingerprint = createHash("sha256").update(token ?? "").digest("hex");
+    // A refused credential is not offered again every minute; a replaced mount is tried at once.
+    if (ledger.refused === fingerprint) return undefined;
+    const repoId = (await binding(repo))?.repo_id ?? null;
+    if (repoId !== ledger.repoId) Object.assign(ledger, { repoId, last: undefined, lastSync: undefined });
+    if (!repoId || stopping.signal.aborted) return undefined;
+    // Settles when ox exits, which on shutdown is after SIGTERM has let it stop its Git
+    // children and release the checkout. A failed sync still prints its receipt.
+    const stdout = await new Promise<string>((resolve) => {
+      const child = execFile("ox", ["sync", "--read-only", `--repo=${repoId}`, "--timeout", LEDGER_SYNC_BUDGET, "--json"], {
+        env: oxEnv({ ...scope, token: () => token }), cwd: oxCwd(scope), maxBuffer: 1024 * 1024,
+      }, (_error, out) => {
+        stopping.signal.removeEventListener("abort", stop);
+        resolve(out);
+      });
+      const stop = () => child.kill("SIGTERM");
+      stopping.signal.addEventListener("abort", stop);
+    });
+    if (stopping.signal.aborted) return undefined;
+    let result: ReadSyncResult = { schema_version: 1, ready: false, error_class: "unreadable" };
+    try {
+      result = ReadSyncResult.parse(JSON.parse(stdout));
+    } catch {
+      // Recorded as a failed attempt; the next one starts within a minute.
+    }
+    ledger.last = result;
+    ledger.refused = result.error_class === "denied" ? fingerprint : undefined;
+    if (result.ready && !result.error_class) ledger.lastSync = result.last_successful_sync ?? undefined;
+    return result.error_class ? stdout.replace(/\s+/g, " ").trim().slice(0, 2000) : undefined;
+  };
+
+  /** Refresh one hosted ledger and log a changed verdict. */
+  const cycle = async (repo: TeamRepository) => {
+    if (stopping.signal.aborted) return;
+    const previous = ledgerReadings.get(repo.name)?.status;
+    const receipt = await refreshHosted(repo).catch(() => undefined);
+    if (stopping.signal.aborted) return;
+    const status = recordLedger(hostedStatus(repo.name), ++ledgerLookup);
+    if (previous?.status !== status.status || previous?.detail !== status.detail) {
+      console.warn(`ledger_sync repo=${JSON.stringify(repo.name)} status=${status.status} detail=${JSON.stringify(status.detail)}` +
+        (receipt ? ` receipt=${JSON.stringify(receipt)}` : ""));
+    }
+  };
+
+  /** Sync again a minute after each attempt ends, until the gateway stops. */
+  const loop = async (repo: TeamRepository) => {
+    while (!stopping.signal.aborted) {
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          stopping.signal.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, 60_000);
+        stopping.signal.addEventListener("abort", done);
+      });
+      await cycle(repo);
+    }
+  };
+
+  /** Resolves once every hosted ledger has made its first attempt; the loops outlive it. */
+  const startHosted = async () => {
+    if (!hosted.size || hostedLoops) return;
+    for (const name of hosted.keys()) recordLedger(hostedStatus(name), ++ledgerLookup);
+    const version = await oxVersion(scope);
+    if (!version || !atLeast(version, MIN_OX_VERSION)) {
+      oxTooOld = true;
+      for (const name of hosted.keys()) recordLedger(hostedStatus(name), ++ledgerLookup);
+      console.warn(`ledger_sync unavailable: ox=${version?.join(".") ?? "unknown"} detail=${JSON.stringify(LEDGER_OX_TOO_OLD)}`);
+      return;
+    }
+    const repos = ledgerRepos.filter((repo) => hosted.has(repo.name));
+    const first = Promise.all(repos.map(cycle));
+    hostedLoops = first.then(() => Promise.all(repos.map(loop))).then(() => {});
+    await first;
+  };
+
+  const startLegacy = async () => {
+    if (!sync) return;
+    try {
+      await sync.start(async () => {
+        for (const repo of ledgerRepos) {
+          if (!isLegacy(repo)) continue;
+          const previous = ledgerReadings.get(repo.name)?.status;
+          const { status } = await inspectLedger(repo, true);
+          if (previous?.status !== status.status || previous?.detail !== status.detail) {
+            console.warn(`ledger_sync repo=${JSON.stringify(repo.name)} status=${status.status} detail=${JSON.stringify(status.detail)}`);
+          }
+        }
+      });
+    } catch {
+      syncFailure = "Ledger sync could not acquire its ownership lock. Check gateway logs and filesystem ownership.";
+      for (const remote of remotes) recordLedger({ repo: remote.repo, status: "unavailable",
+        failure: "ledger-unavailable", detail: syncFailure }, ++ledgerLookup);
+      console.warn("ledger_sync unavailable: verify any previous owner has stopped before removing workspace/ox-data/ledger-sync.lock");
+    }
+  };
+
+  /**
+   * Ask SageOx whether `token` may read this exact repository now. A team search is not that
+   * answer: a repository can leave the team while the team's token stays valid.
+   */
+  const authorize = async (name: string, repoId: string, lookup: number, token: string | undefined) => {
+    const verdict = await authorizeRead(hosted.get(name)!.last?.endpoint, repoId, token);
+    if (verdict === "authorized") return token;
+    recordLedger({ repo: name, status: "unavailable", detail: LEDGER_NOT_AUTHORIZED,
+      failure: verdict === "denied" ? "not-authenticated" : "ledger-unavailable" }, lookup);
+    throw new Error(LEDGER_NOT_AUTHORIZED);
+  };
+
+  /**
+   * A hosted read: a fresh sync, live authorization, then ox's guarded reader, which holds the
+   * checkout lock so a refresh cannot change files mid-read.
+   */
+  const hostedRead = async (repo: TeamRepository, argv: string[], reply: Reply): Promise<string> => {
+    const { name } = repo;
+    const lookup = ++ledgerLookup;
+    const status = recordLedger(hostedStatus(name), lookup);
+    if (status.status !== "available") throw new Error(status.detail);
+    const repoId = hosted.get(name)!.repoId!;
+    // The checkout must still carry the binding the ledger was synced for.
+    if ((await binding(repo))?.repo_id !== repoId) {
+      recordLedger({ repo: name, status: "unavailable", failure: "ledger-unavailable", detail: LEDGER_UNAVAILABLE }, lookup);
+      throw new Error(LEDGER_UNAVAILABLE);
+    }
+    let token = await authorize(name, repoId, lookup, scope.token?.());
+    let answer: string;
+    try {
+      answer = await reply(await runOx([...argv, `--repo=${repoId}`], scope, oxCwd(scope), true), repoId, status.last_sync);
+    } catch (error) {
+      const detail = error instanceof Error && error.message === LEDGER_UNREAD ? LEDGER_UNREAD : LEDGER_UNAVAILABLE;
+      recordLedger({ repo: name, status: "unavailable", failure: "ledger-unavailable", detail }, lookup);
+      throw error;
+    }
+    // The handoff: a credential replaced during the read is authorized before anything is
+    // returned. One replaced after the last comparison is the next call's to check.
+    for (let checks = 0; checks < 3; checks++) {
+      const mounted = scope.token?.();
+      if (mounted === token) return answer;
+      token = await authorize(name, repoId, lookup, mounted);
+    }
+    recordLedger({ repo: name, status: "unavailable", failure: "ledger-unavailable", detail: LEDGER_NOT_AUTHORIZED }, lookup);
+    throw new Error(LEDGER_NOT_AUTHORIZED);
+  };
+
+  /** A `ledgerSync` read: live team access, a fresh gateway receipt, then ox in the checkout. */
+  const legacyRead = async (repo: TeamRepository, argv: string[], reply: Reply): Promise<string> => {
     // A fresh local clone alone does not prove that a revoked credential still grants
     // this gateway access. Reuse the live team check and its rotation/health handling.
     await search("team", 1);
     const { status, repoId, lookup } = await inspectLedger(repo);
     if (status.status !== "available") throw new Error(status.detail);
     try {
-      const out = await runOx(["session", "list", "--json", "--limit", String(limit)], scope, repo.path);
+      return await reply(await runOx(argv, scope, repo.path), repoId!, status.last_sync);
+    } catch (error) {
+      recordLedger({ repo: repo.name, status: "unavailable", failure: "ledger-unavailable", detail: LEDGER_UNAVAILABLE }, lookup);
+      throw error;
+    }
+  };
+
+  const ledgerRepo = (name: string) => {
+    const matches = ledgerRepos.filter((repo) => repo.name === name);
+    if (matches.length !== 1) throw new Error("No unique configured repository matches that name. Use team_status to list repository names.");
+    return matches[0];
+  };
+
+  /** Report each repository's ledger separately. */
+  const ledgerStatus = async (): Promise<TeamLedgerStatus[]> => {
+    const statuses: TeamLedgerStatus[] = [];
+    for (const repo of ledgerRepos) {
+      statuses.push(hosted.has(repo.name)
+        ? recordLedger(hostedStatus(repo.name), ++ledgerLookup)
+        : (await read(() => inspectLedger(repo))).status);
+    }
+    return statuses;
+  };
+
+  /** List recent sessions only after live access and fresh ledger checks succeed. */
+  const sessions = async (name: string, limit: number): Promise<string> => {
+    SessionsArgs.parse({ repo: name, limit });
+    const repo = ledgerRepo(name);
+    const argv = ["session", "list", "--json", "--limit", String(limit)];
+    const reply: Reply = async (out, repoId, last_sync) => {
       if (out && typeof out === "object" && "ledger_available" in out && out.ledger_available === false) {
         throw new Error(LEDGER_UNAVAILABLE);
       }
       const parsed = SessionsResponse.safeParse(out);
       if (!parsed.success) throw oxFailed("session", "unreadable", "unexpected session-list response shape");
       if (parsed.data.repo_id !== repoId) throw new Error(LEDGER_UNAVAILABLE);
-      return JSON.stringify({ repo: name, repo_id: repoId, last_sync: status.last_sync,
+      return JSON.stringify({ repo: name, repo_id: repoId, last_sync,
         window: "past seven days", total: parsed.data.total, sessions: parsed.data.sessions.slice(0, limit) });
-    } catch (error) {
-      recordLedger({ repo: name, status: "unavailable", failure: "ledger-unavailable", detail: LEDGER_UNAVAILABLE }, lookup);
-      throw error;
-    }
+    };
+    return hosted.has(name) ? hostedRead(repo, argv, reply) : read(() => legacyRead(repo, argv, reply));
   };
 
   /** Read an explicit activity window without consuming another caller's history. */
   const recent = async (name: string, hours: number, limit: number): Promise<string> => {
     RecentArgs.parse({ repo: name, hours, limit });
-    const matches = (scope.repositories ?? []).filter((repo) => repo.name === name);
-    if (matches.length !== 1) throw new Error("No unique configured repository matches that name. Use team_status to list repository names.");
-    const repo = matches[0];
-    await search("team", 1);
-    const { status, repoId, lookup } = await inspectLedger(repo);
-    if (status.status !== "available") throw new Error(status.detail);
-    try {
-      // Never use glance's default checkpoint: one caller reading must not hide earlier
-      // activity from another. Absolute bounds also let us verify the returned window.
-      const until = Date.now();
-      const since = until - hours * 60 * 60_000;
-      const out = await runOx(["glance", "--since", new Date(since).toISOString(),
-        "--until", new Date(until).toISOString(), "--json"], scope, repo.path);
+    const repo = ledgerRepo(name);
+    // Never use glance's default checkpoint: one caller reading must not hide earlier
+    // activity from another. Absolute bounds also let us verify the returned window.
+    const until = Date.now();
+    const since = until - hours * 60 * 60_000;
+    const argv = ["glance", "--since", new Date(since).toISOString(), "--until", new Date(until).toISOString(), "--json"];
+    const reply: Reply = async (out, repoId, last_sync) => {
       const parsed = RecentResponse.safeParse(out);
       if (!parsed.success) throw oxFailed("glance", "unreadable", "unexpected activity response shape");
       const data = parsed.data;
-      if (data.repo !== basename(await realpath(repo.path)) || Date.parse(data.since) !== since || Date.parse(data.until) !== until) {
+      // A hosted glance labels its window with the repository id; one in a checkout, with its directory.
+      const label = hosted.has(name) ? repoId : basename(await realpath(repo.path));
+      if (data.repo !== label || Date.parse(data.since) !== since || Date.parse(data.until) !== until) {
         throw new Error(LEDGER_UNAVAILABLE);
       }
       const activities = data.authors.flatMap((author) => [
@@ -537,41 +804,26 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
         throw new Error(LEDGER_UNAVAILABLE);
       }
       activities.sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
-      return JSON.stringify({ repo: name, repo_id: repoId, last_sync: status.last_sync,
+      return JSON.stringify({ repo: name, repo_id: repoId, last_sync,
         since: data.since, until: data.until, total: activities.length,
         truncated: activities.length > limit, activities: activities.slice(0, limit) });
-    } catch (error) {
-      recordLedger({ repo: name, status: "unavailable", failure: "ledger-unavailable", detail: LEDGER_UNAVAILABLE }, lookup);
-      throw error;
-    }
+    };
+    return hosted.has(name) ? hostedRead(repo, argv, reply) : read(() => legacyRead(repo, argv, reply));
   };
 
   return {
     search,
-    ledgerStatus: () => read(ledgerStatus),
-    sessions: (...args) => read(() => sessions(...args)),
-    recent: (...args) => read(() => recent(...args)),
+    ledgerStatus,
+    sessions,
+    recent,
     startSync: async () => {
-      if (!sync) return;
-      try {
-        await sync.start(async () => {
-          for (const repo of scope.repositories ?? []) {
-            if (!remotes.some((remote) => remote.repo === repo.name)) continue;
-            const previous = ledgerReadings.get(repo.name)?.status;
-            const { status } = await inspectLedger(repo, true);
-            if (previous?.status !== status.status || previous?.detail !== status.detail) {
-              console.warn(`ledger_sync repo=${JSON.stringify(repo.name)} status=${status.status} detail=${JSON.stringify(status.detail)}`);
-            }
-          }
-        });
-      } catch {
-        syncFailure = "Ledger sync could not acquire its ownership lock. Check gateway logs and filesystem ownership.";
-        for (const remote of remotes) recordLedger({ repo: remote.repo, status: "unavailable",
-          failure: "ledger-unavailable", detail: syncFailure }, ++ledgerLookup);
-        console.warn("ledger_sync unavailable: verify any previous owner has stopped before removing workspace/ox-data/ledger-sync.lock");
-      }
+      await Promise.all([startHosted(), startLegacy()]);
     },
-    stopSync: async () => { await sync?.stop(); },
+    stopSync: async () => {
+      stopping.abort();
+      await hostedLoops;
+      await sync?.stop();
+    },
     // The query is a fixed word and the passages are thrown away: what is being read here
     // is whether ox answers at all.
     probe: async () => {
@@ -579,14 +831,13 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     },
     readings: () => [...(reading ? [reading] : []), ...[...ledgerReadings.values()].map(({ status }) => {
       const capability = `ledger:${status.repo}`;
+      if (status.status === "initializing") return probeWarming(capability, new Date(status.since!), status.detail);
       // Freshness expires even between tool calls. A latched Ok must not keep telling
       // subsequent turns that a checkout is current after its receipt has aged out.
-      const age = Date.now() - Date.parse(status.last_sync ?? "");
-      const stale = status.status === "available" && !(age >= 0 && age < MAX_LEDGER_AGE_MS);
-      return status.status === "available" && !stale
-        ? probeOk(capability, status.detail)
-        : probeUnavailable(capability, stale ? "ledger-stale" : status.failure ?? "ledger-unavailable",
-            "check SageOx ledger sync and its configured credential for this repository", stale ? LEDGER_STALE : status.detail);
+      const stale = status.status === "available" && !isFresh(status.last_sync);
+      if (status.status === "available" && !stale) return probeOk(capability, status.detail);
+      const failure = stale ? "ledger-stale" : status.failure ?? "ledger-unavailable";
+      return probeUnavailable(capability, failure, LEDGER_REMEDY[failure], stale ? LEDGER_STALE : status.detail);
     })],
   };
 }
@@ -598,8 +849,14 @@ export interface OxScope {
   repositories?: readonly TeamRepository[];
   /** The same isolated ox data home used by this agent's repository workspace. */
   dataHome?: string;
-  /** Omit to use externally supervised sync. Secrets are resolved only by the gateway. */
+  /** Repositories synced from an explicit Git remote instead. Secrets are resolved only by the gateway. */
   ledgerSync?: readonly LedgerRemote[];
+  /**
+   * Sync every other configured repository's ledger with `ox sync --read-only` and
+   * {@link token}. Set only when the policy grants a ledger reader: a first sync transfers
+   * every object the ledger covers.
+   */
+  syncLedgers?: boolean;
   /** Directory holding `sageox/auth.json`, for a credential mounted as a file. */
   configHome?: string;
   /**
@@ -783,19 +1040,27 @@ function oxFailed(verb: string, failure: OxFailure, detail: string | undefined):
   return new OxCallError(failure, `ox ${verb}: ${OX_FAILURE_TEXT[failure]}`);
 }
 
-/** Run bounded ox JSON commands in the supplied cwd using the gateway's current credential. */
-async function runOx(args: string[], scope: OxScope, cwd: string): Promise<unknown> {
+/**
+ * Run bounded ox JSON commands in the supplied cwd using the gateway's current credential.
+ * `guarded` runs one of ox's guarded ledger readers, which select a checkout by `--repo` and
+ * the data home alone and read only local files, so it gets no credential and no project.
+ */
+async function runOx(args: string[], scope: OxScope, cwd: string, guarded = false): Promise<unknown> {
   // The verb only, never the rest of the argv: a query is the caller's own words and has
   // no business coming back inside an error message.
   const verb = args[0];
   const env = oxEnv(scope);
-  // The allowlist drops ambient project overrides; local ledger commands bind ox to
-  // the gateway-selected repository because OX_PROJECT_ROOT outranks cwd.
-  if (verb !== "query") env.OX_PROJECT_ROOT = cwd;
-  // The toolkit's hosted brain runs Claude over ACP. ox 0.14.3's session list
-  // ignores the inherited --json flag outside agent context; make that context
-  // explicit instead of depending on the environment of the deployment's launcher.
-  if (verb === "session") env.AGENT_ENV = "claude-code";
+  if (guarded) {
+    delete env.SAGEOX_TOKEN;
+  } else {
+    // The allowlist drops ambient project overrides; local ledger commands bind ox to
+    // the gateway-selected repository because OX_PROJECT_ROOT outranks cwd.
+    if (verb !== "query") env.OX_PROJECT_ROOT = cwd;
+    // The toolkit's hosted brain runs Claude over ACP. ox 0.14.3's session list
+    // ignores the inherited --json flag outside agent context; make that context
+    // explicit instead of depending on the environment of the deployment's launcher.
+    if (verb === "session") env.AGENT_ENV = "claude-code";
+  }
   let stdout: string;
   try {
     ({ stdout } = await run("ox", args, {
@@ -808,13 +1073,62 @@ async function runOx(args: string[], scope: OxScope, cwd: string): Promise<unkno
     const e = error as { code?: string; stderr?: string; message?: string };
     // execFile's own message is the whole command line plus stderr, so it is no safer to
     // replay than stderr is — both go to the log, neither to the brain.
-    throw oxFailed(verb, classifyOxFailure(e), e.stderr || e.message);
+    const failed = oxFailed(verb, classifyOxFailure(e), e.stderr || e.message);
+    // A guarded reader's refusal names only a sanitized class, most often a refresh that
+    // held the checkout past this call's timeout.
+    throw guarded && failed.failure === "failed" ? new Error(LEDGER_UNREAD) : failed;
   }
   try {
     return JSON.parse(stdout) as unknown;
   } catch {
     // Not what failed to parse: whatever ox printed is the same untrusted text.
     throw oxFailed(verb, "unreadable", `${stdout.length} bytes of non-JSON on stdout`);
+  }
+}
+
+/** `ox --version` as numbers, or undefined when ox is missing or prints something else. */
+async function oxVersion(scope: OxScope): Promise<number[] | undefined> {
+  const env = oxEnv(scope);
+  delete env.SAGEOX_TOKEN;
+  try {
+    const { stdout } = await run("ox", ["--version"], { env, cwd: oxCwd(scope), timeout: 30_000 });
+    return stdout.match(/\bversion v?(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number);
+  } catch {
+    return undefined;
+  }
+}
+
+function atLeast(version: number[], minimum: number[]): boolean {
+  return (version[0] - minimum[0] || version[1] - minimum[1] || version[2] - minimum[2]) >= 0;
+}
+
+/**
+ * Whether SageOx lets `token` read this repository's ledger now. Repository discovery answers
+ * 401/403 for a refused token, and gives a foreign or unlinked repository no ready ledger to
+ * read. The token goes only to the HTTPS origin ox synced from, and never follows a redirect.
+ */
+async function authorizeRead(
+  endpoint: string | undefined,
+  repoId: string,
+  token: string | undefined,
+): Promise<"authorized" | "denied" | "unavailable"> {
+  if (!token) return "denied";
+  const origin = URL.canParse(endpoint ?? "") ? new URL(endpoint!) : undefined;
+  if (origin?.protocol !== "https:" || origin.href !== `${origin.origin}/`) return "unavailable";
+  try {
+    const response = await fetch(`${origin.origin}/api/v1/cli/repos/${repoId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      redirect: "manual",
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (response.status === 401 || response.status === 403) return "denied";
+    if (response.status !== 200) return "unavailable";
+    const detail = (await response.json()) as { ledger?: { status?: unknown; read_url?: unknown } } | null;
+    return detail?.ledger?.status === "ready" && typeof detail.ledger.read_url === "string" && detail.ledger.read_url
+      ? "authorized"
+      : "unavailable";
+  } catch {
+    return "unavailable";
   }
 }
 

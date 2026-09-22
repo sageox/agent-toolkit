@@ -528,6 +528,10 @@ async function buildBrain(
           ...remote,
           token: token ? () => resolveSecret(token, { dir: secretsDir }) : undefined,
         })),
+        // A granted reader is the only use for a synced ledger, and a first sync is not cheap.
+        syncLedgers: ["team_sessions", "team_recent"].some(
+          (tool) => policy?.allowsTool(qualifyTool(cfg.name, tool)).ok === true,
+        ),
         // Resolved here, in the gateway, and per lookup rather than once: file-first, so a
         // mounted secret beats an env var, and a mount rewritten under this process is what
         // the next `ox` child carries.

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Ledger readers sync over the team token, with no Git credential or ledger URL (#57).**
+  `team_sessions` and `team_recent` read a ledger checkout that an operator had to supply,
+  either through `ledgerSync` with the ledger's Git remote and a separate Git secret or with
+  an ox daemon run beside the gateway. Now, when the policy grants either tool, the gateway
+  syncs every configured repository bound to its team with `ox sync --read-only`, using the
+  team brain's existing `token`, and reads through ox's guarded readers. Each read first asks
+  SageOx whether the mounted credential may read that exact repository and serves nothing
+  unless it confirms. A credential replaced during the read is checked again before the
+  answer is returned. A large ledger's first sync takes most of an hour in resumable
+  30-minute attempts, and `team_status` reports the repository as `initializing` meanwhile.
+
+  This needs a team access token (`oxt_`; ox refuses a personal one for ledger reads), ox
+  0.17.0 or newer, which the base image already ships, and ledger reads enabled for the team
+  on the SageOx endpoint. Without them `team_status` names the failure and the other team
+  tools keep working. An agent that grants neither reader syncs nothing, so upgrading does
+  not start a ledger transfer it has no use for.
+
+  `ledgerSync` entries keep their behavior. The externally supervised mode is gone: without
+  `ledgerSync` the gateway no longer reads an ox daemon's checkout, and `team_status` no
+  longer reports `external` or `sync_owner`. If you ran such a daemon, stop it and let the
+  gateway sync.
+
 ## [0.7.0] - 2026-09-21
 
 Everything below shipped after `v0.6.1`.

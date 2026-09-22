@@ -325,7 +325,10 @@ export const BrainSchema = z.discriminatedUnion("preset", [
      * through `docker inspect`, `/proc/<pid>/environ`, and crash dumps (§7.3).
      */
     configHome: z.string().optional(),
-    /** Optional gateway-owned, pull-only ledgers; token refs may be reused elsewhere. */
+    /**
+     * Ledgers pulled from an explicit Git remote. Every other configured repository's ledger
+     * syncs over `token` when a ledger reader is granted. Token refs may be reused elsewhere.
+     */
     ledgerSync: z.array(z.strictObject({
       repo: z.string().min(1).max(200),
       url: z.url().refine((value) => {
