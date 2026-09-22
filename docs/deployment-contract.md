@@ -306,7 +306,7 @@ Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existin
 | Sync lifecycle and deployment | Tested locally: cold clone, periodic refresh, failure recovery, graceful restart/shutdown, process-group cancellation, ownership lock, and exclusion of reads during refresh. Resource measurements and live expired/revoked/rotated credential acceptance remain pending. |
 | Recent activity | Tested: populated and empty windows, unavailable/stale/mismatched ledgers, bounded inputs and text, ordering and truncation, repeatable reads, malformed responses, and credential rejection/recovery. |
 
-The runtime build checks the installed ox 0.15.0 binary with an
+The runtime build checks the installed ox 0.17.0 binary with an
 [offline compatibility smoke test](../deploy/docker/test-ox.mjs) on both architectures.
 It exercises `status`, empty and populated `team list`, `session list`, and `glance`
 responses, plus indexing, `code insights`, and search, using isolated synthetic repositories
@@ -317,7 +317,7 @@ gateway's explicit `AGENT_ENV=claude-code` context, retained from the ox 0.14.3 
 for its inherited `--json` flag. These checks establish CLI output compatibility, not live
 sync or migration parity. #24 remains open.
 
-The ox 0.15.0 `glance` check covers populated and empty ledgers.
+The ox 0.17.0 `glance` check covers populated and empty ledgers.
 `team_recent` passes absolute `--since`/`--until` bounds and validates
 the returned repository, window, timestamps, and counts. It projects work updates and
 session activity without forwarding generated collision advice or prompt guidance. ox may
