@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other tools keep working.
 
   If you mounted `auth.json` through `configHome`, mount a team access token (`oxt_`) as the
-  `token` secret instead and remove the line. The one token covers team search and the
-  ledger readers.
+  `token` secret instead and remove the line. That token covers team search and every
+  configured repository's ledger except those listed under `ledgerSync`, which still sync from
+  their own Git remote.
 
 - **Ledger readers sync over the team token, with no Git credential or ledger URL (#57).**
   `team_sessions` and `team_recent` read a ledger checkout that an operator had to supply,
