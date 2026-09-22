@@ -369,7 +369,7 @@ if (command === "version") {
   if (has("refuse-read")) {
     exit("", 1, repoId ? "Ledger read failed: interrupted oxp_planted\n" : "ledger not available: oxp_planted\n");
   } else if (command === "session list") {
-    exit(!repoId && env.AGENT_ENV !== "claude-code" ? "human table output" : read("sessions.json"));
+    exit(env.AGENT_ENV !== "claude-code" ? "human table output" : read("sessions.json"));
   } else {
     exit(read("recent.json").replaceAll("@SINCE@", at("--since")).replaceAll("@UNTIL@", at("--until"))
       .replaceAll("@REPO@", repoId ?? path.basename(process.cwd())));

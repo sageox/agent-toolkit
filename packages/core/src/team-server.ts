@@ -1057,11 +1057,11 @@ async function runOx(args: string[], scope: OxScope, cwd: string, guarded = fals
     // The allowlist drops ambient project overrides; local ledger commands bind ox to
     // the gateway-selected repository because OX_PROJECT_ROOT outranks cwd.
     if (verb !== "query") env.OX_PROJECT_ROOT = cwd;
-    // The toolkit's hosted brain runs Claude over ACP. ox 0.14.3's session list
-    // ignores the inherited --json flag outside agent context; make that context
-    // explicit instead of depending on the environment of the deployment's launcher.
-    if (verb === "session") env.AGENT_ENV = "claude-code";
   }
+  // ox 0.17.0's session list picks its format from agent context, not from the inherited
+  // --json flag, in a project checkout and for a `--repo` hosted read alike: without this a
+  // hosted read answers with the human "No sessions found" line. `glance` is unaffected.
+  if (verb === "session") env.AGENT_ENV = "claude-code";
   let stdout: string;
   try {
     ({ stdout } = await run("ox", args, {
