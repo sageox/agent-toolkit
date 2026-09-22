@@ -875,8 +875,8 @@ export async function chooseTeam(io: TeamPickIO = {}): Promise<string> {
 /**
  * Makes sure the team brain will actually be able to search — now, not at first use.
  *
- * Asked for even where `ox login` authenticates the workstation: without the token the
- * gateway gives ox no disk login, so every `team_search` fails — `ox_failed
+ * Asked for even where `ox login` authenticates the workstation: the gateway never gives ox
+ * a login on disk, so without the token every `team_search` fails — `ox_failed
  * class=not-authenticated` mid-turn, with the answer still sent. This is the last point
  * where supplying the token is a paste rather than a redeploy.
  */

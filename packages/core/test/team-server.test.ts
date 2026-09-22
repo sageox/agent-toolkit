@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import {
   teamBrainHandler,
   formatPassages,
@@ -101,7 +101,7 @@ describe("team brain", () => {
       vi.stubEnv("SAGEOX_TOKEN", "ambient-fixture-token");
       const { value: env } = await withFakeOx(
         `env | cut -d= -f1 > ./seen
-printf '%s\\n' "SAGEOX_TOKEN=$SAGEOX_TOKEN" "SAGEOX_DAEMON=$SAGEOX_DAEMON" "OX_NO_DAEMON=$OX_NO_DAEMON" >> ./seen
+printf '%s\\n' "SAGEOX_TOKEN=$SAGEOX_TOKEN" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" "SAGEOX_DAEMON=$SAGEOX_DAEMON" "OX_NO_DAEMON=$OX_NO_DAEMON" >> ./seen
 echo '{"team_context":{"results":[]}}'`,
         async (brain, bin) => {
           await expect(brain.search("team", 1)).resolves.toEqual([]);
@@ -111,6 +111,7 @@ echo '{"team_context":{"results":[]}}'`,
       );
       for (const key of excluded) expect(env).not.toMatch(new RegExp(`^${key}$`, "m"));
       expect(env).toContain("SAGEOX_TOKEN=scoped-fixture-token\n");
+      expect(env).toContain(`XDG_CONFIG_HOME=${devNull}\n`);
       expect(env).toContain("SAGEOX_DAEMON=false\n");
       expect(env).toContain("OX_NO_DAEMON=1\n");
       expect(process.env.SAGEOX_TOKEN).toBe("ambient-fixture-token");

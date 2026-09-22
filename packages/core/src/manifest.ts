@@ -295,18 +295,17 @@ export const BrainSchema = z.discriminatedUnion("preset", [
     /** Narrow to a single repo's context. Optional. */
     repo: z.string().optional(),
     /**
-     * The secretRef holding this agent's SageOx access token. With the secret unset, ox gets
-     * no disk login to fall back on either.
+     * The secretRef holding this agent's SageOx access token, its only SageOx credential:
+     * the gateway never lets ox fall back to a login on disk.
      * Defaults to `SAGEOX_TOKEN`; name another when several agents on one host each carry
      * their own. Resolved in the gateway like every other credential — the brain never
      * sees it, and the value itself never belongs in this file.
      *
      * **An env-supplied token is bound to exactly one endpoint** — `SAGEOX_ENDPOINT` when
      * set, otherwise `https://sageox.ai`. Point ox at any other host and the token is not
-     * rejected, it is simply not used: ox falls back to whatever `auth.json` is on disk,
-     * which is either no credential at all or, worse, a different identity than the one
-     * this manifest names. There is deliberately no `endpoint` field here — team memory
-     * lives on production, which is already the default.
+     * rejected, it is simply not used, so every call fails as not authenticated. There is
+     * deliberately no `endpoint` field here — team memory lives on production, which is
+     * already the default.
      */
     token: z
       .string()
@@ -323,8 +322,8 @@ export const BrainSchema = z.discriminatedUnion("preset", [
      * without a word.
      */
     configHome: z.never(
-      "configHome is retired: the team brain authenticates with the secret its `token` names " +
-        "(SAGEOX_TOKEN by default). Put a team access token (oxt_) there and remove configHome",
+      "configHome is retired: the team brain authenticates only with the secret its `token` " +
+        "names (SAGEOX_TOKEN by default). Put a team access token (oxt_) there and remove configHome",
     ).optional(),
     /**
      * Ledgers pulled from an explicit Git remote. Every other configured repository's ledger

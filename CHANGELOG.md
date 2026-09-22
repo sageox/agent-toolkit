@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **An `ox login` no longer stands in for the team brain's token, and a manifest that sets
-  `configHome` will not load.** `configHome` pointed ox at a mounted `auth.json`, which covered
-  team search but never ledger reads. Now the team brain authenticates with the secret `token`
-  names (`SAGEOX_TOKEN` unless set), and when that secret is unset the gateway gives ox no disk
-  login either. `doctor` reports ox as not authenticated, `memory add team` asks for the token
-  even where you are logged in, and team search fails as `not-authenticated` until the token
-  is there. Chat and the other tools keep working without it.
+- **The team brain authenticates only with its token, never a login on disk, and a manifest
+  that sets `configHome` will not load.** `configHome` pointed ox at a mounted `auth.json`,
+  which covered team search but never ledger reads, and with no token ox fell back to any
+  `ox login` on the gateway's machine. Now no ox call the team brain makes gets a disk login,
+  and the ones that authenticate get the secret `token` names (`SAGEOX_TOKEN` unless set): the
+  gateway points ox's config directory at the null device, so no `auth.json` is ever read.
+  Without the token, `doctor` reports ox as not authenticated, `memory add team` asks for it
+  even where you are logged in, and team search fails as `not-authenticated`. Chat and the
+  other tools keep working.
 
   If you mounted `auth.json` through `configHome`, mount a team access token (`oxt_`) as the
   `token` secret instead and remove the line. The one token covers team search and the

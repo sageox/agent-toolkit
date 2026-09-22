@@ -141,10 +141,10 @@ A team access token (prefixed `oxt_`, issued from the team's settings on sageox.
 Either is shown once.
 
 **The agent always authenticates with that token**, on your workstation and in a container
-alike: it takes precedence over anything on disk, and without it the agent does not fall
-back to your own `ox login`, so the manifest you test locally is the one you deploy. Never
-give the agent the token from your own `ox login` — that one expires within hours and
-cannot refresh itself once out of ox's hands.
+alike: the agent never reads a login from disk, so your own `ox login` is not a fallback
+and the manifest you test locally is the one you deploy. Never give the agent the token
+from your own `ox login` — that one expires within hours and cannot refresh itself once out
+of ox's hands.
 
 **3. Add the brain.**
 

@@ -192,6 +192,14 @@ describe("ox credential handling", () => {
     expect(env).toMatchObject({ XDG_CONFIG_HOME: devNull, PATH: "/usr/bin" });
   });
 
+  it("keeps ox off any login on disk even with a token, which is then all it can use", () => {
+    // ox skips `auth.json` for a token bound to the endpoint it calls, and reads it for any
+    // other. An agent never runs `ox login`, so that file is never the agent's.
+    const env = oxEnv({ token: () => "oxt_agent" }, { XDG_CONFIG_HOME: "/home/operator/.config" });
+
+    expect(env).toMatchObject({ SAGEOX_TOKEN: "oxt_agent", XDG_CONFIG_HOME: devNull });
+  });
+
   it("leaves an inherited token alone when no ref is configured at all", () => {
     // A workstation call — `doctor` with no team brain declared — means to use whatever
     // login this shell already has. Only a configured ref speaks for the agent.

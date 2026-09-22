@@ -236,10 +236,10 @@ retention and no shipping: it goes to the gateway's stream beside `turn_start` a
 
 ## The team brain's credential
 
-The team brain authenticates to SageOx with an access token. The gateway hands it to `ox` in
-`SAGEOX_TOKEN` — ox's documented path for "CI/CD, headless agents, ephemeral containers" —
-and when that secret is unset it gives ox no disk login either, so an `ox login` on the
-gateway's machine does not stand in for it. A **team access token**
+The team brain authenticates to SageOx with an access token and nothing else. The gateway
+hands it to `ox` in `SAGEOX_TOKEN` — ox's documented path for "CI/CD, headless agents,
+ephemeral containers" — and never lets ox read a login from disk, so an `ox login` or an
+`auth.json` on the gateway's machine is never used. A **team access token**
 (prefixed `oxt_`, issued from the team's settings on sageox.ai) answers team search and is
 the only credential ox accepts for [ledger sync](#ledger-sync). A **personal access token**
 (prefixed `oxp_`, from **https://sageox.ai/settings/tokens**) answers team search only. Either
@@ -266,9 +266,9 @@ brains:
 
 **A token is bound to one endpoint.** ox uses it for `SAGEOX_ENDPOINT` when that is set, and
 otherwise only for `https://sageox.ai`. Against any other endpoint it is not rejected — it is
-not used, and ox falls back to `auth.json`: no credential at all, or a different identity than
-the one you configured. Team memory is on production, which is already the default, so leave
-`SAGEOX_ENDPOINT` unset unless you mean it.
+not used, and with no login on disk to fall back on, ox reports "not authenticated". Team
+memory is on production, which is already the default, so leave `SAGEOX_ENDPOINT` unset
+unless you mean it.
 
 `configHome`, which pointed ox at a mounted `auth.json`, is retired: a manifest that still sets
 it does not load. Mount a team access token as the `token` secret instead.
