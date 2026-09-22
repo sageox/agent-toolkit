@@ -621,6 +621,17 @@ if (command === "version") {
     }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class }))));
   });
 
+  it("refuses a ready receipt that names no endpoint, without asking SageOx", async () => {
+    await withLedgers(async (brain, bin) => {
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure: "ledger-unavailable" });
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/last ledger sync failed/);
+      expect(fetched).toEqual([]);
+      expect(calls(bin, "|session list")).toEqual([]);
+    }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({
+      ready: true, endpoint: undefined, last_successful_sync: new Date().toISOString(),
+    }))));
+  });
+
   it.each(["old", "missing", "invalid", "future"])("refuses %s freshness from a ready sync", async (kind) => {
     const last_successful_sync = kind === "old" ? new Date(Date.now() - 6 * 60_000).toISOString()
       : kind === "future" ? new Date(Date.now() + 60_000).toISOString()
@@ -685,6 +696,33 @@ if (command === "version") {
         await second.stopSync();
       }
     }, scoped((bin) => writeFileSync(join(bin, "required-token"), "oxt_current")));
+  });
+
+  it("keeps other repositories syncing while one first sync is still running", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // Child processes settle on their own clock, so wait for them without the faked timers.
+    const settle = async (condition: () => boolean, what: string) => {
+      const deadline = Date.now() + 10_000;
+      while (!condition()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    try {
+      await withLedgers(async (brain, bin) => {
+        const syncs = (repo: string) => existsSync(join(bin, "calls")) ? calls(bin, `--repo=${repo} `).length : 0;
+        const starting = brain.startSync();
+        await settle(() => existsSync(join(bin, "a/sync-started")) && ledger(brain, "acme--b")?.health === "Ok",
+          "b's first sync beside a's");
+        await vi.advanceTimersByTimeAsync(60_000);
+        await settle(() => syncs("repo_b") === 2, "b's next sync");
+        expect(syncs("repo_a")).toBe(1);
+        await brain.stopSync();
+        await starting;
+      }, scoped((bin) => writeFileSync(join(bin, "a/hold-sync"), "")), false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops a running sync with SIGTERM on shutdown", async () => {

@@ -16,18 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SageOx whether the mounted credential may read that exact repository and serves nothing
   unless it confirms. A credential replaced during the read is checked again before the
   answer is returned. A large ledger's first sync takes most of an hour in resumable
-  30-minute attempts, and `team_status` reports the repository as `initializing` meanwhile.
+  30-minute attempts, and `team_status` reports the repository as `initializing` until that
+  first sync finishes or fails.
 
   This needs a team access token (`oxt_`; ox refuses a personal one for ledger reads), ox
   0.17.0 or newer, which the base image already ships, and ledger reads enabled for the team
   on the SageOx endpoint. Without them `team_status` names the failure and the other team
-  tools keep working. An agent that grants neither reader syncs nothing, so upgrading does
-  not start a ledger transfer it has no use for.
+  tools keep working. An agent that grants neither reader starts no team-token sync, so
+  upgrading does not start a ledger transfer it has no use for.
 
   `ledgerSync` entries keep their behavior. The externally supervised mode is gone: without
   `ledgerSync` the gateway no longer reads an ox daemon's checkout, and `team_status` no
-  longer reports `external` or `sync_owner`. If you ran such a daemon, stop it and let the
-  gateway sync.
+  longer reports `external` or `sync_owner`. If you ran such a daemon, stop it once it has
+  pushed anything pending and delete its checkout under `workspace/ox-data`: ox does not take
+  over a checkout it did not create. Moving a repository off `ledgerSync` likewise means
+  deleting its checkout.
 
 ## [0.7.0] - 2026-09-21
 

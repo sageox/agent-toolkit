@@ -51,7 +51,8 @@ const LedgerLocation = z.object({
   ledger: z.object({ configured: z.boolean(), exists: z.boolean(), path: z.string().optional() }),
 });
 // The receipt `ox sync --read-only --json` prints on success and failure alike. ox may add
-// fields and failure classes within schema version 1.
+// fields and failure classes within schema version 1. Reads are authorized against the
+// endpoint a ready receipt names, so one without it is not a usable success.
 const ReadSyncResult = z.object({
   schema_version: z.literal(1),
   endpoint: z.string().optional(),
@@ -59,7 +60,7 @@ const ReadSyncResult = z.object({
   last_successful_sync: z.string().nullish(),
   error_class: z.string().optional(),
   resumable: z.boolean().optional(),
-});
+}).refine((receipt) => !receipt.ready || Boolean(receipt.endpoint));
 type ReadSyncResult = z.infer<typeof ReadSyncResult>;
 const SessionsResponse = z.object({
   repo_id: z.string(),
@@ -120,7 +121,7 @@ const MIN_OX_VERSION = [0, 17, 0];
 // objects and the next attempt resumes from them.
 const LEDGER_SYNC_BUDGET = "30m";
 const LEDGER_FIRST_SYNC = "This repository's first ledger sync has not finished. A large ledger's first sync can take most of an hour; each attempt resumes where the last one stopped.";
-const LEDGER_DENIED = "SageOx refused this gateway's credential for ledger sync. It needs a current team access token (oxt_) with access to this repository; sync retries when the mounted credential changes.";
+const LEDGER_DENIED = "SageOx refused this gateway's credential for ledger sync. It needs a current team access token (oxt_) with access to this repository; sync retries when the mounted credential changes or the gateway restarts.";
 const LEDGER_NOT_OFFERED = "SageOx did not offer this repository's ledger to this gateway's team token. Ledger reads may not be enabled for the team, or the repository has no ready ledger.";
 const LEDGER_INCOMPLETE = "Some of this ledger's objects could not be downloaded, so it is not served. The gateway log names them; an object SageOx refuses stays missing until it is repaired.";
 const LEDGER_DIRTY = "ox will not refresh this repository's ledger checkout because it holds content ox did not write. An operator must inspect the gateway's data directory.";
@@ -655,9 +656,10 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       return;
     }
     const repos = ledgerRepos.filter((repo) => hosted.has(repo.name));
-    const first = Promise.all(repos.map(cycle));
-    hostedLoops = first.then(() => Promise.all(repos.map(loop))).then(() => {});
-    await first;
+    const first = repos.map(cycle);
+    // Each repository keeps its own cadence: one long first sync must not hold the others.
+    hostedLoops = Promise.all(first.map((attempt, i) => attempt.then(() => loop(repos[i])))).then(() => {});
+    await Promise.all(first);
   };
 
   const startLegacy = async () => {
@@ -821,8 +823,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     },
     stopSync: async () => {
       stopping.abort();
-      await hostedLoops;
-      await sync?.stop();
+      await Promise.all([hostedLoops, sync?.stop()]);
     },
     // The query is a fixed word and the passages are thrown away: what is being read here
     // is whether ox answers at all.

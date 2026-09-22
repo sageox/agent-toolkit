@@ -192,8 +192,8 @@ grants `team_sessions` or `team_recent` — see [ledger sync](reference.md#ledge
 starts no ox daemon and exposes no sync or write command to the brain. A local checkout alone
 proves neither freshness nor permission.
 
-With no repository to read — none configured, or neither reader granted —
-`ledger_sync.status` is `not_configured`. Otherwise it is `managed`, and each repository
+With no repository to read — none configured, or neither reader granted and no
+`ledgerSync` entry — `ledger_sync.status` is `not_configured`. Otherwise it is `managed`, and each repository
 reports `available`, `initializing` while its first sync runs, or `unavailable` with the
 reason. A failed ledger read leaves ordinary team search usable. `ox conversation` requires its own team-context
 checkout and readiness check. `team_search`
@@ -215,8 +215,8 @@ rather than leaving you to discover it later:
 Either way a **container** needs a token binding of its own, since it has no login to fall
 back on. The deployment tool reports the required logical name and the chosen SOPS, CI, or
 platform integration supplies its file. See
-[The team brain's credential](reference.md#the-team-brains-credential) for why it is a PAT and not the
-token from your own login.
+[The team brain's credential](reference.md#the-team-brains-credential) for why it is an issued
+access token and not the token from your own login.
 
 ## Step 7 — tools
 

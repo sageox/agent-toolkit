@@ -278,7 +278,8 @@ repository bound to its team, with the team brain's token and
 discovery, Git and LFS authentication with that token, the checkout lock, and the readiness
 receipt; read sync cannot push, upload LFS objects, ingest sessions, drain an outbox, or
 start the daemon. A first sync that outlasts one attempt resumes from what it transferred.
-A refused credential is not offered again until the mounted value changes. Shutdown sends
+A refused credential is not offered again until the mounted value changes or the gateway
+restarts. Shutdown sends
 a running sync SIGTERM and waits for it to exit. One gateway must own each data directory,
 including across pods. The source-code index remains owned by repository warmup.
 
@@ -295,9 +296,10 @@ refreshes and readers. The gateway uses a lock per data home, refuses to adopt u
 checkouts, publishes cold clones atomically, and refreshes before establishing freshness
 after restart. Git commands are bounded to two minutes; shutdown kills their process groups.
 Crashed owners leave a lock that must be removed only after verifying the previous owner has
-stopped. Removing a repository from `ledgerSync` hands its checkout to ox, which fetches that
-ledger's full history over the team token and refuses, rather than resets, a checkout whose
-commit is not already in it. That hand-over has not been exercised against a live backend.
+stopped. ox does not take over one of these checkouts, or an external daemon's: it refuses a
+checkout whose origin is not its own read URL. Moving a repository to team-token sync
+therefore means removing its `ledgerSync` entry and deleting its checkout, which the gateway
+then syncs afresh.
 Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existing policy.
 
 **Acceptance for [#24](https://github.com/sageox/agent-toolkit/issues/24):**
@@ -324,7 +326,7 @@ Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existin
 | Credential health | Tested: a refused credential is offered once and synced again when the mount changes. |
 | Isolation | Tested: two gateways with separate data homes and tokens; one's refusal leaves the other ready. Two coworkers syncing at once against the server's shared transfer bound remains pending. |
 | Shutdown | Tested: a running sync receives SIGTERM, and shutdown waits for it to exit. |
-| `ledgerSync` | Unchanged, and tested beside team-token repositories. Handing a `ledgerSync` checkout to team-token sync has not been exercised against a live backend. |
+| `ledgerSync` | Unchanged, and tested beside team-token repositories. ox refuses a `ledgerSync` checkout, so moving a repository to team-token sync means deleting its checkout; the fresh sync that follows has not run against a live backend. |
 
 The runtime build checks the installed ox 0.17.0 binary with an
 [offline compatibility smoke test](../deploy/docker/test-ox.mjs) on both architectures.

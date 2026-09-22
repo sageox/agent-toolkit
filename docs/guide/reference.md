@@ -288,7 +288,8 @@ ledger of every configured repository whose checked-in `.sageox/config.json` nam
 team. Nothing else is configured: the gateway runs `ox sync --read-only --repo <repo_id>`
 with the team brain's `token` and the agent's own `workspace/ox-data`, and ox discovers the
 ledger, authenticates to it with that token, and materializes and verifies the checkout.
-Grant neither tool and nothing is synced.
+Grant neither tool and no repository syncs over the team token; `ledgerSync` repositories
+still do.
 
 It needs ox 0.17.0 or newer, which the agent base image ships; a team access token with
 access to the repository; and ledger reads enabled for the team on the SageOx endpoint.
@@ -297,9 +298,9 @@ access to the repository; and ledger reads enabled for the team on the SageOx en
 Each repository syncs at startup and again a minute after each attempt ends. The first sync
 transfers every object the ledger covers, which takes most of an hour for a large ledger. It
 runs in 30-minute attempts that resume from what the last one transferred, and `team_status`
-reports the repository as `initializing` until it finishes. Later refreshes take seconds to
-about a minute. A refused credential is not offered again until the mounted value changes;
-other failures retry on the next attempt. A ledger whose last sync failed, or whose last
+reports the repository as `initializing` until the first sync finishes or fails. Later
+refreshes take seconds to about a minute. A refused credential is not offered again until
+the mounted value changes or the gateway restarts; other failures retry on the next attempt. A ledger whose last sync failed, or whose last
 successful sync is more than five minutes old, is refused rather than read as empty.
 
 Every read first asks SageOx whether the credential mounted at that moment may read that
@@ -342,7 +343,10 @@ gateway restarts; other failures retry on the next cycle. File-backed credential
 per refresh. Environment-backed changes require a restart, and CSI rotation must be enabled
 for a running pod's mount to change.
 
-These checkouts live under `workspace/ox-data/sageox/sageox.ai/ledgers/<repo_id>`.
+These checkouts live under `workspace/ox-data/sageox/sageox.ai/ledgers/<repo_id>`, the
+directory team-token sync uses too. ox does not take over a checkout whose origin is not its
+own read URL, so to move a repository to team-token sync, remove its `ledgerSync` entry and
+delete that directory; the gateway then syncs it afresh.
 A cold clone is published only after checkout completes. The gateway refreshes only
 checkouts it created, serializes reads with refresh, and establishes a new successful
 receipt after each restart. It stops Git's process group and releases its ownership lock
