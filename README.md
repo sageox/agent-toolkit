@@ -110,9 +110,9 @@ The **team brain** gives the agent read-only search over your team's own recorde
 | `team_sessions` | Bounded session listings for a configured repository with verified recent ledger sync |
 | `team_recent` | Recent coworker work updates and session activity from a verified fresh ledger |
 
-Session listing and recent activity require a fresh local ledger. Configure optional
-[gateway sync](docs/guide/reference.md#optional-ledger-sync) using an existing Git secret,
-or supply an externally supervised ox checkout and its refresh receipt.
+Session listing and recent activity read a local ledger that the gateway
+[syncs over the team token](docs/guide/reference.md#ledger-sync) when either tool is granted,
+and each read first confirms with SageOx that the token may still read that repository.
 A successful search does not establish ledger availability or freshness.
 
 **It reads; it does not write.** An agent that can write to team memory is an agent whose
@@ -134,11 +134,13 @@ ox teams                     # the teams you belong to, with their IDs
 
 Other install methods: [ox install docs](https://github.com/sageox/ox#install).
 
-**2. Create a personal access token** at
-[sageox.ai/settings/tokens](https://sageox.ai/settings/tokens) — prefixed `oxp_`, shown
-once — and put it in the agent bundle's `.env` as `SAGEOX_TOKEN`.
+**2. Create an access token** and put it in the agent bundle's `.env` as `SAGEOX_TOKEN`.
+A team access token (prefixed `oxt_`, issued from the team's settings on sageox.ai) is what
+`team_sessions` and `team_recent` need. A personal access token (prefixed `oxp_`, from
+[sageox.ai/settings/tokens](https://sageox.ai/settings/tokens)) answers `team_search` only.
+Either is shown once.
 
-**The agent always authenticates with a PAT**, on your workstation and in a container
+**The agent always authenticates with that token**, on your workstation and in a container
 alike: the token takes precedence over anything on disk, so the manifest you test locally
 is the one you deploy. Never give the agent the token from your own `ox login` — that one
 expires within hours and cannot refresh itself once out of ox's hands.

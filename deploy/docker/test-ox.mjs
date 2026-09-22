@@ -107,6 +107,30 @@ try {
     }
   }
 
+  // The team brain's hosted-ledger calls, as it issues them: no project, and a token only for
+  // the sync. With no receipt and no token each must refuse in its documented shape.
+  const version = run("ox", ["--version"]).stdout.match(/\bversion v?(\d+)\.(\d+)\.(\d+)/);
+  assert.ok(version && (Number(version[1]) > 0 || Number(version[2]) >= 17), "ledger sync needs ox 0.17.0 or newer");
+  const hosted = "repo_019ff2f5-2079-7be1-b05e-8caad2772e61";
+  const refuse = (args) => spawnSync("ox", args, {
+    cwd: root, env: { ...env, OX_PROJECT_ROOT: undefined }, encoding: "utf8", timeout: 60_000,
+  });
+  for (const args of [
+    ["session", "list", "--json", "--limit", "5", `--repo=${hosted}`],
+    ["glance", "--since", since, "--until", until, "--json", `--repo=${hosted}`],
+  ]) {
+    const read = refuse(args);
+    assert.equal(read.status, 1, `ox ${args.join(" ")}`);
+    assert.equal(read.stdout, "");
+    assert.equal(read.stderr.trim(), "Ledger read failed: interrupted");
+  }
+  const sync = refuse(["sync", "--read-only", `--repo=${hosted}`, "--timeout", "30m", "--json"]);
+  assert.equal(sync.status, 1);
+  const receipt = JSON.parse(sync.stdout);
+  assert.equal(receipt.schema_version, 1);
+  assert.equal(receipt.ready, false);
+  assert.equal(receipt.error_class, "denied");
+
   writeFileSync(join(repo, "main.go"), "package fixture\nfunc ScheduledWorkspaceMarker() string { return \"warm\" }\n");
   run("git", ["add", "."]);
   run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Index fixture"]);
@@ -143,7 +167,7 @@ try {
   assert.equal(matches.total, 1);
   assert.equal(matches.results[0].file, "main.go");
   assert.match(matches.results[0].snippet, /ScheduledWorkspaceMarker/);
-  console.log("ox compatibility passed: status, team list, session list, glance, code insights and search");
+  console.log("ox compatibility passed: status, team list, session list, glance, hosted ledger reads and sync, code insights and search");
 } finally {
   run("chmod", ["-R", "u+w", root]);
   rmSync(root, { recursive: true, force: true });

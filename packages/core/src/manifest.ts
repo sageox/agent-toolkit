@@ -323,9 +323,14 @@ export const BrainSchema = z.discriminatedUnion("preset", [
      * `ox login`. In a container there is no interactive login, so the token file is
      * mounted as a secret and this points at it. A file, not an env var: env leaks
      * through `docker inspect`, `/proc/<pid>/environ`, and crash dumps (§7.3).
+     *
+     * It answers team search only: ox takes `token` for ledger sync and never a disk login.
      */
     configHome: z.string().optional(),
-    /** Optional gateway-owned, pull-only ledgers; token refs may be reused elsewhere. */
+    /**
+     * Ledgers pulled from an explicit Git remote. Every other configured repository's ledger
+     * syncs over `token` when a ledger reader is granted. Token refs may be reused elsewhere.
+     */
     ledgerSync: z.array(z.strictObject({
       repo: z.string().min(1).max(200),
       url: z.url().refine((value) => {

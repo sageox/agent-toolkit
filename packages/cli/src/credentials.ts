@@ -107,9 +107,11 @@ export const GITHUB_TOKEN_SPEC: CredentialSpec = {
 
 export const SAGEOX_TOKEN_SPEC: CredentialSpec = {
   name: "SAGEOX_TOKEN",
-  label: "Paste your SageOx personal access token (input hidden)",
-  hint: "Create one at https://sageox.ai/settings/tokens — it is shown only once",
-  looksRight: (value) => value.startsWith("oxp_"),
+  label: "Paste your SageOx access token (input hidden)",
+  hint:
+    "Ledger reads need a team access token (oxt_); a personal one (oxp_, from " +
+    "https://sageox.ai/settings/tokens) searches only. Either is shown only once",
+  looksRight: (value) => value.startsWith("oxt_") || value.startsWith("oxp_"),
 };
 
 export const slackBotTokenSpec = (name: string): CredentialSpec => ({
