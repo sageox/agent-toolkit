@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
-import { homedir } from "node:os";
+import { devNull, homedir } from "node:os";
 import { opendir, readFile, realpath } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
@@ -392,10 +392,13 @@ export interface TeamBrain extends TeamOx {
 /**
  * Builds the ox-backed team surface, bound to one team.
  *
- * `configHome` points ox at its token file. This runs in the gateway, so the credential
- * stays on this side of the boundary; the brain never sees it.
+ * This runs in the gateway, so the credential stays on this side of the boundary; the
+ * brain never sees it.
  */
 export function makeOxTeam(scope: OxScope = {}): TeamBrain {
+  // A team brain always speaks for an agent, so without a token provider it gets no
+  // credential at all rather than the operator's; see oxEnv.
+  scope = { ...scope, token: scope.token ?? (() => undefined) };
   const remotes = scope.ledgerSync ?? [];
   if (remotes.length && (!scope.dataHome || remotes.some((remote) =>
     scope.repositories?.filter((repo) => repo.name === remote.repo).length !== 1))) {
@@ -858,11 +861,9 @@ export interface OxScope {
    * every object the ledger covers.
    */
   syncLedgers?: boolean;
-  /** Directory holding `sageox/auth.json`, for a credential mounted as a file. */
-  configHome?: string;
   /**
-   * An access token supplied out-of-band, for CI and containers where no interactive
-   * `ox login` can happen. Takes precedence over anything on disk.
+   * This agent's SageOx access token, and the only credential its `ox` children get:
+   * {@link oxEnv} leaves them no login on disk to fall back on.
    *
    * A reading and not a value, for the same reason capability health is one: it changes
    * under a running process. A secrets-store CSI driver with rotation on rewrites the
@@ -871,19 +872,12 @@ export interface OxScope {
    * Deployment — for a credential already sitting current on the container's own disk.
    * {@link oxEnv} calls this once per child, which is a file read next to a process spawn.
    *
-   * Unlike a logged-in `auth.json`, this carries no refresh credential: ox stamps a
-   * rolling 24h expiry and treats a server 401 as the truth. A long-running agent on a
-   * token alone will eventually need it rotated — mount `auth.json` instead if you want
-   * the credential to renew itself.
-   *
-   * **It is bound to one endpoint, and the binding is silent.** ox uses this token only
-   * for `SAGEOX_ENDPOINT` when that is set, and otherwise only for `https://sageox.ai`.
-   * Against any other endpoint the token is not rejected — it is not used, and ox falls
-   * back to `auth.json`. With nothing on disk that surfaces as "not authenticated"; with
-   * a login for that host it authenticates as someone else entirely and answers normally.
-   * Nothing is passed here to select an endpoint, deliberately: team memory is on
-   * production, so the default is already right and a knob would only add a way to be
-   * wrong.
+   * **It is bound to one endpoint.** ox uses this token only for `SAGEOX_ENDPOINT` when
+   * that is set, and otherwise only for `https://sageox.ai`. Against any other endpoint
+   * the token is not used, and with no login on disk to fall back on the call fails as
+   * "not authenticated". Nothing is passed here to select an endpoint, deliberately: team
+   * memory is on production, so the default is already right and a knob would only add a
+   * way to be wrong.
    */
   token?: () => string | undefined;
   /**
@@ -912,7 +906,6 @@ export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): No
     "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
     "SAGEOX_TOKEN", "SAGEOX_ENDPOINT",
   ]);
-  if (scope.configHome) env.XDG_CONFIG_HOME = scope.configHome;
   if (scope.dataHome) {
     env.XDG_DATA_HOME = scope.dataHome;
     env.XDG_CACHE_HOME = join(scope.dataHome, "cache");
@@ -926,14 +919,15 @@ export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): No
   }
   if (scope.token) {
     const token = scope.token();
-    // A configured ref is the authority on this agent's credential, including when it
-    // reads as nothing: the child then carries no token and falls back to `configHome`,
-    // never to a `SAGEOX_TOKEN` this process happens to have inherited. On a host running
-    // several agents that ambient value is another agent's credential, and ox would take
-    // it and answer normally as someone else. Deleting matters more now that the ref is
-    // read per child than it did when one boot-time reading stood for the process.
+    // A configured ref is this agent's only SageOx credential, including when it reads as
+    // nothing. Never a `SAGEOX_TOKEN` this process happens to have inherited, which on a
+    // host running several agents is another agent's, and never a login on disk: an agent
+    // does not run `ox login`, so any login ox would find there is a person's. ox looks for
+    // one under `$XDG_CONFIG_HOME/sageox`, and nothing exists under the null device, so a
+    // token ox cannot use fails as "not authenticated" instead.
     if (token) env.SAGEOX_TOKEN = token;
     else delete env.SAGEOX_TOKEN;
+    env.XDG_CONFIG_HOME = devNull;
   }
   return env;
 }
@@ -1019,9 +1013,9 @@ const LATCHED: Partial<Record<OxFailure, { failure: ProbeFailure; remedy: string
   "not-authenticated": {
     failure: "not-authenticated",
     remedy:
-      "rotate this deployment's SageOx credential — the secret the team brain's `token` " +
-      "names, or the auth file under its `configHome`. The next lookup reads it, so a " +
-      "file-mounted value needs no restart; one supplied in the environment does",
+      "mount or rotate this deployment's SageOx credential — the secret the team brain's " +
+      "`token` names. The next lookup reads it, so a file-mounted value needs no restart; " +
+      "one supplied in the environment does",
   },
 };
 

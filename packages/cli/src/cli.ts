@@ -523,7 +523,6 @@ async function buildBrain(
         repo: cfg.repo,
         repositories: codeWorkspace?.states.map(({ dirName, path, url }) => ({ name: dirName, path, url })),
         dataHome: codeWorkspace ? join(agentDir, "workspace", "ox-data") : undefined,
-        configHome: cfg.configHome,
         ledgerSync: cfg.ledgerSync?.map(({ token, ...remote }) => ({
           ...remote,
           token: token ? () => resolveSecret(token, { dir: secretsDir }) : undefined,
@@ -876,16 +875,10 @@ export async function chooseTeam(io: TeamPickIO = {}): Promise<string> {
 /**
  * Makes sure the team brain will actually be able to search — now, not at first use.
  *
- * Asked for even where `ox login` already authenticates the workstation, because that login
- * is not part of the bundle: `auth.json` stays in the user's config directory, and a
- * container built from this agent has no ambient login to fall back on. Skipping the
- * question there produced a bundle that searched fine locally and failed every `team_search`
- * once deployed — `ox_failed class=not-authenticated` mid-turn, with the answer still sent.
- * This is the last point where supplying the token is a paste rather than a redeploy.
- *
- * The answer is optional in that case and only there: local runs do work on the login
- * alone, so refusing to continue without a token would block a console agent over a
- * capability it already has. `doctor` reports the gap until it is filled either way.
+ * Asked for even where `ox login` authenticates the workstation: the gateway never gives ox
+ * a login on disk, so without the token every `team_search` fails — `ox_failed
+ * class=not-authenticated` mid-turn, with the answer still sent. This is the last point
+ * where supplying the token is a paste rather than a redeploy.
  */
 async function ensureOxCredential(
   agent: SelectedAgent,
@@ -905,26 +898,8 @@ async function ensureOxCredential(
     process.stdout.write(
       "\n  the `ox` CLI is not installed — the team brain cannot search without it:\n" +
         "    curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash\n" +
-        `  then \`ox login\`, or add ${tokenRef} to this bundle's local .env.\n` +
+        `  then add ${tokenRef} to this bundle's local .env.\n` +
         "  The brain is configured either way; `doctor` will keep reporting this until it works.\n",
-    );
-    return;
-  }
-
-  if (status.authenticated) {
-    process.stdout.write(
-      `\n  ox is already authenticated as ${status.user ?? "you"}, which covers runs on this machine.\n` +
-        `  A deployment needs its own ${tokenRef}: that login lives in your config directory,\n` +
-        "  not in the bundle, so nothing carries it into a container.\n",
-    );
-    await requireCredential(
-      {
-        ...SAGEOX_TOKEN_SPEC,
-        name: tokenRef,
-        label: `${SAGEOX_TOKEN_SPEC.label}, or Enter to skip and add ${tokenRef} later`,
-        optional: true,
-      },
-      { envPath: agent.env, secretsDir },
     );
     return;
   }
@@ -2593,25 +2568,18 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
     const teamBrain = manifest.brains.find((b) => b.preset === "team");
     if (teamBrain?.preset === "team") {
       const tokenRef = teamBrain.token ?? DEFAULT_OX_TOKEN_SECRET;
-      const ox = await oxStatus({
-        token: () => resolveSecret(tokenRef, { dir: secretsDir }),
-        configHome: teamBrain.configHome,
-      });
+      const ox = await oxStatus({ token: () => resolveSecret(tokenRef, { dir: secretsDir }) });
       if (!ox.installed) {
         problems.push("a team brain is configured but the `ox` CLI is not installed — it cannot search");
       } else if (!ox.authenticated) {
         problems.push(
           `a team brain is configured but ox is not authenticated${ox.error ? ` (${ox.error})` : ""} — ` +
-            "run `ox login`, or mount its auth file into the deployment",
+            `set ${tokenRef} to a current SageOx access token`,
         );
       } else {
-        // A personal access token carries no user claims, so naming the credential is
-        // more useful than reporting the user as "unknown".
-        ok.push(
-          ox.source === "SAGEOX_TOKEN"
-            ? `ox authenticated via ${tokenRef}${ox.expiresAt ? `, expires ${ox.expiresAt}` : ""}`
-            : `ox authenticated as ${ox.user ?? "unknown"}${ox.authFile ? ` (${ox.authFile})` : ""}`,
-        );
+        // An access token carries no user claims, so naming the credential is more useful
+        // than reporting the user as "unknown".
+        ok.push(`ox authenticated via ${tokenRef}${ox.expiresAt ? `, expires ${ox.expiresAt}` : ""}`);
         if (expiringSoon(ox.expiresAt)) {
           problems.push(`ox credentials expire at ${ox.expiresAt} — refresh before deploying`);
         }

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import {
   teamBrainHandler,
   formatPassages,
@@ -107,15 +107,33 @@ echo '{"team_context":{"results":[]}}'`,
           await expect(brain.search("team", 1)).resolves.toEqual([]);
           return readFileSync(join(bin, "seen"), "utf8");
         },
-        () => ({ token: () => "scoped-fixture-token", configHome: "/mounted-auth" }),
+        () => ({ token: () => "scoped-fixture-token" }),
       );
       for (const key of excluded) expect(env).not.toMatch(new RegExp(`^${key}$`, "m"));
       expect(env).toContain("SAGEOX_TOKEN=scoped-fixture-token\n");
-      expect(env).toContain("XDG_CONFIG_HOME=/mounted-auth\n");
+      expect(env).toContain(`XDG_CONFIG_HOME=${devNull}\n`);
       expect(env).toContain("SAGEOX_DAEMON=false\n");
       expect(env).toContain("OX_NO_DAEMON=1\n");
       expect(process.env.SAGEOX_TOKEN).toBe("ambient-fixture-token");
       expect(process.env.FUTURE_SERVICE_SECRET).toBe("fixture-value");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("gives a team brain built without a token provider no credential, never the operator's", async () => {
+    try {
+      vi.stubEnv("SAGEOX_TOKEN", "operator-token");
+      vi.stubEnv("XDG_CONFIG_HOME", "/home/operator/.config");
+      const { value: seen } = await withFakeOx(
+        `printf '%s\\n' "SAGEOX_TOKEN=$SAGEOX_TOKEN" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" > ./seen
+echo '{"team_context":{"results":[]}}'`,
+        async (brain, bin) => {
+          await brain.search("team", 1);
+          return readFileSync(join(bin, "seen"), "utf8");
+        },
+      );
+      expect(seen).toBe(`SAGEOX_TOKEN=\nXDG_CONFIG_HOME=${devNull}\n`);
     } finally {
       vi.unstubAllEnvs();
     }
