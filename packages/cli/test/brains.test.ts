@@ -131,14 +131,6 @@ describe("the team brain is hosted, not spawned", () => {
     expect(hosted).toHaveLength(1);
   });
 
-  it("carries the credential location to the gateway, which is what runs ox", () => {
-    const { hosted } = wireBrains(
-      [{ preset: "team", team: "team_x", repo: "repo_y", configHome: "/mnt/secrets-store/ox" }],
-      opts,
-    );
-    expect(hosted[0]).toMatchObject({ team: "team_x", repo: "repo_y", configHome: "/mnt/secrets-store/ox" });
-  });
-
   it("carries the token's secretRef, so a bundle can reach SAGEOX_TOKEN at all", () => {
     const { hosted } = wireBrains([{ preset: "team", team: "team_x", token: "OX_TOKEN_ASHBY" }], opts);
     expect(hosted[0]).toMatchObject({ token: "OX_TOKEN_ASHBY" });

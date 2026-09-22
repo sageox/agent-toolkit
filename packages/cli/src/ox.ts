@@ -9,23 +9,8 @@ export interface OxStatus {
   authenticated: boolean;
   /** ISO timestamp the token expires at, when ox reports one. */
   expiresAt?: string;
-  user?: string;
   /** ox's own view of whether its GitHub credential still works. */
   gitPatValid?: boolean;
-  authFile?: string;
-  /**
-   * Which credential this check handed the `ox` child.
-   *
-   * Not a claim about what ox then did with it: a token is bound to one endpoint, and
-   * against any other ox ignores it and falls back to the auth file without saying so —
-   * see `OxScope.token`. Nothing here can tell the two apart, because the endpoint a token
-   * was issued for is not derivable from the token.
-   *
-   * ox reports `config.auth_file` unconditionally — the path it *would* read for a disk
-   * login, whether or not anything is there. Reporting that as the source is wrong in a
-   * container, where the file does not exist and a token did the work.
-   */
-  source?: "SAGEOX_TOKEN" | "auth file";
   /** Why the check could not be completed, when it could not. */
   error?: string;
 }
@@ -33,40 +18,27 @@ export interface OxStatus {
 /**
  * Asks ox whether it can actually talk to the team.
  *
- * The team brain has no credential of its own — it shells to `ox`, which authenticates
- * from a token file in the user config directory. That is the right shape (a
- * file-mounted secret, never an env var) but it fails in a quiet way: an unauthenticated
- * `ox` returns no passages, which is indistinguishable from a team that has written
- * nothing down. So the check happens before the agent runs, not at the first question.
+ * Without this, a credential SageOx refuses first shows up as a `team_search` that fails
+ * mid-turn. So the check happens before the agent runs, not at the first question.
  */
 export async function oxStatus(scope: OxScope = {}): Promise<OxStatus> {
-  // Built once and reported from, never resolved a second time: `OxScope.token` reads a
-  // file that may be rewritten under this process, so a second reading could name a
-  // credential this child never carried.
   const env = oxEnv(scope);
   try {
     // Same credential the team brain will use, or the check answers a different question
-    // than the one asked: a container has no ambient login for ox to fall back on.
+    // than the one asked.
     const { stdout } = await run("ox", ["status", "--json"], { timeout: 30_000, env, cwd: oxCwd(scope) });
     const parsed = JSON.parse(stdout) as {
       auth?: {
         authenticated?: boolean;
         expires_at?: string;
-        user?: string;
         git_pat_valid?: boolean;
       };
-      config?: { auth_file?: string };
     };
     return {
       installed: true,
       authenticated: parsed.auth?.authenticated === true,
       expiresAt: parsed.auth?.expires_at,
-      user: parsed.auth?.user,
       gitPatValid: parsed.auth?.git_pat_valid,
-      authFile: parsed.config?.auth_file,
-      // An env token takes precedence over anything on disk, so if we supplied one and
-      // the call authenticated, that is what authenticated it.
-      source: credentialSource(env),
     };
   } catch (error) {
     const e = error as { code?: string; message?: string };
@@ -77,20 +49,6 @@ export async function oxStatus(scope: OxScope = {}): Promise<OxStatus> {
       error: (e.message ?? "ox status failed").slice(0, 160),
     };
   }
-}
-
-/**
- * Which credential authenticated, read off the env a child was given. An env token takes
- * precedence over anything on disk, so a child that carried one is a child it did the work
- * for.
- *
- * The env and not the scope: the scope's token is a reading of a file, and taking it a
- * second time after the child has exited can answer differently from the one that built
- * its env — which is the whole premise of resolving per child. `doctor` would then name a
- * credential the run never used.
- */
-export function credentialSource(env: NodeJS.ProcessEnv): "SAGEOX_TOKEN" | "auth file" {
-  return env.SAGEOX_TOKEN ? "SAGEOX_TOKEN" : "auth file";
 }
 
 /** True when the token is gone or expires within the hour. */

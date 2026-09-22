@@ -236,8 +236,10 @@ retention and no shipping: it goes to the gateway's stream beside `turn_start` a
 
 ## The team brain's credential
 
-`ox` has no interactive login in a container, so it takes a token in `SAGEOX_TOKEN` — its
-documented path for "CI/CD, headless agents, ephemeral containers." A **team access token**
+The team brain authenticates to SageOx with an access token. The gateway hands it to `ox` in
+`SAGEOX_TOKEN` — ox's documented path for "CI/CD, headless agents, ephemeral containers" —
+and when that secret is unset it gives ox no disk login either, so an `ox login` on the
+gateway's machine does not stand in for it. A **team access token**
 (prefixed `oxt_`, issued from the team's settings on sageox.ai) answers team search and is
 the only credential ox accepts for [ledger sync](#ledger-sync). A **personal access token**
 (prefixed `oxp_`, from **https://sageox.ai/settings/tokens**) answers team search only. Either
@@ -268,17 +270,8 @@ not used, and ox falls back to `auth.json`: no credential at all, or a different
 the one you configured. Team memory is on production, which is already the default, so leave
 `SAGEOX_ENDPOINT` unset unless you mean it.
 
-The alternative, for a credential that renews itself, is mounting a logged-in `auth.json`:
-
-```yaml
-brains:
-  - preset: team
-    team: team_xxxxxxxx
-    configHome: /mnt/secrets-store/ox   # holds sageox/auth.json
-```
-
-That login answers team search only. ox takes a team access token for [ledger sync](#ledger-sync)
-and never a disk login, so an agent granting `team_sessions` or `team_recent` needs `token` too.
+`configHome`, which pointed ox at a mounted `auth.json`, is retired: a manifest that still sets
+it does not load. Mount a team access token as the `token` secret instead.
 
 Set `BRAIN_MCP_HOST` when the brain runs in a separate container and needs a routable
 address; it defaults to `127.0.0.1`.

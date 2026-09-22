@@ -205,16 +205,13 @@ holding nothing but a token cannot enumerate teams — which is why the id is re
 once, and written into the manifest.
 
 **About the SageOx credential.** `memory add team` sorts it out at the time you add it,
-rather than leaving you to discover it later:
+rather than leaving you to discover it later: it asks for a SageOx access token (hidden input)
+and saves it to local `.env`. It asks even where you have run `ox login`, because the agent
+does not fall back to your login. Use a team access token (`oxt_`) if the agent reads ledgers;
+a personal one only searches.
 
-- If you have run `ox login` on this machine, it says so and asks for nothing — ox uses its
-  own credential.
-- If not, it asks for a SageOx access token (hidden input) and saves it to local `.env`. Use
-  a team access token (`oxt_`) if the agent reads ledgers; a personal one only searches.
-
-Either way a **container** needs a token binding of its own, since it has no login to fall
-back on. The deployment tool reports the required logical name and the chosen SOPS, CI, or
-platform integration supplies its file. See
+A **container** needs a token binding of its own. The deployment tool reports the required
+logical name and the chosen SOPS, CI, or platform integration supplies its file. See
 [The team brain's credential](reference.md#the-team-brains-credential) for why it is an issued
 access token and not the token from your own login.
 

@@ -447,6 +447,12 @@ describe("brains", () => {
     ).toThrow(/not the token itself/);
   });
 
+  it("refuses the retired configHome by name, rather than dropping the credential it named", () => {
+    expect(() =>
+      loadManifest(`${base}brains:\n  - preset: team\n    team: team_x\n    configHome: /mnt/secrets-store/ox`),
+    ).toThrow(/configHome is retired[\s\S]*token/);
+  });
+
   it("refuses a second team brain, which would wire to the same server and be unreachable", () => {
     expect(() =>
       loadManifest(

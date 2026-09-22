@@ -101,17 +101,16 @@ describe("team brain", () => {
       vi.stubEnv("SAGEOX_TOKEN", "ambient-fixture-token");
       const { value: env } = await withFakeOx(
         `env | cut -d= -f1 > ./seen
-printf '%s\\n' "SAGEOX_TOKEN=$SAGEOX_TOKEN" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" "SAGEOX_DAEMON=$SAGEOX_DAEMON" "OX_NO_DAEMON=$OX_NO_DAEMON" >> ./seen
+printf '%s\\n' "SAGEOX_TOKEN=$SAGEOX_TOKEN" "SAGEOX_DAEMON=$SAGEOX_DAEMON" "OX_NO_DAEMON=$OX_NO_DAEMON" >> ./seen
 echo '{"team_context":{"results":[]}}'`,
         async (brain, bin) => {
           await expect(brain.search("team", 1)).resolves.toEqual([]);
           return readFileSync(join(bin, "seen"), "utf8");
         },
-        () => ({ token: () => "scoped-fixture-token", configHome: "/mounted-auth" }),
+        () => ({ token: () => "scoped-fixture-token" }),
       );
       for (const key of excluded) expect(env).not.toMatch(new RegExp(`^${key}$`, "m"));
       expect(env).toContain("SAGEOX_TOKEN=scoped-fixture-token\n");
-      expect(env).toContain("XDG_CONFIG_HOME=/mounted-auth\n");
       expect(env).toContain("SAGEOX_DAEMON=false\n");
       expect(env).toContain("OX_NO_DAEMON=1\n");
       expect(process.env.SAGEOX_TOKEN).toBe("ambient-fixture-token");

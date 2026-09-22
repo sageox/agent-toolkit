@@ -295,7 +295,8 @@ export const BrainSchema = z.discriminatedUnion("preset", [
     /** Narrow to a single repo's context. Optional. */
     repo: z.string().optional(),
     /**
-     * The secretRef holding a SageOx access token, for deployments with no `ox login`.
+     * The secretRef holding this agent's SageOx access token. With the secret unset, ox gets
+     * no disk login to fall back on either.
      * Defaults to `SAGEOX_TOKEN`; name another when several agents on one host each carry
      * their own. Resolved in the gateway like every other credential — the brain never
      * sees it, and the value itself never belongs in this file.
@@ -317,16 +318,14 @@ export const BrainSchema = z.discriminatedUnion("preset", [
       })
       .optional(),
     /**
-     * Where ox finds its credentials — the directory holding `sageox/auth.json`.
-     *
-     * Defaults to the process's own config home, which is right on a workstation after
-     * `ox login`. In a container there is no interactive login, so the token file is
-     * mounted as a secret and this points at it. A file, not an env var: env leaks
-     * through `docker inspect`, `/proc/<pid>/environ`, and crash dumps (§7.3).
-     *
-     * It answers team search only: ox takes `token` for ledger sync and never a disk login.
+     * Retired: it pointed ox at a mounted `auth.json`. Refused by name rather than ignored,
+     * because an agent that authenticated through it would otherwise lose its credential
+     * without a word.
      */
-    configHome: z.string().optional(),
+    configHome: z.never(
+      "configHome is retired: the team brain authenticates with the secret its `token` names " +
+        "(SAGEOX_TOKEN by default). Put a team access token (oxt_) there and remove configHome",
+    ).optional(),
     /**
      * Ledgers pulled from an explicit Git remote. Every other configured repository's ledger
      * syncs over `token` when a ledger reader is granted. Token refs may be reused elsewhere.
