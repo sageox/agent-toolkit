@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   granted by the `source` line, not by the brain's tool policy. `validate`, `doctor` and
   `run` refuse a `source` channel its surface does not list.
 
+- **The agent base image ships `ox` 0.17.0.** `OX_VERSION` and both architecture checksums
+  in `deploy/docker/Dockerfile` move up from 0.15.0. The ox calls the toolkit makes —
+  `status`, `team list`, `query`, `session list`, `glance`, `daemon status`, `index code`,
+  `code status`, `code search` and `code insights` — take the same flags and return the same
+  fields on 0.17.0, so nothing that reads them changes. A job body that runs ox itself gets
+  0.17.0 too: a plain `ox status` now exits non-zero when signed out or outside an
+  initialized repository, while `ox status --json` still exits zero.
+
 ## [0.6.1] - 2026-09-16
 
 Everything below shipped after `v0.6.0`.
