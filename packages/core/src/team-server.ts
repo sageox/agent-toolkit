@@ -52,7 +52,8 @@ const LedgerLocation = z.object({
 });
 // The receipt `ox sync --read-only --json` prints on success and failure alike. ox may add
 // fields and failure classes within schema version 1. Reads are authorized against the
-// endpoint a ready receipt names, so one without it is not a usable success.
+// endpoint a ready receipt names, so one without it is not a usable success, and a receipt
+// that is not ready must name its failure class to be read as a failure.
 const ReadSyncResult = z.object({
   schema_version: z.literal(1),
   endpoint: z.string().optional(),
@@ -60,7 +61,7 @@ const ReadSyncResult = z.object({
   last_successful_sync: z.string().nullish(),
   error_class: z.string().optional(),
   resumable: z.boolean().optional(),
-}).refine((receipt) => !receipt.ready || Boolean(receipt.endpoint));
+}).refine((receipt) => receipt.ready ? Boolean(receipt.endpoint) : Boolean(receipt.error_class));
 type ReadSyncResult = z.infer<typeof ReadSyncResult>;
 const SessionsResponse = z.object({
   repo_id: z.string(),
@@ -120,6 +121,9 @@ const MIN_OX_VERSION = [0, 17, 0];
 // One attempt's budget. A first sync of a large ledger outlasts it; ox keeps the transferred
 // objects and the next attempt resumes from them.
 const LEDGER_SYNC_BUDGET = "30m";
+// A precondition, such as a ledger path ox cannot claim, fails the same way on every attempt,
+// so the wait after a repeated failure grows to this.
+const MAX_SYNC_WAIT_MS = 30 * 60_000;
 // ox 0.17.0's read sync keeps murmurs only for the hour of its last sync and the eleven before
 // it, and glance skips an hour the checkout does not hold, so a team-token checkout is only
 // sure to hold the last 11 hours of work updates.
@@ -128,9 +132,9 @@ const LEDGER_FIRST_SYNC = "This repository's first ledger sync has not finished.
 const LEDGER_DENIED = "SageOx refused this gateway's credential for ledger sync. It needs a current team access token (oxt_) with access to this repository; sync retries when the mounted credential changes or the gateway restarts.";
 const LEDGER_NOT_OFFERED = "SageOx did not offer this repository's ledger to this gateway's team token. Ledger reads may not be enabled for the team, or the repository has no ready ledger.";
 const LEDGER_INCOMPLETE = "Some of this ledger's objects could not be downloaded, so it is not served. The gateway log names them; an object SageOx refuses stays missing until it is repaired.";
-const LEDGER_PARTIAL = "ox found this repository's ledger checkout missing part of its history or of the paths it must hold, so it is not served. The gateway log names which; the next attempt starts within a minute.";
+const LEDGER_PARTIAL = "ox found this repository's ledger checkout missing part of its history or of the paths it must hold, so it is not served. The gateway log names which; sync retries, less often while the same failure repeats.";
 const LEDGER_DIRTY = "ox will not refresh this repository's ledger checkout because it holds content ox did not write. An operator must inspect the gateway's data directory.";
-const LEDGER_SYNC_FAILED = "The last ledger sync failed; the gateway log names the cause. The next attempt starts within a minute.";
+const LEDGER_SYNC_FAILED = "The last ledger sync failed, and the gateway log names the failure. Sync retries, less often while the same failure repeats.";
 const LEDGER_OX_TOO_OLD = `Ledger sync needs ox ${MIN_OX_VERSION.join(".")} or newer, and this gateway's ox is older or reported no version.`;
 const LEDGER_NOT_AUTHORIZED = "SageOx did not confirm this gateway's current access to this repository, so its local ledger is not served. This is not an empty session list or activity window.";
 const LEDGER_UNREAD = "This repository's ledger could not be read in this call, most likely because a refresh held it. This is not an empty session list or activity window; ask again shortly.";
@@ -569,6 +573,8 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       ({ repo: name, status: "unavailable", failure, detail, ...(last_sync ? { last_sync } : {}) });
     if (oxTooOld) return unavailable(LEDGER_OX_TOO_OLD, "not-installed");
     if (ledger.repoId === null) return unavailable(LEDGER_UNAVAILABLE);
+    // ox reports `resumable` only while no checkout is published: a first sync, or a clone that
+    // replaces a checkout removed after an earlier success.
     if (!last || (last.error_class === "interrupted" && last.resumable)) {
       return { repo: name, status: "initializing", since: ledger.since, detail: LEDGER_FIRST_SYNC };
     }
@@ -588,8 +594,9 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
   };
 
   /**
-   * One `ox sync --read-only` with the credential mounted now. Returns the receipt of a failed
-   * attempt for the operator log: ox keeps credentials out of it, and it names what failed.
+   * One `ox sync --read-only` with the credential mounted now. Returns what the operator log
+   * shows of a failed attempt: its receipt, which ox keeps credentials out of, or, when ox
+   * printed no receipt, how it exited and what it wrote.
    */
   const refreshHosted = async (repo: TeamRepository): Promise<string | undefined> => {
     const ledger = hosted.get(repo.name)!;
@@ -602,44 +609,71 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     if (!repoId || stopping.signal.aborted) return undefined;
     // Settles when ox exits, which on shutdown is after SIGTERM has let it stop its Git
     // children and release the checkout. A failed sync still prints its receipt.
-    const stdout = await new Promise<string>((resolve) => {
+    const { stdout, stderr, exit } = await new Promise<{ stdout: string; stderr: string; exit?: string | number }>((resolve) => {
       const child = execFile("ox", ["sync", "--read-only", `--repo=${repoId}`, "--timeout", LEDGER_SYNC_BUDGET, "--json"], {
         env: oxEnv({ ...scope, token: () => token }), cwd: oxCwd(scope), maxBuffer: 1024 * 1024,
-      }, (_error, out) => {
+      }, (error, stdout, stderr) => {
         stopping.signal.removeEventListener("abort", stop);
-        resolve(out);
+        resolve({ stdout, stderr, exit: error ? error.signal ?? error.code : 0 });
       });
       const stop = () => child.kill("SIGTERM");
       stopping.signal.addEventListener("abort", stop);
     });
     if (stopping.signal.aborted) return undefined;
+    // The mounted token is replaced before the bound can cut it. The bound keeps both ends: a
+    // Go panic states its cause first, and a failure reported after long output states it last.
+    const quoted = (text: string) => {
+      const line = (token ? text.replaceAll(token, "[REDACTED]") : text).replace(/\s+/g, " ").trim();
+      return JSON.stringify(line.length > 2000 ? `${line.slice(0, 1000)} … ${line.slice(-1000)}` : line);
+    };
     let result: ReadSyncResult = { schema_version: 1, ready: false, error_class: "unreadable" };
+    let evidence = `exit=${exit} stdout=${quoted(stdout)} stderr=${quoted(stderr)}`;
     try {
-      result = ReadSyncResult.parse(JSON.parse(stdout));
+      const receipt = JSON.parse(stdout);
+      result = ReadSyncResult.parse(receipt);
+      // coverage.paths lists the checkout's sparse window, not what failed, and is long enough
+      // that the bound would cut what did.
+      delete receipt.coverage?.paths;
+      evidence = `receipt=${quoted(JSON.stringify(receipt))}`;
     } catch {
-      // Recorded as a failed attempt; the next one starts within a minute.
+      // Recorded as a failed attempt.
     }
     ledger.last = result;
     ledger.refused = result.error_class === "denied" ? fingerprint : undefined;
     if (result.ready && !result.error_class) ledger.lastSync = result.last_successful_sync ?? undefined;
-    return result.error_class ? stdout.replace(/\s+/g, " ").trim().slice(0, 2000) : undefined;
+    return result.error_class ? evidence : undefined;
   };
 
-  /** Refresh one hosted ledger and log a changed verdict. */
-  const cycle = async (repo: TeamRepository) => {
-    if (stopping.signal.aborted) return;
+  /**
+   * Refresh one hosted ledger, and log a changed verdict or failure class. Returns whether ox
+   * ran and failed with the same class as the attempt before it, other than a first sync still
+   * transferring. A denied attempt never counts: ox runs again only for a replaced credential.
+   */
+  const cycle = async (repo: TeamRepository): Promise<boolean> => {
+    if (stopping.signal.aborted) return false;
+    const ledger = hosted.get(repo.name)!;
+    const before = ledger.last;
     const previous = ledgerReadings.get(repo.name)?.status;
-    const receipt = await refreshHosted(repo).catch(() => undefined);
-    if (stopping.signal.aborted) return;
+    const evidence = await refreshHosted(repo).catch(() => undefined);
+    if (stopping.signal.aborted) return false;
     const status = recordLedger(hostedStatus(repo.name), ++ledgerLookup);
-    if (previous?.status !== status.status || previous?.detail !== status.detail) {
-      console.warn(`ledger_sync repo=${JSON.stringify(repo.name)} status=${status.status} detail=${JSON.stringify(status.detail)}` +
-        (receipt ? ` receipt=${JSON.stringify(receipt)}` : ""));
+    const failure = ledger.last?.error_class;
+    if (previous?.status !== status.status || previous?.detail !== status.detail || failure !== before?.error_class) {
+      console.warn(`ledger_sync repo=${JSON.stringify(repo.name)} status=${status.status}` +
+        (failure ? ` class=${JSON.stringify(failure)}` : "") +
+        ` detail=${JSON.stringify(status.detail)}` + (evidence ? ` ${evidence}` : ""));
     }
+    return ledger.last !== before && Boolean(failure) && failure === before?.error_class &&
+      failure !== "denied" && status.status !== "initializing";
   };
 
-  /** Sync again a minute after each attempt ends, until the gateway stops. */
+  /**
+   * Sync again a minute after each attempt ends, until the gateway stops. Each attempt that
+   * fails with the same class as the one before it doubles the wait, up to
+   * {@link MAX_SYNC_WAIT_MS}.
+   */
   const loop = async (repo: TeamRepository) => {
+    let wait = 60_000;
     while (!stopping.signal.aborted) {
       await new Promise<void>((resolve) => {
         const done = () => {
@@ -647,10 +681,10 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
           stopping.signal.removeEventListener("abort", done);
           resolve();
         };
-        const timer = setTimeout(done, 60_000);
+        const timer = setTimeout(done, wait);
         stopping.signal.addEventListener("abort", done);
       });
-      await cycle(repo);
+      wait = await cycle(repo) ? Math.min(wait * 2, MAX_SYNC_WAIT_MS) : 60_000;
     }
   };
 

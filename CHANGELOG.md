@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A failed ledger sync names its failure in the gateway log, and a failure that repeats is
+  retried less often (#128).** When a team-token ledger's sync failed, `team_status` said the
+  gateway log named the cause. The `ledger_sync` line it pointed at carried ox's receipt cut at
+  2,000 characters, with the failure class near the end behind the checkout's coverage window.
+  When ox printed no receipt, the line held no cause at all. Now the line names ox's failure
+  class right after the status and keeps the receipt without its coverage window. When ox
+  prints no receipt, the line gives ox's exit status, stdout and stderr instead, with the
+  mounted token redacted. A change of class logs a new line even when `team_status` reads the
+  same.
+
+  Every attempt was also retried a minute after the last ended, including a failure no retry
+  clears, such as a ledger path ox 0.17.0 cannot claim, which it reports as `interrupted`
+  (sageox/ox#1045). Now each attempt that fails with the same class as the one before it
+  doubles the wait, up to 30 minutes. A success, a different failure, or a first sync still
+  resuming goes back to a minute, so a first sync keeps its pace and still reports
+  `initializing`. A refused credential keeps its own rule: it is not offered again, and a
+  replacement is tried within a minute of being mounted. After fixing a failure that
+  repeated, the next attempt can be up to 30 minutes away; restart the gateway to sync at
+  once.
+
 ## [0.8.0] - 2026-09-22
 
 Everything below shipped after `v0.7.0`.
