@@ -81,12 +81,14 @@ describe("the teams this machine can see", () => {
 
 describe("oxStatus", () => {
   it("reports why ox failed without the token it was given", async () => {
+    // Longer than the 160-character bound: cut first, the error would keep part of it.
+    const token = `oxt_${"x".repeat(200)}`;
     const status = await withFakeOx(`echo "Error: $SAGEOX_TOKEN was refused" >&2; exit 1`, () =>
-      oxStatus({ token: () => "oxt_planted" }),
+      oxStatus({ token: () => token }),
     );
 
     expect(status).toMatchObject({ installed: true, authenticated: false });
     expect(status.error).toContain("Error: [REDACTED] was refused");
-    expect(status.error).not.toContain("oxt_planted");
+    expect(status.error).not.toContain("oxt_");
   });
 });
