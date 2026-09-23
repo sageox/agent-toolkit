@@ -277,7 +277,8 @@ refusals; status never forwards credential paths, identity details, or raw diagn
 **The gateway owns ledger sync.** When the policy grants `team_sessions` or `team_recent`,
 it runs `ox sync --read-only --repo <repo_id> --timeout 30m --json` for each configured
 repository bound to its team, with the team brain's token and
-`XDG_DATA_HOME=workspace/ox-data`, at startup and a minute after each attempt ends. ox owns
+`XDG_DATA_HOME=workspace/ox-data`, at startup and a minute after each attempt ends, doubling
+that wait up to 30 minutes while attempts keep failing with the same class. ox owns
 discovery, Git and LFS authentication with that token, the checkout lock, and the readiness
 receipt; read sync cannot push, upload LFS objects, ingest sessions, drain an outbox, or
 start the daemon. A first sync that outlasts one attempt resumes from what it transferred.

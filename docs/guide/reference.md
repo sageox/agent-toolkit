@@ -296,8 +296,16 @@ transfers every object the ledger covers, which takes most of an hour for a larg
 runs in 30-minute attempts that resume from what the last one transferred, and `team_status`
 reports the repository as `initializing` until the first sync finishes or an attempt fails
 with anything but a resumable interruption. Later refreshes take seconds to about a minute. A refused credential is not offered again until
-the mounted value changes or the gateway restarts; other failures retry on the next attempt. A ledger whose last sync failed, or whose last
+the mounted value changes or the gateway restarts. Any other failure is retried, and each
+attempt that fails with the same class as the one before it doubles the wait before the next,
+up to 30 minutes; a success, a different failure, or a first sync still resuming goes back to
+a minute. After fixing a failure that repeated, restart the gateway to sync at once rather than
+wait for the next attempt. A ledger whose last sync failed, or whose last
 successful sync is more than five minutes old, is refused rather than read as empty.
+
+The gateway logs one `ledger_sync` line when a repository's status or failure class changes,
+not one per attempt. For a failed attempt it names ox's failure class and ox's receipt, or,
+when ox printed no receipt, how ox exited and what it wrote.
 
 Every read first asks SageOx whether the credential mounted at that moment may read that
 exact repository, because a team token can outlive a repository's link to its team, and

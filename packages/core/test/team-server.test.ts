@@ -368,6 +368,8 @@ if (command === "version") {
       exit('{"schema_version":1,"ready":false,"error_class":"interrupted"}\n', 1);
     });
     fs.writeFileSync(path.join(dir, "sync-started"), "");
+  } else if (has("sync-panics")) {
+    exit("", 2, "panic: oxp_planted\n");
   } else {
     const receipt = refused ? { schema_version: 1, ready: false, error_class: "denied" }
       : has("receipt.json") ? JSON.parse(read("receipt.json"))
@@ -485,6 +487,14 @@ if (command === "version") {
     schema_version: 1, repo_id: "repo_a", endpoint: "https://sageox.test", ready: false,
     last_successful_sync: null, ...fields,
   });
+  // Child processes settle on their own clock, so wait for them without the faked timers.
+  const settle = async (condition: () => boolean, what: string) => {
+    const deadline = Date.now() + 10_000;
+    while (!condition()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
 
   it("syncs each repository with ox's bounded read sync, its team token and the isolated data home", async () => {
     await withLedgers(async (brain, bin) => {
@@ -621,6 +631,48 @@ if (command === "version") {
     }
   });
 
+  it("doubles the wait after each failure that repeats the last, up to 30 minutes, and logs each change once", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { log } = await withLedgers(async (_, bin) => {
+        const attempts = () => calls(bin, "|sync ").length;
+        /** The next attempt starts `minutes` after the last one ended: the loop's timer fires then, and not before. */
+        const next = async (minutes: number) => {
+          const before = attempts();
+          let waited = 0;
+          while (waited <= minutes && vi.getTimerCount() === 1 && attempts() === before) {
+            await vi.advanceTimersByTimeAsync(60_000);
+            waited++;
+          }
+          expect(waited).toBe(minutes);
+          await settle(() => attempts() > before && vi.getTimerCount() === 1, `the attempt after ${minutes} minutes`);
+        };
+        await settle(() => vi.getTimerCount() === 1, "the first wait");
+        for (const minutes of [1, 2, 4, 8, 16, 30, 30]) await next(minutes);
+        writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "git_failed" }));
+        for (const minutes of [30, 1, 2]) await next(minutes);
+        writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "interrupted", resumable: true }));
+        for (const minutes of [4, 1, 1]) await next(minutes);
+        rmSync(join(bin, "a/receipt.json"));
+        for (const minutes of [1, 1]) await next(minutes);
+      }, (bin) => {
+        const scope = ledgerScope(bin);
+        // ox 0.17.0's receipt for a ledger path holding only ox's own cache (sageox/ox#1045).
+        writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "interrupted" }));
+        return { ...scope, repositories: scope.repositories!.slice(0, 1) };
+      });
+      expect(log.split("\n").filter((line) => line.startsWith("ledger_sync "))
+        .map((line) => line.match(/^ledger_sync repo="acme--a" (status=\S+(?: class="\w+")?)/)?.[1])).toEqual([
+        'status=unavailable class="interrupted"',
+        'status=unavailable class="git_failed"',
+        'status=initializing class="interrupted"',
+        "status=available",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ["denied", "not-authenticated", /team access token/],
     ["unavailable", "ledger-unavailable", /did not offer/],
@@ -666,17 +718,31 @@ if (command === "version") {
     }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({ ready: true, last_successful_sync }))));
   });
 
-  it("keeps a failed sync's receipt for the operator log, and gives the brain a fixed sentence", async () => {
+  it("logs a failed sync's class and receipt for the operator, and gives the brain a fixed sentence", async () => {
     const { log } = await withLedgers(async (brain) => {
       const status = await text("team_status", {}, brain);
       expect(status).not.toContain("oxp_planted");
       expect(JSON.parse(status).ledger_sync.repositories[0].detail).toMatch(/could not be downloaded/);
     }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({
+      // ox lists the checkout's whole sparse window here, ahead of what failed.
+      coverage: { complete: false, files: 0, empty: false,
+        paths: Array.from({ length: 42 }, (_, day) => `data/github/2026/09/${day}/`) },
       error_class: "missing_hydration",
       error_detail: { reason: "object_refused", path: "sessions/oxp_planted/session.md", server_code: 404 },
       skipped: { total: 2, reasons: { object_refused: 2 } },
     }))));
-    expect(log).toMatch(/ledger_sync repo="acme--a" status=unavailable .*object_refused.*sessions\/oxp_planted/);
+    expect(log).toMatch(
+      /ledger_sync repo="acme--a" status=unavailable class="missing_hydration" detail="[^"]+" receipt=".*object_refused.*sessions\/oxp_planted/);
+    expect(log).not.toContain("data/github/");
+  });
+
+  it("logs how ox exited and what it wrote when it printed no receipt", async () => {
+    const { log } = await withLedgers(async (brain) => {
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", reason: expect.stringMatching(/last ledger sync failed/) });
+      expect(await text("team_status", {}, brain)).not.toContain("oxp_planted");
+    }, scoped((bin) => writeFileSync(join(bin, "a/sync-panics"), "")));
+    expect(log).toMatch(
+      /ledger_sync repo="acme--a" status=unavailable class="unreadable" detail="[^"]+" exit=2 stdout="" stderr="panic: oxp_planted"/);
   });
 
   it("refuses ox older than 0.17.0 without syncing", async () => {
@@ -720,14 +786,6 @@ if (command === "version") {
 
   it("keeps other repositories syncing while one first sync is still running", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    // Child processes settle on their own clock, so wait for them without the faked timers.
-    const settle = async (condition: () => boolean, what: string) => {
-      const deadline = Date.now() + 10_000;
-      while (!condition()) {
-        if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    };
     try {
       await withLedgers(async (brain, bin) => {
         const syncs = (repo: string) => existsSync(join(bin, "calls")) ? calls(bin, `--repo=${repo} `).length : 0;
