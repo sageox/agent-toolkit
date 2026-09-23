@@ -1034,16 +1034,22 @@ if (args[0] === 'fetch' || args[0] === 'reset') {
         const fixture = JSON.parse(readFileSync(join(bin, name, "recent.json"), "utf8"));
         fixture.authors[0].murmurs.push({ id: `old-${name}`, user: "alice", topic: "wip",
           time: new Date(Date.now() - 30 * 60 * 60_000).toISOString(), content: "Yesterday's work." });
-        fixture.stats.total_murmurs = 2;
+        fixture.authors[1].sessions.push({ name: `old-session-${name}`, user: "bob", title: "Yesterday's session",
+          time: new Date(Date.now() - 31 * 60 * 60_000).toISOString() });
+        fixture.stats = { total_authors: 2, total_murmurs: 2, total_sessions: 2 };
         writeFileSync(join(bin, name, "recent.json"), JSON.stringify(fixture));
       }
       const git = JSON.parse(await brain.recent("acme--a", 72, 10));
       expect(git.work_updates_since).toBe(git.since);
-      expect(git).toMatchObject({ total: 3, activities: [{ kind: "session" }, { id: "murmur-a" }, { id: "old-a" }] });
+      expect(git).toMatchObject({ total: 4, activities: [
+        { kind: "session" }, { id: "murmur-a" }, { id: "old-a" }, { name: "old-session-a" },
+      ] });
       const token = JSON.parse(await brain.recent("acme--b", 72, 10));
       expect(Date.parse(token.until) - Date.parse(token.work_updates_since)).toBe(11 * 60 * 60_000);
       expect(Date.parse(token.until) - Date.parse(token.since)).toBe(72 * 60 * 60_000);
-      expect(token).toMatchObject({ total: 2, activities: [{ kind: "session" }, { id: "murmur-b" }] });
+      expect(token).toMatchObject({ total: 3, activities: [
+        { kind: "session" }, { id: "murmur-b" }, { name: "old-session-b" },
+      ] });
     }, managedScope);
   });
 
