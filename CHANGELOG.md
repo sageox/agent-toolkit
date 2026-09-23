@@ -18,9 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other tools keep working.
 
   If you mounted `auth.json` through `configHome`, mount a team access token (`oxt_`) as the
-  `token` secret instead and remove the line. That token covers team search and every
-  configured repository's ledger except those listed under `ledgerSync`, which still sync from
-  their own Git remote.
+  `token` secret instead and remove the line. That token covers team search and, when a ledger
+  reader is granted, the ledger of every configured repository bound to the team, except those
+  listed under `ledgerSync`, which still sync from their own Git remote.
 
 - **Ledger readers sync over the team token, with no Git credential or ledger URL (#57).**
   `team_sessions` and `team_recent` read a ledger checkout that an operator had to supply,
@@ -32,7 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unless it confirms. A credential replaced during the read is checked again before the
   answer is returned. A large ledger's first sync takes most of an hour in resumable
   30-minute attempts, and `team_status` reports the repository as `initializing` until that
-  first sync finishes or fails.
+  first sync finishes or an attempt fails with anything but a resumable interruption. Work
+  updates on a ledger synced this way reach back at most
+  11 hours, because ox's read sync keeps them only for the hour of its last sync and the 11
+  before it: `team_recent` says where they start in a new `work_updates_since` field, and
+  session activity still covers the whole window.
 
   This needs a team access token (`oxt_`; ox refuses a personal one for ledger reads), ox
   0.17.0 or newer, which the base image already ships, and ledger reads enabled for the team

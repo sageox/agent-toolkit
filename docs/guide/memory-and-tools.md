@@ -179,13 +179,15 @@ These are separate `ledger:<repo>` capabilities; code-index readiness does not g
 `team_recent` uses the same repository, access, and freshness checks to read recent coworker
 work updates (murmurs) and session activity. Its `hours` argument ranges from 1 to 168
 (default 72), and `limit` ranges from 1 to 20 (default 10). The reply includes `since`,
-`until`, `last_sync`, the total record count in that window, and `truncated` when the list
-was limited. Records are sorted newest first across authors and activity types; titles,
-summaries, and update text are capped at 2,000 characters with an ellipsis. The reader
-projects recorded activity; it omits ox's generated collision advice and prompt guidance.
-It always supplies an explicit time window, so reading activity does not consume history
-for subsequent tool calls. ox may still update its local glance checkpoint under the
-gateway's config home; that checkpoint does not control this tool's window.
+`until`, `work_updates_since`, `last_sync`, the total record count in that window, and
+`truncated` when the list was limited. A ledger synced over the team token holds work
+updates only for the hour of its last sync and the 11 before it. For such a ledger,
+`work_updates_since` is at most 11 hours before `until`, and no older update is listed;
+session activity still covers the whole window. Records are sorted newest first across
+authors and activity types; titles, summaries, and update text are capped at 2,000
+characters with an ellipsis. The reader projects recorded activity; it omits ox's generated
+collision advice and prompt guidance. It always supplies an explicit time window, so reading
+activity does not consume history for subsequent tool calls.
 
 The gateway keeps these ledgers itself, over the team brain's token, and only when the policy
 grants `team_sessions` or `team_recent` — see [ledger sync](reference.md#ledger-sync). It

@@ -294,8 +294,8 @@ access to the repository; and ledger reads enabled for the team on the SageOx en
 Each repository syncs at startup and again a minute after each attempt ends. The first sync
 transfers every object the ledger covers, which takes most of an hour for a large ledger. It
 runs in 30-minute attempts that resume from what the last one transferred, and `team_status`
-reports the repository as `initializing` until the first sync finishes or fails. Later
-refreshes take seconds to about a minute. A refused credential is not offered again until
+reports the repository as `initializing` until the first sync finishes or an attempt fails
+with anything but a resumable interruption. Later refreshes take seconds to about a minute. A refused credential is not offered again until
 the mounted value changes or the gateway restarts; other failures retry on the next attempt. A ledger whose last sync failed, or whose last
 successful sync is more than five minutes old, is refused rather than read as empty.
 
