@@ -618,7 +618,12 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       stopping.signal.addEventListener("abort", stop);
     });
     if (stopping.signal.aborted) return undefined;
-    const quoted = (text: string) => JSON.stringify(text.replace(/\s+/g, " ").trim().slice(0, 2000));
+    // The mounted token is replaced before the bound can cut it. The bound keeps both ends: a
+    // Go panic states its cause first, and a failure reported after long output states it last.
+    const quoted = (text: string) => {
+      const line = (token ? text.replaceAll(token, "[REDACTED]") : text).replace(/\s+/g, " ").trim();
+      return JSON.stringify(line.length > 2000 ? `${line.slice(0, 1000)} … ${line.slice(-1000)}` : line);
+    };
     let result: ReadSyncResult = { schema_version: 1, ready: false, error_class: "unreadable" };
     let evidence = `exit=${exit} stdout=${quoted(stdout)} stderr=${quoted(stderr)}`;
     try {

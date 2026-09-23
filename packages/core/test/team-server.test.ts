@@ -368,8 +368,8 @@ if (command === "version") {
       exit('{"schema_version":1,"ready":false,"error_class":"interrupted"}\n', 1);
     });
     fs.writeFileSync(path.join(dir, "sync-started"), "");
-  } else if (has("sync-panics")) {
-    exit("", 2, "panic: oxp_planted\n");
+  } else if (has("sync-stderr")) {
+    exit("", 2, read("sync-stderr").replaceAll("@TOKEN@", env.SAGEOX_TOKEN ?? "-"));
   } else {
     const receipt = refused ? { schema_version: 1, ready: false, error_class: "denied" }
       : has("receipt.json") ? JSON.parse(read("receipt.json"))
@@ -758,15 +758,20 @@ if (command === "version") {
   });
 
   it.each([
-    ["no receipt", "sync-panics", "", /exit=2 stdout="" stderr="panic: oxp_planted"/],
+    // What ox writes to stderr; @TOKEN@ becomes the credential ox was given.
+    ["a panic", "sync-stderr", `panic: oxp_planted @TOKEN@\n\ngoroutine 1 [running]:\n${"main.sync()\n".repeat(300)}`,
+      /exit=2 stdout="" stderr="panic: oxp_planted \[REDACTED\] goroutine 1 \[running\]: main\.sync\(\)/],
+    ["a failure reported after long output", "sync-stderr", `${"warning: slow transfer\n".repeat(300)}fatal: oxp_planted\n`,
+      /exit=2 stdout="" stderr="warning: slow transfer [^"]* fatal: oxp_planted"/],
     ["a receipt that is not ready and names no failure", "receipt.json", receipt({}), /exit=1 stdout="\{\\"schema_version\\":1,/],
-  ])("logs how ox exited and what it wrote for %s", async (_, file, content, evidence) => {
+  ])("logs how ox exited and what it wrote for %s, without the mounted token", async (_, file, content, evidence) => {
     const { log } = await withLedgers(async (brain) => {
       expect(ledger(brain)).toMatchObject({ health: "Unavailable", reason: expect.stringMatching(/last ledger sync failed/) });
       expect(await text("team_status", {}, brain)).not.toContain("oxp_planted");
     }, scoped((bin) => writeFileSync(join(bin, "a", file), content)));
     expect(log).toMatch(/ledger_sync repo="acme--a" status=unavailable class="unreadable" detail="[^"]+" exit=/);
     expect(log).toMatch(evidence);
+    expect(log).not.toContain("oxt_current");
   });
 
   it("refuses ox older than 0.17.0 without syncing", async () => {

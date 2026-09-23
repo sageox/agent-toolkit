@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2,000 characters, with the failure class near the end behind the checkout's coverage window.
   When ox printed no receipt, the line held no cause at all. Now the line names ox's failure
   class right after the status and keeps the receipt without its coverage window. When ox
-  prints no receipt, the line gives ox's exit status, stdout and stderr instead. A change of
-  class logs a new line even when `team_status` reads the same.
+  prints no receipt, the line gives ox's exit status, stdout and stderr instead, with the
+  mounted token redacted. A change of class logs a new line even when `team_status` reads the
+  same.
 
   Every attempt was also retried a minute after the last ended, including a failure no retry
   clears, such as a ledger path ox 0.17.0 cannot claim, which it reports as `interrupted`
