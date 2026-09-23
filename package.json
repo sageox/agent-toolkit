@@ -9,11 +9,11 @@
     "typecheck": "tsc --noEmit && pnpm -r exec tsc --noEmit"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.6.2",
     "@types/ws": "^8.18.1",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0",
+    "vitest": "^5.0.1",
     "ws": "^8.21.3"
   }
 }
