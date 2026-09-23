@@ -278,7 +278,8 @@ refusals; status never forwards credential paths, identity details, or raw diagn
 it runs `ox sync --read-only --repo <repo_id> --timeout 30m --json` for each configured
 repository bound to its team, with the team brain's token and
 `XDG_DATA_HOME=workspace/ox-data`, at startup and a minute after each attempt ends, doubling
-that wait up to 30 minutes while attempts keep failing with the same class. ox owns
+that wait up to 30 minutes while attempts keep failing with the same class other than
+`denied`. ox owns
 discovery, Git and LFS authentication with that token, the checkout lock, and the readiness
 receipt; read sync cannot push, upload LFS objects, ingest sessions, drain an outbox, or
 start the daemon. A first sync that outlasts one attempt resumes from what it transferred.

@@ -52,7 +52,8 @@ const LedgerLocation = z.object({
 });
 // The receipt `ox sync --read-only --json` prints on success and failure alike. ox may add
 // fields and failure classes within schema version 1. Reads are authorized against the
-// endpoint a ready receipt names, so one without it is not a usable success.
+// endpoint a ready receipt names, so one without it is not a usable success, and a receipt
+// that is not ready must name its failure class to be read as a failure.
 const ReadSyncResult = z.object({
   schema_version: z.literal(1),
   endpoint: z.string().optional(),
@@ -60,7 +61,7 @@ const ReadSyncResult = z.object({
   last_successful_sync: z.string().nullish(),
   error_class: z.string().optional(),
   resumable: z.boolean().optional(),
-}).refine((receipt) => !receipt.ready || Boolean(receipt.endpoint));
+}).refine((receipt) => receipt.ready ? Boolean(receipt.endpoint) : Boolean(receipt.error_class));
 type ReadSyncResult = z.infer<typeof ReadSyncResult>;
 const SessionsResponse = z.object({
   repo_id: z.string(),
@@ -639,7 +640,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
   /**
    * Refresh one hosted ledger, and log a changed verdict or failure class. Returns whether ox
    * ran and failed with the same class as the attempt before it, other than a first sync still
-   * transferring.
+   * transferring. A denied attempt never counts: ox runs again only for a replaced credential.
    */
   const cycle = async (repo: TeamRepository): Promise<boolean> => {
     if (stopping.signal.aborted) return false;
@@ -656,7 +657,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
         ` detail=${JSON.stringify(status.detail)}` + (evidence ? ` ${evidence}` : ""));
     }
     return ledger.last !== before && Boolean(failure) && failure === before?.error_class &&
-      status.status !== "initializing";
+      failure !== "denied" && status.status !== "initializing";
   };
 
   /**

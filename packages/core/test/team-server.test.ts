@@ -495,6 +495,27 @@ if (command === "version") {
       await new Promise((resolve) => setImmediate(resolve));
     }
   };
+  /** {@link scoped} for repository a alone, so that its sync loop holds the only timer. */
+  const scopedA = (prepare: (bin: string) => void) => (bin: string) => {
+    const scope = scoped(prepare)(bin);
+    return { ...scope, repositories: scope.repositories!.slice(0, 1) };
+  };
+  /**
+   * Under faked timers, advances to the next sync and checks that it started `minutes` after
+   * the last one ended: the loop's timer fires then, and not before.
+   */
+  const nextSync = async (bin: string, minutes: number) => {
+    const syncs = () => calls(bin, "|sync ").length;
+    await settle(() => vi.getTimerCount() === 1, "the loop's wait");
+    const before = syncs();
+    let waited = 0;
+    while (waited <= minutes && vi.getTimerCount() === 1 && syncs() === before) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      waited++;
+    }
+    expect(waited).toBe(minutes);
+    await settle(() => syncs() > before && vi.getTimerCount() === 1, `the sync after ${minutes} minutes`);
+  };
 
   it("syncs each repository with ox's bounded read sync, its team token and the isolated data home", async () => {
     await withLedgers(async (brain, bin) => {
@@ -635,32 +656,17 @@ if (command === "version") {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const { log } = await withLedgers(async (_, bin) => {
-        const attempts = () => calls(bin, "|sync ").length;
-        /** The next attempt starts `minutes` after the last one ended: the loop's timer fires then, and not before. */
-        const next = async (minutes: number) => {
-          const before = attempts();
-          let waited = 0;
-          while (waited <= minutes && vi.getTimerCount() === 1 && attempts() === before) {
-            await vi.advanceTimersByTimeAsync(60_000);
-            waited++;
-          }
-          expect(waited).toBe(minutes);
-          await settle(() => attempts() > before && vi.getTimerCount() === 1, `the attempt after ${minutes} minutes`);
-        };
-        await settle(() => vi.getTimerCount() === 1, "the first wait");
-        for (const minutes of [1, 2, 4, 8, 16, 30, 30]) await next(minutes);
+        for (const minutes of [1, 2, 4, 8, 16, 30, 30]) await nextSync(bin, minutes);
         writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "git_failed" }));
-        for (const minutes of [30, 1, 2]) await next(minutes);
+        for (const minutes of [30, 1, 2]) await nextSync(bin, minutes);
         writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "interrupted", resumable: true }));
-        for (const minutes of [4, 1, 1]) await next(minutes);
+        for (const minutes of [4, 1, 1]) await nextSync(bin, minutes);
         rmSync(join(bin, "a/receipt.json"));
-        for (const minutes of [1, 1]) await next(minutes);
-      }, (bin) => {
-        const scope = ledgerScope(bin);
+        for (const minutes of [1, 1]) await nextSync(bin, minutes);
+      }, scopedA((bin) => {
         // ox 0.17.0's receipt for a ledger path holding only ox's own cache (sageox/ox#1045).
         writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "interrupted" }));
-        return { ...scope, repositories: scope.repositories!.slice(0, 1) };
-      });
+      }));
       expect(log.split("\n").filter((line) => line.startsWith("ledger_sync "))
         .map((line) => line.match(/^ledger_sync repo="acme--a" (status=\S+(?: class="\w+")?)/)?.[1])).toEqual([
         'status=unavailable class="interrupted"',
@@ -668,6 +674,21 @@ if (command === "version") {
         'status=initializing class="interrupted"',
         "status=available",
       ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers each replacement for a refused credential a minute after the last attempt", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await withLedgers(async (_, bin) => {
+        for (const secret of ["oxt_second", "oxt_third"]) {
+          writeFileSync(join(bin, "secret"), secret);
+          await nextSync(bin, 1);
+        }
+        expect(calls(bin, "|sync ").map((line) => line.split("|")[3])).toEqual(["oxt_current", "oxt_second", "oxt_third"]);
+      }, scopedA((bin) => writeFileSync(join(bin, "required-token"), "oxt_rotated")));
     } finally {
       vi.useRealTimers();
     }
@@ -736,13 +757,16 @@ if (command === "version") {
     expect(log).not.toContain("data/github/");
   });
 
-  it("logs how ox exited and what it wrote when it printed no receipt", async () => {
+  it.each([
+    ["no receipt", "sync-panics", "", /exit=2 stdout="" stderr="panic: oxp_planted"/],
+    ["a receipt that is not ready and names no failure", "receipt.json", receipt({}), /exit=1 stdout="\{\\"schema_version\\":1,/],
+  ])("logs how ox exited and what it wrote for %s", async (_, file, content, evidence) => {
     const { log } = await withLedgers(async (brain) => {
       expect(ledger(brain)).toMatchObject({ health: "Unavailable", reason: expect.stringMatching(/last ledger sync failed/) });
       expect(await text("team_status", {}, brain)).not.toContain("oxp_planted");
-    }, scoped((bin) => writeFileSync(join(bin, "a/sync-panics"), "")));
-    expect(log).toMatch(
-      /ledger_sync repo="acme--a" status=unavailable class="unreadable" detail="[^"]+" exit=2 stdout="" stderr="panic: oxp_planted"/);
+    }, scoped((bin) => writeFileSync(join(bin, "a", file), content)));
+    expect(log).toMatch(/ledger_sync repo="acme--a" status=unavailable class="unreadable" detail="[^"]+" exit=/);
+    expect(log).toMatch(evidence);
   });
 
   it("refuses ox older than 0.17.0 without syncing", async () => {
