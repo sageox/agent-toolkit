@@ -573,6 +573,8 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       ({ repo: name, status: "unavailable", failure, detail, ...(last_sync ? { last_sync } : {}) });
     if (oxTooOld) return unavailable(LEDGER_OX_TOO_OLD, "not-installed");
     if (ledger.repoId === null) return unavailable(LEDGER_UNAVAILABLE);
+    // ox reports `resumable` only while no checkout is published: a first sync, or a clone that
+    // replaces a checkout removed after an earlier success.
     if (!last || (last.error_class === "interrupted" && last.resumable)) {
       return { repo: name, status: "initializing", since: ledger.since, detail: LEDGER_FIRST_SYNC };
     }
