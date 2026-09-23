@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-22
+
+Everything below shipped after `v0.7.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.8.0` takes `:latest` and `:0.8`. `:0.7` stays on 0.7.0. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
 - **The team brain authenticates only with its token, never a login on disk, and a manifest
   that sets `configHome` will not load.** `configHome` pointed ox at a mounted `auth.json`,
   which covered team search but never ledger reads, and with no token ox fell back to any
@@ -50,7 +56,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pushed anything pending and delete its checkout under `workspace/ox-data`: ox does not take
   over a checkout it did not create. Moving a repository off `ledgerSync` likewise means
   deleting its checkout.
-
 ## [0.7.0] - 2026-09-21
 
 Everything below shipped after `v0.6.1`.
