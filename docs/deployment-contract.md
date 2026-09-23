@@ -260,7 +260,10 @@ described below, which is not the repository-index readiness mechanism either.
 `team_status` checks team-search access and each synced repository's ledger.
 `team_sessions` reads the selected repository's last seven days of sessions, bounded to
 20 entries. `team_recent` reads work updates and session activity over an explicit window
-of 1–168 hours (default 72), with up to 20 records and an explicit truncation flag.
+of 1–168 hours (default 72), with up to 20 records and an explicit truncation flag. Over the
+team token, work updates reach back at most 11 hours, because ox's read sync keeps them only
+for the hour of its last sync and the 11 before it; the reply's `work_updates_since` says
+where they start.
 All use the existing `repos.conf` allowlist. The repository must retain its declared Git
 origin and match the team brain's SageOx team/repo binding. A read needs the repository's
 last sync to have succeeded with a remote observation (`last_successful_sync`) less than
@@ -320,13 +323,14 @@ Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existin
 | Case | Coverage / remaining work |
 |---|---|
 | Pinned ox contract | The base image pins ox 0.17.0, and its compatibility test checks `--version`, the guarded readers' refusal, and the read-sync receipt. The gateway refuses to sync with an older ox. |
-| Team-token-only setup | Tested with a fake ox: sync needs only the team token, the configured repositories, and the isolated data home. A cold sync against an enabled backend remains pending. |
+| Team-token-only setup | Tested with a fake ox: sync needs only the team token, the configured repositories, and the isolated data home. Verified live: from an empty data home, a 427-session ledger synced with only the team token and a configured repository, and both readers answered from it. |
 | Per-read authorization | Tested: an exact-repository check before each read; an unlinked repository, a revoked token, a mount replaced during the read, a mount that never settles, and a replacement after handoff. |
-| Freshness and failure classes | Tested: fresh, old, missing, invalid, and future sync times; `denied`, `unavailable`, `missing_ledger`, `missing_hydration`, `dirty`, `interrupted`, and unknown classes. A resumable first sync reports warming. |
+| Freshness and failure classes | Tested: fresh, old, missing, invalid, and future sync times; `denied`, `unavailable`, `missing_ledger`, `missing_hydration`, `incomplete_history`, `incomplete_coverage`, `dirty`, `interrupted`, and unknown classes. A resumable first sync reports warming. |
 | Credential health | Tested: a refused credential is offered once and synced again when the mount changes. |
 | Isolation | Tested: two gateways with separate data homes and tokens; one's refusal leaves the other ready. Two coworkers syncing at once against the server's shared transfer bound remains pending. |
 | Shutdown | Tested: a running sync receives SIGTERM, and shutdown waits for it to exit. |
 | `ledgerSync` | Unchanged, and tested beside team-token repositories. ox refuses a `ledgerSync` checkout, so moving a repository to team-token sync means deleting its checkout; the fresh sync that follows has not run against a live backend. |
+| Recent activity | Tested: over the team token, work updates are listed only from 11 hours before the window's end, which `work_updates_since` states; a `ledgerSync` repository lists them across the whole window. |
 
 The runtime build checks the installed ox 0.17.0 binary with an
 [offline compatibility smoke test](../deploy/docker/test-ox.mjs) on both architectures.
@@ -343,10 +347,8 @@ sync or migration parity. #24 remains open.
 The ox 0.17.0 `glance` check covers populated and empty ledgers.
 `team_recent` passes absolute `--since`/`--until` bounds and validates
 the returned repository, window, timestamps, and counts. It projects work updates and
-session activity without forwarding generated collision advice or prompt guidance. ox may
-write its local glance checkpoint under the gateway's config home; explicit bounds make
-subsequent tool reads independent of that checkpoint. The gateway-managed path is also
-checked with synthetic Git repositories. Live credential and deployment acceptance above remain pending; these checks do not certify a rollout.
+session activity without forwarding generated collision advice or prompt guidance. The
+gateway-managed path is also checked with synthetic Git repositories. Live credential and deployment acceptance above remain pending; these checks do not certify a rollout.
 
 Shared brains require a volume that is genuinely shared between agent deployments. Add the
 same existing ReadWriteMany claim to each participant's native `sharedVolumes` values at the

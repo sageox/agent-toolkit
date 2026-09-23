@@ -32,7 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unless it confirms. A credential replaced during the read is checked again before the
   answer is returned. A large ledger's first sync takes most of an hour in resumable
   30-minute attempts, and `team_status` reports the repository as `initializing` until that
-  first sync finishes or fails.
+  first sync finishes or fails. Work updates on a ledger synced this way reach back at most
+  11 hours, because ox's read sync keeps them only for the hour of its last sync and the 11
+  before it: `team_recent` says where they start in a new `work_updates_since` field, and
+  session activity still covers the whole window.
 
   This needs a team access token (`oxt_`; ox refuses a personal one for ledger reads), ox
   0.17.0 or newer, which the base image already ships, and ledger reads enabled for the team

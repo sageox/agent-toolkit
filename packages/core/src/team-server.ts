@@ -120,10 +120,15 @@ const MIN_OX_VERSION = [0, 17, 0];
 // One attempt's budget. A first sync of a large ledger outlasts it; ox keeps the transferred
 // objects and the next attempt resumes from them.
 const LEDGER_SYNC_BUDGET = "30m";
+// ox 0.17.0's read sync keeps murmurs only for the hour of its last sync and the eleven before
+// it, and glance skips an hour the checkout does not hold, so a team-token checkout is only
+// sure to hold the last 11 hours of work updates.
+const SYNCED_UPDATE_HOURS = 11;
 const LEDGER_FIRST_SYNC = "This repository's first ledger sync has not finished. A large ledger's first sync can take most of an hour; each attempt resumes where the last one stopped.";
 const LEDGER_DENIED = "SageOx refused this gateway's credential for ledger sync. It needs a current team access token (oxt_) with access to this repository; sync retries when the mounted credential changes or the gateway restarts.";
 const LEDGER_NOT_OFFERED = "SageOx did not offer this repository's ledger to this gateway's team token. Ledger reads may not be enabled for the team, or the repository has no ready ledger.";
 const LEDGER_INCOMPLETE = "Some of this ledger's objects could not be downloaded, so it is not served. The gateway log names them; an object SageOx refuses stays missing until it is repaired.";
+const LEDGER_PARTIAL = "ox found this repository's ledger checkout missing part of its history or of the paths it must hold, so it is not served. The gateway log names which; the next attempt starts within a minute.";
 const LEDGER_DIRTY = "ox will not refresh this repository's ledger checkout because it holds content ox did not write. An operator must inspect the gateway's data directory.";
 const LEDGER_SYNC_FAILED = "The last ledger sync failed; the gateway log names the cause. The next attempt starts within a minute.";
 const LEDGER_OX_TOO_OLD = `Ledger sync needs ox ${MIN_OX_VERSION.join(".")} or newer, and this gateway's ox is older or reported no version.`;
@@ -274,6 +279,7 @@ export const TEAM_TOOLS: readonly TeamTool[] = [
     description:
       "Read recent coworker work updates and session activity from a configured repository's ledger, newest first. " +
       "Use a repository name from team_status. Looks back 72 hours by default (maximum 168); returns at most 20 records. " +
+      "Work updates may not reach back that far: work_updates_since is where they start. " +
       "Requires verified ledger sync within five minutes. Missing or stale data is refused. " +
       "Returns recorded activity; text is capped at 2,000 characters per field. Read-only team access.",
     inputSchema: {
@@ -575,6 +581,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       case "denied": return unavailable(LEDGER_DENIED, "not-authenticated");
       case "unavailable": case "missing_ledger": return unavailable(LEDGER_NOT_OFFERED);
       case "missing_hydration": return unavailable(LEDGER_INCOMPLETE);
+      case "incomplete_history": case "incomplete_coverage": return unavailable(LEDGER_PARTIAL);
       case "dirty": return unavailable(LEDGER_DIRTY);
       default: return unavailable(LEDGER_SYNC_FAILED);
     }
@@ -791,6 +798,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     // activity from another. Absolute bounds also let us verify the returned window.
     const until = Date.now();
     const since = until - hours * 60 * 60_000;
+    const updatesSince = hosted.has(name) ? Math.max(since, until - SYNCED_UPDATE_HOURS * 60 * 60_000) : since;
     const argv = ["glance", "--since", new Date(since).toISOString(), "--until", new Date(until).toISOString(), "--json"];
     const reply: Reply = async (out, repoId, last_sync) => {
       const parsed = RecentResponse.safeParse(out);
@@ -808,10 +816,12 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       if (activities.some(({ time }) => Date.parse(time) < since || Date.parse(time) > until)) {
         throw new Error(LEDGER_UNAVAILABLE);
       }
-      activities.sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
+      // Work updates before updatesSince may be only some of those recorded, so none are listed.
+      const listed = activities.filter(({ kind, time }) => kind === "session" || Date.parse(time) >= updatesSince);
+      listed.sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
       return JSON.stringify({ repo: name, repo_id: repoId, last_sync,
-        since: data.since, until: data.until, total: activities.length,
-        truncated: activities.length > limit, activities: activities.slice(0, limit) });
+        since: data.since, until: data.until, work_updates_since: new Date(updatesSince).toISOString(),
+        total: listed.length, truncated: listed.length > limit, activities: listed.slice(0, limit) });
     };
     return hosted.has(name) ? hostedRead(repo, argv, reply) : read(() => legacyRead(repo, argv, reply));
   };
