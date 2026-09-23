@@ -762,6 +762,9 @@ if (has(args[0] + "-stderr")) {
     // What ox writes to stderr; @TOKEN@ becomes the credential ox was given.
     ["a panic", "sync-stderr", `panic: oxp_planted @TOKEN@\n\ngoroutine 1 [running]:\n${"main.sync()\n".repeat(300)}`,
       /exit=2 stdout="" stderr="panic: oxp_planted \[REDACTED\] goroutine 1 \[running\]: main\.sync\(\)/],
+    // The token straddles the 1,000th character: cut first, the head would keep `oxt_c`.
+    ["a token across the bound", "sync-stderr", `${"x".repeat(995)}@TOKEN@${"y".repeat(1010)}`,
+      /exit=2 stdout="" stderr="x{995}\[REDA … y{1000}"/],
     ["a failure reported after long output", "sync-stderr", `${"warning: slow transfer\n".repeat(300)}fatal: oxp_planted\n`,
       /exit=2 stdout="" stderr="warning: slow transfer [^"]* fatal: oxp_planted"/],
     ["a receipt that is not ready and names no failure", "receipt.json", receipt({}), /exit=1 stdout="\{\\"schema_version\\":1,/],
