@@ -181,8 +181,8 @@ work updates (murmurs) and session activity. Its `hours` argument ranges from 1 
 (default 72), and `limit` ranges from 1 to 20 (default 10). The reply includes `since`,
 `until`, `work_updates_since`, `last_sync`, the total record count in that window, and
 `truncated` when the list was limited. A ledger synced over the team token holds work
-updates only for the hour of its last sync and the 11 before it, so for one
-`work_updates_since` is at most 11 hours before `until` and no older update is listed;
+updates only for the hour of its last sync and the 11 before it. For such a ledger,
+`work_updates_since` is at most 11 hours before `until`, and no older update is listed;
 session activity still covers the whole window. Records are sorted newest first across
 authors and activity types; titles, summaries, and update text are capped at 2,000
 characters with an ellipsis. The reader projects recorded activity; it omits ox's generated
