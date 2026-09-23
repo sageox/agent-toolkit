@@ -2,12 +2,12 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expiringSoon, oxTeams } from "../src/ox.ts";
+import { expiringSoon, oxStatus, oxTeams } from "../src/ox.ts";
 
-/** Puts an `ox` on PATH that prints `stdout` whatever it is asked. */
-const withFakeOx = async <T>(stdout: string, run: () => Promise<T>): Promise<T> => {
+/** Puts an `ox` on PATH that runs `script` whatever it is asked. */
+const withFakeOx = async <T>(script: string, run: () => Promise<T>): Promise<T> => {
   const bin = mkdtempSync(join(tmpdir(), "ox-fake-"));
-  writeFileSync(join(bin, "ox"), `#!/bin/sh\ncat <<'JSON'\n${stdout}\nJSON\n`, { mode: 0o755 });
+  writeFileSync(join(bin, "ox"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
   const path = process.env.PATH;
   process.env.PATH = `${bin}:${path}`;
   try {
@@ -17,6 +17,9 @@ const withFakeOx = async <T>(stdout: string, run: () => Promise<T>): Promise<T> 
     rmSync(bin, { recursive: true, force: true });
   }
 };
+
+/** A {@link withFakeOx} script that prints `stdout`. */
+const printing = (stdout: string) => `cat <<'JSON'\n${stdout}\nJSON`;
 
 describe("expiringSoon", () => {
   const now = new Date("2026-08-14T00:00:00Z");
@@ -57,14 +60,14 @@ describe("the teams this machine can see", () => {
   });
 
   it("drops restore clones and puts the primary team first", async () => {
-    const teams = await withFakeOx(listing, () => oxTeams());
+    const teams = await withFakeOx(printing(listing), () => oxTeams());
 
     expect(teams.map((t) => t.id)).toEqual(["team_jihjpfkt8b", "team_xlcr6yzpec"]);
   });
 
   it("keeps a team whose own name merely contains the word", async () => {
     const teams = await withFakeOx(
-      JSON.stringify({ teams: [{ team_id: "team_bak99", name: "Backups" }] }),
+      printing(JSON.stringify({ teams: [{ team_id: "team_bak99", name: "Backups" }] })),
       () => oxTeams(),
     );
 
@@ -72,6 +75,18 @@ describe("the teams this machine can see", () => {
   });
 
   it("answers with an empty list rather than throwing when ox cannot be read", async () => {
-    expect(await withFakeOx("not json at all", () => oxTeams())).toEqual([]);
+    expect(await withFakeOx(printing("not json at all"), () => oxTeams())).toEqual([]);
+  });
+});
+
+describe("oxStatus", () => {
+  it("reports why ox failed without the token it was given", async () => {
+    const status = await withFakeOx(`echo "Error: $SAGEOX_TOKEN was refused" >&2; exit 1`, () =>
+      oxStatus({ token: () => "oxt_planted" }),
+    );
+
+    expect(status).toMatchObject({ installed: true, authenticated: false });
+    expect(status.error).toContain("Error: [REDACTED] was refused");
+    expect(status.error).not.toContain("oxt_planted");
   });
 });

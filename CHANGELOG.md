@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repeated, the next attempt can be up to 30 minutes away; restart the gateway to sync at
   once.
 
+- **A failed `ox` call's output is logged and printed without the SageOx token the call was
+  given (#130).** The gateway's `ox_failed` line quotes what ox wrote to stderr, and `doctor`
+  prints the start of ox's error. Neither took out the token the call ran with, so if ox ever
+  printed it, both would have carried it; no ox release is known to. The token is now
+  replaced with `[REDACTED]` before the text is cut to length, and the rest of what ox wrote
+  is kept, as #128 did for a failed ledger sync.
+
 ## [0.8.0] - 2026-09-22
 
 Everything below shipped after `v0.7.0`.

@@ -623,7 +623,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
     // The mounted token is replaced before the bound can cut it. The bound keeps both ends: a
     // Go panic states its cause first, and a failure reported after long output states it last.
     const quoted = (text: string) => {
-      const line = (token ? text.replaceAll(token, "[REDACTED]") : text).replace(/\s+/g, " ").trim();
+      const line = redactToken(text, token).replace(/\s+/g, " ").trim();
       return JSON.stringify(line.length > 2000 ? `${line.slice(0, 1000)} … ${line.slice(-1000)}` : line);
     };
     let result: ReadSyncResult = { schema_version: 1, ready: false, error_class: "unreadable" };
@@ -977,6 +977,14 @@ export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): No
 }
 
 /**
+ * `text` with the token an ox child was given replaced. ox does not promise to leave that
+ * token out of what it prints.
+ */
+export function redactToken(text: string, token: string | undefined): string {
+  return token ? text.replaceAll(token, "[REDACTED]") : text;
+}
+
+/**
  * Why an `ox` call failed — a closed vocabulary, never the text ox printed.
  *
  * There is more than one class because each sends a human somewhere different: a missing
@@ -1111,8 +1119,10 @@ async function runOx(args: string[], scope: OxScope, cwd: string, guarded = fals
   } catch (error) {
     const e = error as { code?: string; stderr?: string; message?: string };
     // execFile's own message is the whole command line plus stderr, so it is no safer to
-    // replay than stderr is — both go to the log, neither to the brain.
-    const failed = oxFailed(verb, classifyOxFailure(e), e.stderr || e.message);
+    // replay than stderr is — both go to the log, neither to the brain. Redacted before
+    // oxFailed bounds it, with the token this child was given rather than the one mounted now.
+    const detail = redactToken(e.stderr || e.message || "", env.SAGEOX_TOKEN);
+    const failed = oxFailed(verb, classifyOxFailure(e), detail);
     // A guarded reader's refusal names only a sanitized class, most often a refresh that
     // held the checkout past this call's timeout.
     throw guarded && failed.failure === "failed" ? new Error(LEDGER_UNREAD) : failed;
