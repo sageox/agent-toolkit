@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { oxEnv, oxCwd, type OxScope } from "@sageox/agent-toolkit-core";
+import { oxEnv, oxCwd, redactToken, type OxScope } from "@sageox/agent-toolkit-core";
 
 const run = promisify(execFile);
 
@@ -46,7 +46,9 @@ export async function oxStatus(scope: OxScope = {}): Promise<OxStatus> {
     return {
       installed: true,
       authenticated: false,
-      error: (e.message ?? "ox status failed").slice(0, 160),
+      // execFile's message carries ox's stderr, and the token is replaced before the bound
+      // can cut it.
+      error: redactToken(e.message ?? "ox status failed", env.SAGEOX_TOKEN).slice(0, 160),
     };
   }
 }

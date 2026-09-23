@@ -333,6 +333,7 @@ describe("team status (#24)", () => {
 describe("repository ledger readers (#24, #57)", () => {
   // A fake `ox`. A hosted command names `--repo=repo_<x>` and reads its fixtures from
   // `<bin>/<x>`; a command run in a checkout, the `ledgerSync` path, reads that checkout's.
+  // A command whose fixtures hold `<verb>-stderr` writes it to stderr and fails.
   const OX = String.raw`
 const fs = require("node:fs");
 const path = require("node:path");
@@ -353,7 +354,9 @@ const exit = (stdout, code = 0, stderr = "") => {
   process.stdout.write(stdout);
 };
 const command = args[0] === "--version" ? "version" : args.slice(0, 2).join(" ");
-if (command === "version") {
+if (has(args[0] + "-stderr")) {
+  exit("", 2, read(args[0] + "-stderr").replaceAll("@TOKEN@", env.SAGEOX_TOKEN ?? "-"));
+} else if (command === "version") {
   const version = path.join(bin, "version");
   exit("ox version " + (fs.existsSync(version) ? fs.readFileSync(version, "utf8").trim() : "0.17.0") + " (test)\n");
 } else if (command === "query team") {
@@ -368,8 +371,6 @@ if (command === "version") {
       exit('{"schema_version":1,"ready":false,"error_class":"interrupted"}\n', 1);
     });
     fs.writeFileSync(path.join(dir, "sync-started"), "");
-  } else if (has("sync-stderr")) {
-    exit("", 2, read("sync-stderr").replaceAll("@TOKEN@", env.SAGEOX_TOKEN ?? "-"));
   } else {
     const receipt = refused ? { schema_version: 1, ready: false, error_class: "denied" }
       : has("receipt.json") ? JSON.parse(read("receipt.json"))
@@ -761,6 +762,9 @@ if (command === "version") {
     // What ox writes to stderr; @TOKEN@ becomes the credential ox was given.
     ["a panic", "sync-stderr", `panic: oxp_planted @TOKEN@\n\ngoroutine 1 [running]:\n${"main.sync()\n".repeat(300)}`,
       /exit=2 stdout="" stderr="panic: oxp_planted \[REDACTED\] goroutine 1 \[running\]: main\.sync\(\)/],
+    // The token straddles the 1,000th character: cut first, the head would keep `oxt_c`.
+    ["a token across the bound", "sync-stderr", `${"x".repeat(995)}@TOKEN@${"y".repeat(1010)}`,
+      /exit=2 stdout="" stderr="x{995}\[REDA … y{1000}"/],
     ["a failure reported after long output", "sync-stderr", `${"warning: slow transfer\n".repeat(300)}fatal: oxp_planted\n`,
       /exit=2 stdout="" stderr="warning: slow transfer [^"]* fatal: oxp_planted"/],
     ["a receipt that is not ready and names no failure", "receipt.json", receipt({}), /exit=1 stdout="\{\\"schema_version\\":1,/],
@@ -1181,6 +1185,33 @@ if (args[0] === 'fetch' || args[0] === 'reset') {
         chmodSync(sessions, 0o700);
       }
     }, managedScope);
+  });
+
+  it.each([
+    ["kept whole", "Error: @TOKEN@ was refused\n", "Error: [REDACTED] was refused"],
+    // The token starts five characters short of the bound: cut first, it would leave `oxt_c`.
+    ["cut by the bound", `${"x".repeat(495)}@TOKEN@`, `${"x".repeat(495)}[REDA`],
+  ])("logs what a failed ox call wrote, %s, without the token that call was given", async (_, stderr, detail) => {
+    const { value: told, log } = await withLedgers(async (brain, bin) => {
+      const failures: Array<[string, () => Promise<unknown>]> = [
+        ["query-stderr", () => brain.search("team", 1)],
+        ["a/status-stderr", () => brain.sessions("acme--a", 10)],
+        ["a/session-stderr", () => brain.sessions("acme--a", 10)],
+        ["a/glance-stderr", () => brain.recent("acme--a", 72, 10)],
+      ];
+      const told: string[] = [];
+      for (const [file, lookup] of failures) {
+        writeFileSync(join(bin, file), stderr);
+        told.push(await lookup().then(() => "answered", (e: Error) => e.message));
+        rmSync(join(bin, file));
+      }
+      return told;
+    }, managedScope);
+    expect(log.split("\n").filter((line) => line.startsWith("ox_failed "))).toEqual(["query", "status", "session", "glance"]
+      .map((verb) => `ox_failed verb="${verb}" class=failed detail=${JSON.stringify(detail)}`));
+    expect(log).not.toContain("oxt_current");
+    expect(told).toEqual([`ox query: ${OX_FAILURE_TEXT.failed}`, expect.stringMatching(/ledger could not be verified/),
+      `ox session: ${OX_FAILURE_TEXT.failed}`, `ox glance: ${OX_FAILURE_TEXT.failed}`]);
   });
 });
 
