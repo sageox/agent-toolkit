@@ -59,7 +59,7 @@ import {
   slackAppTokenSpec,
   slackBotTokenSpec,
 } from "./credentials.ts";
-import { flag, optionValue, positional } from "./args.ts";
+import { flag, hasFlag, optionValue, positional } from "./args.ts";
 import {
   isInteractive,
   promptConfirm,
@@ -275,20 +275,20 @@ export async function createCmd(
     name: string,
   ) => Promise<string | { checkCommand: string } | undefined>,
 ): Promise<string> {
-  if (argv.includes("--generate-avatar") && argv.includes("--starter-avatar")) {
+  if (hasFlag(argv, "generate-avatar") && hasFlag(argv, "starter-avatar")) {
     throw new Error("choose either --generate-avatar or --starter-avatar, not both");
   }
-  if (flag(argv, "avatar-candidates") && !argv.includes("--generate-avatar")) {
+  if (flag(argv, "avatar-candidates") && !hasFlag(argv, "generate-avatar")) {
     throw new Error("--avatar-candidates requires --generate-avatar");
   }
-  const interactive = isInteractive() && !argv.includes("--non-interactive");
+  const interactive = isInteractive() && !hasFlag(argv, "non-interactive");
   // Choosing either avatar path is how the existing scripted create flow opts out of
   // questions. With neither choice, a human gets the whole journey; --non-interactive is
   // the explicit escape hatch for scripts that want defaults while attached to a TTY.
   const guided =
     interactive &&
-    !argv.includes("--generate-avatar") &&
-    !argv.includes("--starter-avatar");
+    !hasFlag(argv, "generate-avatar") &&
+    !hasFlag(argv, "starter-avatar");
 
   let name = flag(argv, "name") ?? positional(argv, CREATE_VALUE_FLAGS);
   const explicitName = Boolean(name);
@@ -404,7 +404,7 @@ export async function createCmd(
   // the retry after a failure.
   const avatarQuestion =
     `Generate three ${AVATAR_MODEL} candidates and choose one now? (uses three images)`;
-  let shouldGenerate = argv.includes("--generate-avatar");
+  let shouldGenerate = hasFlag(argv, "generate-avatar");
   const resumingGeneratedAvatar =
     progress?.stage === "avatar" &&
     progress.avatar === "generate" &&
@@ -428,7 +428,7 @@ export async function createCmd(
     // paid for, and repoint the profile that names it — in a command that just reported
     // keeping that profile. Asked for by name, before the key prompt and the paid call.
     const generated = agentPaths(name).generatedAvatar;
-    if (existsSync(generated) && !argv.includes("--replace-avatar")) {
+    if (existsSync(generated) && !hasFlag(argv, "replace-avatar")) {
       throw new Error(
         `${generated} already exists — pass --replace-avatar to generate over it`,
       );
@@ -1005,7 +1005,7 @@ a DM the agent answers without being tagged.
   // Either flag opts out of the menu entirely: offering one and then ignoring what was
   // typed on the command line would be worse than never offering it.
   const offered =
-    argv.includes("--channels") || argv.includes("--private-channels")
+    hasFlag(argv, "channels") || hasFlag(argv, "private-channels")
       ? []
       : await offerRelayChannels(relayUrl, paths.env);
   const picked = offered.length ? await pickChannels(offered) : undefined;
@@ -1256,7 +1256,7 @@ export async function settleChannelReplies(
     : `${publicIds.join(", ")} could not be confirmed private`;
 
   const allow =
-    argv.includes("--allow-public") ||
+    hasFlag(argv, "allow-public") ||
     (isInteractive() &&
       /^y(es)?$/i.test(
         await promptLine(
@@ -1525,7 +1525,7 @@ async function registerIdentity(argv: string[]): Promise<void> {
 
   // Asked before anything is published, so a key that cannot work is refused while the
   // registration can still be abandoned cheaply.
-  let channelOwnerNsec = argv.includes("--add-as-bot")
+  let channelOwnerNsec = hasFlag(argv, "add-as-bot")
     ? await promptChannelOwnerKey(nsec)
     : undefined;
 
