@@ -38,6 +38,10 @@ describe("sageox-agent help", () => {
   });
 
   it("still fails on an unknown command", async () => {
-    await expect(cli(["frobnicate"])).rejects.toMatchObject({ code: 1, stdout: "" });
+    await expect(cli(["frobnicate"])).rejects.toMatchObject({
+      code: 1,
+      stdout: "",
+      stderr: expect.stringContaining(HEADLINE),
+    });
   });
 });
