@@ -209,12 +209,12 @@ Not built yet:
   filesystem. Credentials are kept out of its *environment*, but that is not a filesystem
   boundary.
 
-The toolkit is the **SageOx Agent Toolkit**, which is what its packages are published as
-(`@sageox/agent-toolkit-*`) and what the repository is called. A slug leading with one
-surface would misdescribe a runtime that carries several, and no shipped artifact carries
-the repository's name either — the image is `ghcr.io/sageox/agent-base`, the CLI is
-`sageox-agent`, the chart is `agent`. See [`docs/naming.md`](docs/naming.md) before naming
-anything that leaves this repository.
+The toolkit is the **SageOx Agent Toolkit**, which is what its packages are named
+(`@sageox/agent-toolkit-*`, not published yet) and what the repository is called. A slug
+leading with one surface would misdescribe a runtime that carries several, and no shipped
+artifact carries the repository's name either — the image is `ghcr.io/sageox/agent-base`,
+the CLI is `sageox-agent`, the chart is `agent`. See [`docs/naming.md`](docs/naming.md)
+before naming anything that leaves this repository.
 
 ## Key decisions
 
