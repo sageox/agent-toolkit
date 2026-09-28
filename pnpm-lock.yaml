@@ -54,8 +54,8 @@ importers:
         specifier: ^3.0.0
         version: 3.0.0(undici@7.29.0)
       '@slack/web-api':
-        specifier: ^8.0.0
-        version: 8.0.0
+        specifier: ^8.1.1
+        version: 8.1.1
 
   packages/cli:
     dependencies:
@@ -578,12 +578,12 @@ packages:
     peerDependencies:
       undici: ^7.0.0
 
-  '@slack/types@3.0.0':
-    resolution: {integrity: sha512-KNOqpnNAlsFt5Jk9XBclslQ0lobRIg/0tnhpmvZJAglHJx9E8oceN8hC3gaBzkR6UzQ9Wzq4rLsJ98wUcxWPfw==}
+  '@slack/types@3.1.0':
+    resolution: {integrity: sha512-bTzqrO3lxJ5iWedo1eJKNAs1koyEhaTwKLJUkD3KETnPeQvD978AAE4jvWstUws8Gbbc4JR6iYE6F7XjE8UGmw==}
     engines: {node: '>= 20', npm: '>=9.6.4'}
 
-  '@slack/web-api@8.0.0':
-    resolution: {integrity: sha512-ORx3XQryQPq2Jnxv5giSKXVoQRUeylrrymIR2S9fPzLjPcCts8RayMeBSZMcpfpAqp6fnBRuPW2UB6dUPUTEZA==}
+  '@slack/web-api@8.1.1':
+    resolution: {integrity: sha512-am/z/LLbEC7gNQp6FpaGT0l4XnWqcXetpwdgZHzS7Nbb96q9R9QwWA3lo0ZXGuAHDkct0MvFnouzuc2Y4XNmow==}
     engines: {node: '>= 20', npm: '>=9.6.4'}
 
   '@types/chai@5.2.3':
@@ -603,6 +603,9 @@ packages:
 
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
+
+  '@types/retry@0.12.5':
+    resolution: {integrity: sha512-3xSjTp3v03X/lSQLkczaN9UIEwJMoMCA1+Nb5HfbJEQWogdeQIyVtTvxPXDQjZ5zws8rFQfVfRdz03ARihPJgw==}
 
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
@@ -1401,19 +1404,19 @@ snapshots:
   '@slack/socket-mode@3.0.0(undici@7.29.0)':
     dependencies:
       '@slack/logger': 5.0.0
-      '@slack/web-api': 8.0.0
+      '@slack/web-api': 8.1.1
       '@types/node': 26.2.0
       eventemitter3: 5.0.4
       undici: 7.29.0
 
-  '@slack/types@3.0.0': {}
+  '@slack/types@3.1.0': {}
 
-  '@slack/web-api@8.0.0':
+  '@slack/web-api@8.1.1':
     dependencies:
       '@slack/logger': 5.0.0
-      '@slack/types': 3.0.0
-      '@types/node': 26.2.0
-      '@types/retry': 0.12.0
+      '@slack/types': 3.1.0
+      '@types/node': 26.6.2
+      '@types/retry': 0.12.5
       eventemitter3: 5.0.4
       p-queue: 6.6.2
       p-retry: 4.6.2
@@ -1437,6 +1440,8 @@ snapshots:
       undici-types: 8.9.0
 
   '@types/retry@0.12.0': {}
+
+  '@types/retry@0.12.5': {}
 
   '@types/ws@8.18.1':
     dependencies:
