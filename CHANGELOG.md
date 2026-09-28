@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of every package manifest, and the `agent-base` image's `org.opencontainers.image.licenses`
   label say MIT. Earlier releases were published under Apache-2.0.
 
+- **An option no command reads is refused before the command runs, instead of being passed
+  over.** A guessed `--dry-run`, a typo such as `--privat`, or a short flag such as `-n` let
+  the command run as if it were absent: with one agent in the home,
+  `sageox-agent memory add local --dry-run` added the memory. Now the command exits 1 with
+  `unknown option: --dry-run` and does not run. `--relay=wss://…` was passed over the same
+  way, and is now refused with the spelling that works, `--relay wss://…`. The check covers
+  every command's options at once, so an option that only another command reads still
+  passes, but it cannot hide the word after it: one starting with `-` is checked as an
+  option, so `--relay --dry-run` is refused too. `mcp add --command <program> --args --stdio`
+  still hands `--stdio` to the program.
+
 ## [0.8.0] - 2026-09-22
 
 Everything below shipped after `v0.7.0`.

@@ -104,7 +104,7 @@ describe("sageox-agent job diagnostics", () => {
     const { stdout } = await runCli(["job", "diagnostics", ref, "--namespace", "agents", "--context", "operator"], env);
     expect(JSON.parse(stdout)).toEqual(diagnostics);
     expect(JSON.parse(readFileSync(env.ARGS_FILE, "utf8"))).toEqual(["get", "configmap", ref, "--namespace", "agents", "--context", "operator", "--output=json"]);
-    await expect(runCli(["job", "diagnostics", "--all", "--namespace", "agents"], env)).rejects.toThrow("usage:");
+    await expect(runCli(["job", "diagnostics", "all", "--namespace", "agents"], env)).rejects.toThrow("usage:");
   });
 
   it("reports denied operator access without echoing kubectl stderr into a result", async () => {
