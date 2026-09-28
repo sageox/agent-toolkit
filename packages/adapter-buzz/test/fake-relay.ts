@@ -213,6 +213,8 @@ export class FakeRelay {
 
 function matchesFilter(event: Event, filter: Record<string, unknown>): boolean {
   if (event.created_at < Number(filter.since ?? 0)) return false;
+  if (filter.until !== undefined && event.created_at > Number(filter.until)) return false;
+  if (Array.isArray(filter.ids) && !(filter.ids as string[]).includes(event.id)) return false;
   if (Array.isArray(filter.kinds) && !(filter.kinds as number[]).includes(event.kind)) return false;
   if (Array.isArray(filter.authors) && !(filter.authors as string[]).includes(event.pubkey)) {
     return false;

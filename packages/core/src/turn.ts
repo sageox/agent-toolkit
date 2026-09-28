@@ -1,6 +1,7 @@
 import type { InboundEvent } from "./events.ts";
 import type { BrainContext } from "./brain.ts";
 import { HEALTH_WORD, isDegrading, isTransient, type ProbeResult } from "./health.ts";
+import { channelLine } from "./surface-read.ts";
 
 export const UNTRUSTED_OPEN = "<<<UNTRUSTED_MESSAGE>>>";
 export const UNTRUSTED_CLOSE = "<<<END_UNTRUSTED_MESSAGE>>>";
@@ -176,18 +177,57 @@ function capabilitySteering(capabilities: readonly ProbeResult[]): string[] {
 }
 
 /**
- * Builds the prompt for one turn.
- *
- * A message body that forges the closing marker would otherwise escape the fence, so
- * occurrences in the body are defanged before wrapping.
+ * Untrusted text between the markers. A body that forges the closing marker would otherwise
+ * escape the fence, so occurrences in it are defanged before wrapping.
  */
+function fence(text: string): string[] {
+  const body = text.split(UNTRUSTED_CLOSE).join("[redacted-fence-marker]");
+  return [UNTRUSTED_OPEN, body, UNTRUSTED_CLOSE];
+}
+
+/**
+ * The most thread messages one turn is handed: the first, which says what the thread is
+ * about, and the most recent after it. Every turn in a thread hands the thread over again,
+ * into a session that keeps each turn.
+ */
+const MAX_THREAD_MESSAGES = 200;
+
+/**
+ * The thread a message was posted in, fenced like the message.
+ *
+ * One `read_channel` line per message, so a line reads the way the brain already reads one.
+ * The agent's own lines say "you", because a Slack read names no author and the prompt never
+ * gives the brain its own id.
+ */
+function threadContext(event: InboundEvent, thread: BrainContext["thread"]): string[] {
+  if (!event.threadRoot) return [];
+  if (!thread) {
+    return ["[this message is in a thread that could not be read: say so if the answer needs it]"];
+  }
+  if (!thread.length) return [];
+  const kept =
+    thread.length > MAX_THREAD_MESSAGES
+      ? [thread[0], ...thread.slice(-(MAX_THREAD_MESSAGES - 1))]
+      : thread;
+  const left = thread.length - kept.length;
+  const lines = kept.map((message) => {
+    const line = channelLine(message);
+    return JSON.stringify(message.author.isSelf ? { ...line, from: "you" } : line);
+  });
+  return [
+    "[earlier in this thread, oldest first, one JSON object per line" +
+      (left ? `, the ${left} after the first left out` : "") +
+      '; "from":"you" is your own]',
+    ...fence(lines.join("\n")),
+  ];
+}
+
+/** Builds the prompt for one turn. */
 export function assembleTurnPrompt(
   event: InboundEvent,
   ctx: BrainContext,
   opts: { steer?: boolean } = {},
 ): string {
-  const body = event.text.split(UNTRUSTED_CLOSE).join("[redacted-fence-marker]");
-
   // A sealed turn's brief replaces the chat mechanics rather than following them: those
   // describe tools and a reply path this turn does not have. No header either — the event's
   // channel is where the answer goes, not where the data came from.
@@ -198,9 +238,7 @@ export function assembleTurnPrompt(
       ctx.sealed,
       UNTRUSTED_DATA,
       "",
-      UNTRUSTED_OPEN,
-      body,
-      UNTRUSTED_CLOSE,
+      ...fence(event.text),
     ].join("\n");
   }
 
@@ -236,9 +274,8 @@ export function assembleTurnPrompt(
   return [
     ...steering,
     ...capabilitySteering(ctx.capabilities ?? []),
+    ...threadContext(event, ctx.thread),
     header,
-    UNTRUSTED_OPEN,
-    body,
-    UNTRUSTED_CLOSE,
+    ...fence(event.text),
   ].join("\n");
 }

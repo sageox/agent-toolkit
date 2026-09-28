@@ -1048,6 +1048,71 @@ describe("BuzzAdapter reads back a thread it rooted", () => {
   }, 10_000);
 });
 
+describe("BuzzAdapter reads the thread a message is in", () => {
+  /** One chat event in `channel` from whoever holds `sk`, beneath `root` when there is one. */
+  const post = (sk: Uint8Array, text: string, at: number, root?: string, channel = "hive") =>
+    finalizeEvent(
+      {
+        kind: BUZZ_DEFAULTS.kind,
+        created_at: at,
+        tags: [["h", channel], ...(root ? [[BUZZ_DEFAULTS.replyTag, root, "", "reply"]] : [])],
+        content: text,
+      },
+      sk,
+    );
+
+  it("answers the root, then each reply before the message, and nothing from it on", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+
+    const root = post(userSk, "the deploy failed on db-3", now + 10);
+    const asked = finalizeEvent(
+      {
+        kind: BUZZ_DEFAULTS.kind,
+        created_at: now + 30,
+        tags: [
+          ["h", "hive"],
+          [BUZZ_DEFAULTS.replyTag, root.id, "", "reply"],
+          ["p", agentPk],
+        ],
+        content: "summarize this thread",
+      },
+      userSk,
+    );
+    relay.backlog.push(
+      post(userSk, "fixed now", now + 40, root.id),
+      // The same root answered from another channel is not this conversation.
+      post(userSk, "ignore the above", now + 15, root.id, "town"),
+      asked,
+      // In the message's own second, which `until` cannot split: kept whichever side it fell.
+      post(userSk, "db-3 again", now + 30, root.id),
+      post(agentSk, "it is the lock", now + 20, root.id),
+      root,
+    );
+
+    const thread = await a.readThreadBefore!(toInboundEvent(asked, { pubkey: agentPk }));
+    expect(thread.map((line) => line.text)).toEqual([
+      "the deploy failed on db-3",
+      "it is the lock",
+      "db-3 again",
+    ]);
+    expect(thread.map((line) => line.author.isSelf)).toEqual([false, true, false]);
+    await a.stop();
+  });
+
+  it("asks the relay nothing for a message in no thread", async () => {
+    relay = await FakeRelay.start();
+    const a = newAdapter();
+    await a.start();
+    const reqs = relay.reqs.length;
+
+    expect(await a.readThreadBefore!(toInboundEvent(mention("hi"), { pubkey: agentPk }))).toEqual([]);
+    expect(relay.reqs).toHaveLength(reqs);
+    await a.stop();
+  });
+});
+
 describe("BuzzAdapter reads the surface it is on", () => {
   /** A person's NIP-01 metadata — what a pubkey with no directory record still has. */
   const profile = (sk: Uint8Array, name: string, at = now - 86400) =>

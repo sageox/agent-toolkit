@@ -82,10 +82,12 @@ export interface SlackApiClient {
     cursor?: string;
     limit?: number;
   }): Promise<SlackHistoryPage>;
+  /** `latest` is exclusive, as Slack takes it: a message at exactly that `ts` is not returned. */
   replies(args: {
     channel: string;
     ts: string;
     oldest: string;
+    latest?: string;
     cursor?: string;
   }): Promise<SlackHistoryPage>;
   /** Who a member id is, or `undefined` when Slack will not say. */
@@ -172,14 +174,15 @@ const MAX_HISTORY_PAGES = 5;
  * caller's `limit` had it backwards — a small ask made small pages, so the notices that a
  * page can be made of were more likely to fill it, not less.
  *
- * **It is a ceiling, and on some installations a distant one.** Slack cut non-Marketplace
- * distributed apps to 1 request per minute and 15 objects per request for this endpoint —
- * new installs from 2025-05-29, and every such install from 2026-03-03. An internal
- * customer-built app, which is what `docs/guide/chat-surfaces.md` walks an operator
- * through, is unaffected and still serves a thousand. So a page here comes back anywhere
- * between 15 and 200 depending on how the app was distributed, the walk has to read
- * whatever arrives rather than what it asked for, and nothing may be concluded from a page
- * being short.
+ * **It is a ceiling, and on some installations a distant one.** Slack cut apps distributed
+ * commercially outside the Marketplace to 1 request per minute and 15 objects per request for
+ * this endpoint. That covers every installation made since 2025-05-29. For earlier ones
+ * Slack's pages disagree: its legacy changelog brings them under the limit from 2026-03-03,
+ * and its current rate-limit reference exempts them. An internal customer-built app, which is
+ * what `docs/guide/chat-surfaces.md` walks an operator through, is unaffected and still serves
+ * a thousand. So a page here comes back anywhere between 15 and 200 depending on how the app
+ * was distributed, the walk has to read whatever arrives rather than what it asked for, and
+ * nothing may be concluded from a page being short.
  */
 const HISTORY_PAGE = 200;
 
@@ -438,6 +441,30 @@ export class SlackAdapter implements SurfaceAdapter {
    */
   async readThread(root: EventRef, limit?: number): Promise<readonly ThreadReply[]> {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before readThread()");
+    const at = this.threadAt(root);
+    const replies = await this.threadLines(at, (ts) => ts !== at.ts);
+    return limit === undefined ? replies : replies.slice(0, limit);
+  }
+
+  /**
+   * The thread an inbound message is in, up to it — the same walk, keeping the parent and
+   * cutting at the message's own `ts`, which is exact where the ISO `ts` on a line is not.
+   */
+  async readThreadBefore(
+    event: InboundEvent,
+    signal?: AbortSignal,
+  ): Promise<readonly ThreadReply[]> {
+    if (!this.started) {
+      throw new Error("SlackAdapter.start() must be called before readThreadBefore()");
+    }
+    if (!event.threadRoot) return [];
+    const at = this.threadAt(event.threadRoot);
+    const before = parseSlackEventId(event.id.nativeId).ts;
+    return this.threadLines(at, (ts) => Number(ts) < Number(before), before, signal);
+  }
+
+  /** Where a thread root is, refusing one outside the conversations this adapter serves. */
+  private threadAt(root: EventRef): { channel: string; ts: string } {
     if (root.surface !== SLACK_SURFACE) {
       throw new Error(`a ${root.surface} thread root names no Slack thread`);
     }
@@ -447,32 +474,50 @@ export class SlackAdapter implements SurfaceAdapter {
         "a Slack thread root must name a message in a conversation this agent serves",
       );
     }
+    return at;
+  }
 
-    const messages = await this.collect((cursor) =>
-      this.api.replies({ channel: at.channel, ts: at.ts, oldest: "0", cursor }),
+  /**
+   * One thread's messages whose `ts` passes `keep`, oldest first, as lines read back.
+   *
+   * `latest` stops the walk there, so a read cut at a message does not page through what came
+   * after it. `keep` is still what the result is held to. A fired `signal` stops the walk at its
+   * next page and the name lookups at their next message.
+   */
+  private async threadLines(
+    at: { channel: string; ts: string },
+    keep: (ts: string) => boolean,
+    latest?: string,
+    signal?: AbortSignal,
+  ): Promise<ThreadReply[]> {
+    const messages = await this.collect(
+      (cursor) =>
+        this.api.replies({
+          channel: at.channel,
+          ts: at.ts,
+          oldest: "0",
+          ...(latest ? { latest } : {}),
+          cursor,
+        }),
+      () => !signal?.aborted,
     );
 
     // Sorted on the Slack `ts` rather than the ISO string it becomes: `ts` carries
     // microseconds and the ISO form is truncated to milliseconds, so two replies inside one
     // millisecond would tie and come back in whatever order the pages happened to arrive.
     const ordered = messages
-      .filter((message) => message.ts !== at.ts)
+      .filter((message) => keep(message.ts ?? ""))
       .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
     // The same directory the inbound path fills, filled the same way before rendering.
     // Sharing the map without sharing the lookup is what makes one mention read two ways
     // depending on which door it came through — and a probe tallying replies is exactly
     // the caller that would then disagree with the channel it is reading.
-    for (const message of ordered) await this.learnNames(message.text ?? "");
+    for (const message of ordered) {
+      signal?.throwIfAborted();
+      await this.learnNames(message.text ?? "");
+    }
 
-    const replies = ordered
-      .flatMap((message) => {
-        const event = toSlackInboundEvent(
-          { ...message, type: message.type ?? "message", channel: at.channel },
-          this.normalizeOptions(),
-        );
-        return event ? [{ author: event.author, text: event.text, ts: event.ts }] : [];
-      });
-    return limit === undefined ? replies : replies.slice(0, limit);
+    return ordered.flatMap((message) => this.toChannelLine(message, at.channel) ?? []);
   }
 
   /**
@@ -904,8 +949,9 @@ export class SlackAdapter implements SurfaceAdapter {
    *
    * Two Slack facts shape this. `conversations.history` returns thread parents but never
    * their replies, and this agent answers *in* threads — so a threaded mention is exactly
-   * the kind most likely to be missed. And both endpoints page newest-first, so sorting a
-   * single page restores nothing: the whole gap is collected before any of it is replayed.
+   * the kind most likely to be missed. And the two endpoints page in opposite directions,
+   * history newest first and replies oldest first, so the pages of a gap arrive in no one
+   * order: the whole gap is collected and sorted before any of it is replayed.
    *
    * What remains missed is a reply under a parent older than the cursor. That parent is
    * outside the history window, and Slack offers no way to enumerate the threads that
@@ -979,10 +1025,11 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   /**
-   * Drains one cursor-paged endpoint. Slack pages backwards in time; the caller sorts.
+   * Drains one cursor-paged endpoint. History pages newest first and replies oldest first, so
+   * the caller sorts.
    *
-   * `live` is asked between pages, so a walk whose run has ended stops. A backfill passes
-   * it; a thread read does not, being a caller's request rather than background work.
+   * `live` is asked between pages, so a walk nobody is waiting on stops: a backfill's, once
+   * its run has ended, and a thread read's, once the gateway has stopped waiting for it.
    */
   private async collect(
     page: (cursor?: string) => Promise<SlackHistoryPage>,
@@ -1137,12 +1184,14 @@ export class WebSlackApi implements SlackApiClient {
     channel: string;
     ts: string;
     oldest: string;
+    latest?: string;
     cursor?: string;
   }): Promise<SlackHistoryPage> {
     const response = await this.client.conversations.replies({
       channel: args.channel,
       ts: args.ts,
       oldest: args.oldest,
+      ...(args.latest ? { latest: args.latest } : {}),
       ...(args.cursor ? { cursor: args.cursor } : {}),
     });
     return {

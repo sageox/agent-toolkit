@@ -49,7 +49,8 @@ class FakeApi implements SlackApiClient {
   histories: SlackHistoryPage[] = [];
   historyCalls: Array<{ channel: string; oldest: string; cursor?: string; limit?: number }> = [];
   threads: SlackHistoryPage[] = [];
-  replyCalls: Array<{ channel: string; ts: string; oldest: string; cursor?: string }> = [];
+  replyCalls: Array<{ channel: string; ts: string; oldest: string; latest?: string; cursor?: string }> =
+    [];
   posts: Array<{ channel: string; text: string; threadTs?: string }> = [];
   added: Array<{ channel: string; timestamp: string; name: string }> = [];
   removed: Array<{ channel: string; timestamp: string; name: string }> = [];
@@ -83,7 +84,13 @@ class FakeApi implements SlackApiClient {
     this.historyCalls.push(args);
     return this.histories.shift() ?? {};
   }
-  async replies(args: { channel: string; ts: string; oldest: string; cursor?: string }) {
+  async replies(args: {
+    channel: string;
+    ts: string;
+    oldest: string;
+    latest?: string;
+    cursor?: string;
+  }) {
     this.replyCalls.push(args);
     return this.threads.shift() ?? {};
   }
@@ -320,6 +327,73 @@ describe("SlackAdapter", () => {
     const replies = await instance.readThread!(root!);
     expect(replies.map((reply) => reply.text)).toEqual(["ask @alice"]);
     expect(api.nameCalls).toEqual(["U0ALICE"]);
+  });
+
+  it("reads the thread a message is in up to it: the parent first, nothing from the message on", async () => {
+    const { instance, api, socket } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    await socket.emit(mention("1786761003.000300", { thread_ts: "1786761001.000100" }));
+
+    api.threads = [
+      {
+        messages: [
+          { type: "message", user: "U0ALICE", text: "the deploy failed", ts: "1786761001.000100" },
+          { type: "message", user: "UBOT", bot_id: "BBOT", text: "it is the lock", ts: "1786761002.000200" },
+          { type: "message", user: "U123", text: "<@UBOT> status?", ts: "1786761003.000300" },
+          { type: "message", user: "U0BOB", text: "fixed now", ts: "1786761004.000400" },
+        ],
+      },
+    ];
+
+    const thread = await instance.readThreadBefore!(got[0]);
+    // Slack is asked to stop at the mention, so a long thread is not paged past it.
+    expect(api.replyCalls).toEqual([
+      {
+        channel: "GENG",
+        ts: "1786761001.000100",
+        oldest: "0",
+        latest: "1786761003.000300",
+        cursor: undefined,
+      },
+    ]);
+    // The agent's own earlier answer is its own, so the brain can tell it from anyone else's.
+    expect(thread.map((line) => [line.author.id, line.text, line.author.isSelf])).toEqual([
+      ["U0ALICE", "the deploy failed", false],
+      ["UBOT", "it is the lock", true],
+    ]);
+
+    // A top-level message is in no thread, so there is nothing to ask Slack for.
+    await socket.emit(mention("1786761005.000500"));
+    expect(await instance.readThreadBefore!(got[1])).toEqual([]);
+    expect(api.replyCalls).toHaveLength(1);
+  });
+
+  it("stops walking a thread once its reader has stopped waiting", async () => {
+    const { instance, api, socket } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    await socket.emit(mention("1786761003.000300", { thread_ts: "1786761001.000100" }));
+
+    api.threads = [
+      {
+        messages: [{ type: "message", user: "U0ALICE", text: "ask <@U0BOB>", ts: "1786761001.000100" }],
+        nextCursor: "page2",
+      },
+      { messages: [{ type: "message", user: "U0BOB", text: "here", ts: "1786761002.000200" }] },
+    ];
+    // The gateway gives up while the first page is in flight.
+    const stop = new AbortController();
+    const replies = api.replies.bind(api);
+    api.replies = async (args) => {
+      stop.abort();
+      return replies(args);
+    };
+
+    await expect(instance.readThreadBefore!(got[0], stop.signal)).rejects.toThrow(/abort/i);
+    // Neither the second page nor a `users.info` for the mention on the first is asked for.
+    expect(api.replyCalls).toHaveLength(1);
+    expect(api.nameCalls).toEqual([]);
   });
 
   it("refuses a thread read it cannot answer, rather than reporting an empty thread", async () => {

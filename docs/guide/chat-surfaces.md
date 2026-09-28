@@ -205,7 +205,8 @@ Create a Slack app, enable **Socket Mode**, and create an app-level token with
   every mention keeps rendering as its id, which is what it did before.
 - the matching history and read scopes for the conversations you configure
   (`channels:history`/`channels:read`, `groups:history`/`groups:read`,
-  `im:history`/`im:read`, or `mpim:history`/`mpim:read`)
+  `im:history`/`im:read`, or `mpim:history`/`mpim:read`). The history scope is also how the
+  agent reads the thread it was mentioned in.
 
 Subscribe the bot to `app_mention` and `message.im`, invite it into each channel, then run:
 
@@ -627,6 +628,30 @@ of carrying them, so it takes either spelling — `:tada:`, `tada`, or one of th
 characters the adapter knows a name for — and refuses a character it cannot name rather
 than letting Slack reject it with `invalid_name`.
 
+### A mention in a thread brings the thread
+
+A message posted in a thread arrives with its thread. Before the turn, the gateway reads the
+thread up to that message, starting with the message that opened it. The brain gets it above
+the message, fenced as untrusted like the message, with the agent's own earlier replies marked
+as its own. There is nothing to configure on either surface: on Slack it is one
+`conversations.replies` walk under the history scope above, and on Buzz two reads of the relay
+the agent is already connected to. What was said in the channel outside the thread is not
+included; that is `read_channel`, below.
+
+Everyone who wrote in the thread reaches the brain, not only the people `respondTo` lets wake
+it. An owner-only agent still answers only its owner, and it reads what anyone else wrote in
+the thread it was asked in, as data.
+
+A thread over 200 messages is handed over as its first message and the most recent 199, and
+the brain is told how many were left out. A read that fails, or has not finished in 10
+seconds, costs the thread and not the answer: the brain is told the thread could not be read,
+and the log says why.
+
+```text
+thread_read surface=slack channel=C0123 event=C0123:1790000180.000400 messages=3 ms=212
+thread_read_failed surface=slack channel=C0123 event=C0123:1790000240.000500 ms=10001 error="the thread read did not finish in 10000ms"
+```
+
 ### Let the agent read the surface it is on
 
 Everything above is the agent speaking. There are three questions it eventually gets asked
@@ -702,13 +727,17 @@ an id. On Buzz they are reads of the same relay socket the agent is already auth
 on. Either way the credential never leaves the gateway.
 
 One Slack quota is worth knowing before you rely on `read_channel`. Slack restricts
-`conversations.history` for apps **distributed commercially outside the Marketplace** to one
-request per minute returning at most 15 messages — new installations since 2025-05-29, and
-every such installation since 2026-03-03. The app the setup above walks you through is an
-*internal* one built for your own workspace, which is not affected and still serves a
-thousand messages a request. If your agent runs on an unlisted distributed app instead,
-`read_channel` still works and is simply slow and shallow, and `limit` behaves as the
-ceiling it is documented to be: you will often get fewer messages than you asked for.
+`conversations.history` and `conversations.replies` for apps **distributed commercially outside
+the Marketplace** to one request per minute returning at most 15 messages. That covers every
+installation made since 2025-05-29. For earlier ones Slack's pages disagree: its legacy
+changelog brings them under the limit from 2026-03-03, and its current rate-limit reference
+exempts them. The app the setup above walks you through is an *internal* one built for your own
+workspace, which is not affected and still serves a thousand messages a request. If your agent
+runs on an unlisted distributed app instead, `read_channel` still works and is simply slow and
+shallow, and `limit` behaves as the ceiling it is documented to be: you will often get fewer
+messages than you asked for. A thread read that hits the same limit waits it out. After 10
+seconds the agent answers without the thread, and Slack's client holds that reply until the limit
+clears.
 
 **Ask for a period with `withinHours`, never by reading a channel and filtering it.**
 `read_channel(surface: "slack", channel: "status", withinHours: 24)` is the last day, cut by

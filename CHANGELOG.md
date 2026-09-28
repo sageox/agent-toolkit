@@ -57,6 +57,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   option, so `--relay --dry-run` is refused too. `mcp add --command <program> --args --stdio`
   still hands `--stdio` to the program.
 
+- **An agent mentioned in a thread is handed the thread, on Slack and on Buzz.** A turn carried
+  only the message that mentioned the agent, so "summarize this thread" was answered without
+  the thread, and a reply under someone else's question arrived without the question. Now,
+  before the turn for a message posted in a thread, the gateway reads the thread up to that
+  message: the message that started it, then every reply before this one. The brain gets it
+  above the message, fenced as untrusted like the message, with the agent's own earlier replies
+  marked as its own. A thread over 200 messages is cut to its first message and the most
+  recent 199. A top-level message has no thread and gets none.
+
+  Everyone who wrote in the thread reaches the brain, not only the people `respondTo` lets wake
+  it. A read that fails, or has not finished in 10 seconds, costs the thread and not the answer:
+  the brain is told the thread could not be read, and the log says `thread_read_failed` with the
+  reason. A read that works logs `thread_read … messages=N`. Slack needs no new scope; the
+  history scopes the setup guide asks for cover `conversations.replies`. Slack limits apps
+  distributed commercially outside the Slack Marketplace to one such call a minute. That covers
+  every installation made since 2025-05-29. For earlier ones Slack's pages disagree: its legacy
+  changelog brings them under the limit from 2026-03-03, and its current rate-limit reference
+  exempts them. The internal app the guide creates is not limited. On a limited installation, a
+  second threaded mention inside the minute waits for the limit to clear. If that takes over 10
+  seconds, the turn goes ahead without the thread, and its reply still posts only once the limit
+  clears, because Slack's client holds every call until then.
+
 ## [0.8.0] - 2026-09-22
 
 Everything below shipped after `v0.7.0`.
