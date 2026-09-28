@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaced with `[REDACTED]` before the text is cut to length, and the rest of what ox wrote
   is kept, as #128 did for a failed ledger sync.
 
+- **`help`, `--help` and `-h` print the usage to stdout and exit zero, and `--help` after a
+  command no longer runs that command.** All three printed the usage to stderr and exited 1,
+  as a mistyped command does. No command refused either flag after its name, so most ran as
+  if it were absent: with one agent in the home, `sageox-agent memory add local --help` added
+  the memory. Now either flag, anywhere on the line, prints the usage and the command does
+  not run. `<command> --help` shows the full usage, not one command's, and an unknown command
+  still prints it to stderr and exits 1.
+
 ## [0.8.0] - 2026-09-22
 
 Everything below shipped after `v0.7.0`.
