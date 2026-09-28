@@ -42,6 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not run. `<command> --help` shows the full usage, not one command's, and an unknown command
   still prints it to stderr and exits 1.
 
+- **An option no command reads is refused before the command runs, instead of being passed
+  over.** A guessed `--dry-run`, a typo such as `--privat`, or a short flag such as `-n` let
+  the command run as if it were absent: with one agent in the home,
+  `sageox-agent memory add local --dry-run` added the memory. Now the command exits 1 with
+  `unknown option: --dry-run` and does not run. `--relay=wss://…` was passed over the same
+  way, and is now refused with the spelling that works, `--relay wss://…`. The check covers
+  every command's options at once, so an option that only another command reads still
+  passes. A value is still the word after its option, so `mcp add --args --stdio` hands
+  `--stdio` to the server as before.
+
 ## [0.8.0] - 2026-09-22
 
 Everything below shipped after `v0.7.0`.

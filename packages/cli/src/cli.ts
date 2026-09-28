@@ -136,7 +136,7 @@ import {
   allowToolsInFile,
   ensureSettingsFile,
 } from "./edit-config.ts";
-import { flag, optionValue, positional } from "./args.ts";
+import { flag, hasFlag, optionValue, positional, refuseUnknownOptions, VALUED_OPTIONS } from "./args.ts";
 import { wireBrains, toolNamesFor, DEFAULT_OX_TOKEN_SECRET } from "./brains.ts";
 import { oxStatus, expiringSoon, oxTeams, type OxTeam } from "./ox.ts";
 import { formatProbe } from "./probe.ts";
@@ -161,16 +161,6 @@ import {
   type RepoWorkspace,
 } from "./repos.ts";
 import { agentPaths, agentsHome, bundlePaths, listAgents, selectAgentName } from "./home.ts";
-
-/** Options that take a value anywhere in the CLI, so their value is never read as a name. */
-const VALUED_OPTIONS = new Set([
-  "--agent",
-  "--bundle",
-  "--secrets",
-  "--job-secrets",
-  "--name",
-  "--trigger",
-]);
 
 type SelectedAgent = ReturnType<typeof agentPaths> & { name: string };
 
@@ -597,10 +587,10 @@ async function reposCmd(argv: string[]): Promise<void> {
     throw new Error("no agent.yaml — run `sageox-agent init --name <name>` first");
   }
 
-  const line = `${argv.includes("--private") ? "private " : ""}${argv[1]}`;
+  const line = `${hasFlag(argv, "private") ? "private " : ""}${argv[1]}`;
   const current = parseReposConf(existing);
   const configured = current.find((repo) => repo.url === argv[1]);
-  const requestedPrivate = argv.includes("--private");
+  const requestedPrivate = hasFlag(argv, "private");
   if (configured && configured.private !== requestedPrivate) {
     throw new Error(
       `${argv[1]} is already configured as ${configured.private ? "private" : "public"}; ` +
@@ -637,15 +627,6 @@ const BUILTIN_MCP_SERVERS: Record<string, readonly string[]> = {
   [JOB_SERVER]: [JOB_RUN_TOOL_NAME, "job_status", "job_cancel"],
 };
 
-/** Options `mcp add` takes a value for, so none of those values is read as the server name. */
-const MCP_VALUED_OPTIONS = new Set([
-  ...VALUED_OPTIONS,
-  "--command",
-  "--args",
-  "--secret-refs",
-  "--scope",
-]);
-
 /**
  * `--scope repo=owner/name,owner/other` → `{repo: ["owner/name", "owner/other"]}`.
  *
@@ -668,7 +649,7 @@ async function mcpAddCmd(argv: string[]): Promise<void> {
   // and a command with nothing to add should not move the process into an agent's home.
   const named = positional(
     argv.filter((a) => a !== "add"),
-    MCP_VALUED_OPTIONS,
+    VALUED_OPTIONS,
   );
   const custom = flag(argv, "command");
   const known = Object.keys(BUILTIN_MCP_SERVERS).join(", ");
@@ -1999,7 +1980,7 @@ async function jobCmd(argv: string[]): Promise<void> {
     const runId = optionValue(argv, "run-id", "a run ID");
     if (!runId) throw new Error("--run-id is required");
     const status = await (sub === "cancel" ? external.cancel(slug, runId)
-      : external.status(slug, runId, undefined, argv.includes("--output") ? "operator" : undefined));
+      : external.status(slug, runId, undefined, hasFlag(argv, "output") ? "operator" : undefined));
     process.stdout.write(JSON.stringify(status) + "\n");
     return;
   }
@@ -3114,7 +3095,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
   void (async () => {
     try {
-      await handler(process.argv.slice(3));
+      const argv = process.argv.slice(3);
+      if (cmd !== "help") refuseUnknownOptions(argv); // help prints whatever else is on the line
+      await handler(argv);
     } catch (error: unknown) {
       process.stderr.write(`${errorText(error)}\n`);
       process.exit(1);

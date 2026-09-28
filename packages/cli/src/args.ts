@@ -1,7 +1,40 @@
+/**
+ * Every option a command reads. `flag`, `optionValue` and `hasFlag` accept only these
+ * names, so reading an option through them means listing it here, and
+ * `refuseUnknownOptions` refuses whatever is not listed.
+ */
+const VALUED = [
+  "about", "age-identity", "age-recipient", "agent", "app-id", "args", "avatar",
+  "avatar-candidates", "boundary", "brain", "bundle", "channel", "channels", "command",
+  "context", "display-name", "expression", "inputs", "job-secrets", "joke", "metaphor",
+  "model", "name", "namespace", "nip05", "owner", "owner-id", "palette", "param", "path",
+  "private-channels", "profiles", "query", "relay", "run-id", "scope", "secret-refs",
+  "secrets", "seconds", "success", "team", "trigger", "vault", "visual", "voice", "with",
+  "write-scope",
+] as const;
+const SWITCHES = [
+  "add-as-bot", "allow-public", "generate-avatar", "non-interactive", "output", "private",
+  "replace-avatar", "starter-avatar",
+] as const;
+
+type Valued = (typeof VALUED)[number];
+
+/**
+ * The options that take a value, as they are written. The value is the next word whatever
+ * it looks like, as `flag` reads it: `mcp add --args --stdio` hands `--stdio` to the server.
+ */
+export const VALUED_OPTIONS: ReadonlySet<string> = new Set(VALUED.map((name) => `--${name}`));
+const SWITCH_OPTIONS: ReadonlySet<string> = new Set(SWITCHES.map((name) => `--${name}`));
+
 /** `--name value` → the value, or the fallback when the flag is absent. */
-export function flag(argv: string[], name: string, fallback?: string): string | undefined {
+export function flag(argv: string[], name: Valued, fallback?: string): string | undefined {
   const i = argv.indexOf(`--${name}`);
   return i === -1 ? fallback : argv[i + 1];
+}
+
+/** Whether `--name` is on the line, with or without a value after it. */
+export function hasFlag(argv: string[], name: Valued | (typeof SWITCHES)[number]): boolean {
+  return argv.includes(`--${name}`);
 }
 
 /**
@@ -14,7 +47,7 @@ export function flag(argv: string[], name: string, fallback?: string): string | 
  * model pin reading `--agent`. An omitted flag stays valid: that is how a mentions-only
  * agent, an unanswered author gate, or an unpinned model is asked for.
  */
-export function optionValue(argv: string[], name: string, wants: string): string | undefined {
+export function optionValue(argv: string[], name: Valued, wants: string): string | undefined {
   if (!argv.includes(`--${name}`)) return undefined;
   const value = flag(argv, name);
   if (!value || value.startsWith("--")) throw new Error(`--${name} needs ${wants}`);
@@ -36,4 +69,26 @@ export function positional(argv: string[], valued: ReadonlySet<string>): string 
     if (valued.has(arg)) i++; // skip its value
   }
   return undefined;
+}
+
+/**
+ * Refuses an option no command reads.
+ *
+ * No command refuses an option it does not read, so without this a guessed `--dry-run` runs
+ * the command it was meant to preview. The check is against every command's options at
+ * once: an option that only another command reads still passes.
+ */
+export function refuseUnknownOptions(argv: string[]): void {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (VALUED_OPTIONS.has(arg)) i++; // skip its value
+    else if (arg.startsWith("-") && !SWITCH_OPTIONS.has(arg)) {
+      const [name] = arg.split("=", 1);
+      throw new Error(
+        VALUED_OPTIONS.has(name)
+          ? `write ${name} ${arg.slice(name.length + 1)}, not ${arg}`
+          : `unknown option: ${arg} (see \`sageox-agent help\`)`,
+      );
+    }
+  }
 }
