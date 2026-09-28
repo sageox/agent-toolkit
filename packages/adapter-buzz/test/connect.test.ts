@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import type { Relay } from "nostr-tools/relay";
 import { generateSecretKey } from "nostr-tools/pure";
 import { nip19 } from "nostr-tools";
-import { connectAuthenticated } from "../src/connect.ts";
+import { connectAuthenticated, ownerAuthTag } from "../src/connect.ts";
 import { resolveBuzzSigner } from "../src/identity.ts";
 import { FakeRelay } from "./fake-relay.ts";
 
@@ -90,5 +90,58 @@ describe("connectAuthenticated", () => {
     expect(result.authenticated).toBe(false);
     expect(result.authRefusal).toBeUndefined();
     expect(relay.authEvent).toBeUndefined();
+  });
+});
+
+const VALID_TAG = ["auth", "a".repeat(64), "", "b".repeat(128)];
+
+describe("ownerAuthTag", () => {
+  it("parses a well-formed NIP-OA tag", () => {
+    expect(ownerAuthTag(JSON.stringify(VALID_TAG))).toEqual(VALID_TAG);
+  });
+  it("returns undefined for empty, missing, or non-JSON", () => {
+    expect(ownerAuthTag(undefined)).toBeUndefined();
+    expect(ownerAuthTag("")).toBeUndefined();
+    expect(ownerAuthTag("not json")).toBeUndefined();
+  });
+  it("rejects the wrong label, arity, hex widths, and non-string members", () => {
+    expect(ownerAuthTag(JSON.stringify(["p", "a".repeat(64), "", "b".repeat(128)]))).toBeUndefined();
+    expect(ownerAuthTag(JSON.stringify(["auth", "a".repeat(64), ""]))).toBeUndefined();
+    expect(ownerAuthTag(JSON.stringify(["auth", "xyz", "", "b".repeat(128)]))).toBeUndefined();
+    expect(ownerAuthTag(JSON.stringify(["auth", "a".repeat(64), "", "b".repeat(64)]))).toBeUndefined();
+    expect(ownerAuthTag(JSON.stringify(["auth", "a".repeat(64), "", 5]))).toBeUndefined();
+  });
+});
+
+describe("connectAuthenticated owner attestation", () => {
+  it("appends BUZZ_AUTH_TAG to the signed AUTH event, and it still verifies", async () => {
+    relay = await FakeRelay.start({ requireAuth: true });
+    const prev = process.env.BUZZ_AUTH_TAG;
+    process.env.BUZZ_AUTH_TAG = JSON.stringify(VALID_TAG);
+    try {
+      const result = await connect(relay.url);
+      expect(result.authenticated).toBe(true);
+      // The relay verifyEvent'd the AUTH signature already (it authed us). The tag rides
+      // alongside the standard relay + challenge tags.
+      expect(relay.authEvent?.tags).toContainEqual(VALID_TAG);
+      expect(relay.authEvent?.tags.some((t) => t[0] === "relay")).toBe(true);
+      expect(relay.authEvent?.tags.some((t) => t[0] === "challenge")).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.BUZZ_AUTH_TAG;
+      else process.env.BUZZ_AUTH_TAG = prev;
+    }
+  });
+
+  it("adds no auth tag when BUZZ_AUTH_TAG is unset", async () => {
+    relay = await FakeRelay.start({ requireAuth: true });
+    const prev = process.env.BUZZ_AUTH_TAG;
+    delete process.env.BUZZ_AUTH_TAG;
+    try {
+      const result = await connect(relay.url);
+      expect(result.authenticated).toBe(true);
+      expect(relay.authEvent?.tags.some((t) => t[0] === "auth")).toBe(false);
+    } finally {
+      if (prev !== undefined) process.env.BUZZ_AUTH_TAG = prev;
+    }
   });
 });
