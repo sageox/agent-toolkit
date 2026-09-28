@@ -19,10 +19,7 @@ const SWITCHES = [
 
 type Valued = (typeof VALUED)[number];
 
-/**
- * The options that take a value, as they are written. The value is the next word whatever
- * it looks like, as `flag` reads it: `mcp add --args --stdio` hands `--stdio` to the server.
- */
+/** The options that take a value, as they are written. `flag` reads the next word as the value. */
 export const VALUED_OPTIONS: ReadonlySet<string> = new Set(VALUED.map((name) => `--${name}`));
 const SWITCH_OPTIONS: ReadonlySet<string> = new Set(SWITCHES.map((name) => `--${name}`));
 
@@ -77,12 +74,19 @@ export function positional(argv: string[], valued: ReadonlySet<string>): string 
  * No command refuses an option it does not read, so without this a guessed `--dry-run` runs
  * the command it was meant to preview. The check is against every command's options at
  * once: an option that only another command reads still passes.
+ *
+ * So a word starting with `-` is checked even right after an option that takes a value: an
+ * option the command never reads would otherwise hide it, and `memory add local --args
+ * --dry-run` would add the memory. `--args` beside `--command` is the exception, because
+ * `mcp add` hands its value to that program: `--args --stdio`.
  */
 export function refuseUnknownOptions(argv: string[]): void {
+  const handsArgsOn = hasFlag(argv, "command");
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (VALUED_OPTIONS.has(arg)) i++; // skip its value
-    else if (arg.startsWith("-") && !SWITCH_OPTIONS.has(arg)) {
+    if (VALUED_OPTIONS.has(arg)) {
+      if (!argv[i + 1]?.startsWith("-") || (arg === "--args" && handsArgsOn)) i++; // skip its value
+    } else if (arg.startsWith("-") && !SWITCH_OPTIONS.has(arg)) {
       const [name] = arg.split("=", 1);
       throw new Error(
         VALUED_OPTIONS.has(name)

@@ -49,8 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `unknown option: --dry-run` and does not run. `--relay=wss://…` was passed over the same
   way, and is now refused with the spelling that works, `--relay wss://…`. The check covers
   every command's options at once, so an option that only another command reads still
-  passes. A value is still the word after its option, so `mcp add --args --stdio` hands
-  `--stdio` to the server as before.
+  passes, but it cannot hide the word after it: one starting with `-` is checked as an
+  option, so `--relay --dry-run` is refused too. `mcp add --command <program> --args --stdio`
+  still hands `--stdio` to the program.
 
 ## [0.8.0] - 2026-09-22
 

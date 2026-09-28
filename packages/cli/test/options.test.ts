@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { refuseUnknownOptions } from "../src/args.ts";
+import { flag, refuseUnknownOptions } from "../src/args.ts";
 import { AGENT_YAML } from "../src/init.ts";
 import { runCli } from "./cli-harness.ts";
 
@@ -29,13 +29,16 @@ describe("an option no command reads", () => {
 
   it.each([
     [["local", "-n"], "unknown option: -n"],
+    [["local", "--args", "--dry-run"], "unknown option: --dry-run"],
+    [["local", "--relay", "-n"], "unknown option: -n"],
     [["--relay=wss://relay.example"], "write --relay wss://relay.example, not --relay=wss://relay.example"],
   ])("is refused in %j", (argv, message) => {
     expect(() => refuseUnknownOptions(argv)).toThrow(message);
   });
 
-  it("is still a value after an option that takes one", () => {
-    expect(() => refuseUnknownOptions(["--command", "server", "--args", "--stdio"])).not.toThrow();
-    expect(() => refuseUnknownOptions(["--command", "npx", "--args", "-y,pkg"])).not.toThrow();
+  it.each(["--stdio", "-y,pkg"])("is handed on as %s by --args beside --command", (value) => {
+    const argv = ["--command", "server", "--args", value];
+    expect(() => refuseUnknownOptions(argv)).not.toThrow();
+    expect(flag(argv, "args")).toBe(value);
   });
 });
