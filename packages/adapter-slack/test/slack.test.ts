@@ -49,7 +49,8 @@ class FakeApi implements SlackApiClient {
   histories: SlackHistoryPage[] = [];
   historyCalls: Array<{ channel: string; oldest: string; cursor?: string; limit?: number }> = [];
   threads: SlackHistoryPage[] = [];
-  replyCalls: Array<{ channel: string; ts: string; oldest: string; cursor?: string }> = [];
+  replyCalls: Array<{ channel: string; ts: string; oldest: string; latest?: string; cursor?: string }> =
+    [];
   posts: Array<{ channel: string; text: string; threadTs?: string }> = [];
   added: Array<{ channel: string; timestamp: string; name: string }> = [];
   removed: Array<{ channel: string; timestamp: string; name: string }> = [];
@@ -83,7 +84,13 @@ class FakeApi implements SlackApiClient {
     this.historyCalls.push(args);
     return this.histories.shift() ?? {};
   }
-  async replies(args: { channel: string; ts: string; oldest: string; cursor?: string }) {
+  async replies(args: {
+    channel: string;
+    ts: string;
+    oldest: string;
+    latest?: string;
+    cursor?: string;
+  }) {
     this.replyCalls.push(args);
     return this.threads.shift() ?? {};
   }
@@ -340,8 +347,15 @@ describe("SlackAdapter", () => {
     ];
 
     const thread = await instance.readThreadBefore!(got[0]);
+    // Slack is asked to stop at the mention, so a long thread is not paged past it.
     expect(api.replyCalls).toEqual([
-      { channel: "GENG", ts: "1786761001.000100", oldest: "0", cursor: undefined },
+      {
+        channel: "GENG",
+        ts: "1786761001.000100",
+        oldest: "0",
+        latest: "1786761003.000300",
+        cursor: undefined,
+      },
     ]);
     // The agent's own earlier answer is its own, so the brain can tell it from anyone else's.
     expect(thread.map((line) => [line.author.id, line.text, line.author.isSelf])).toEqual([

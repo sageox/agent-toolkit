@@ -82,10 +82,12 @@ export interface SlackApiClient {
     cursor?: string;
     limit?: number;
   }): Promise<SlackHistoryPage>;
+  /** `latest` is exclusive, as Slack takes it: a message at exactly that `ts` is not returned. */
   replies(args: {
     channel: string;
     ts: string;
     oldest: string;
+    latest?: string;
     cursor?: string;
   }): Promise<SlackHistoryPage>;
   /** Who a member id is, or `undefined` when Slack will not say. */
@@ -453,8 +455,8 @@ export class SlackAdapter implements SurfaceAdapter {
     }
     if (!event.threadRoot) return [];
     const at = this.threadAt(event.threadRoot);
-    const before = Number(parseSlackEventId(event.id.nativeId).ts);
-    return this.threadLines(at, (ts) => Number(ts) < before);
+    const before = parseSlackEventId(event.id.nativeId).ts;
+    return this.threadLines(at, (ts) => Number(ts) < Number(before), before);
   }
 
   /** Where a thread root is, refusing one outside the conversations this adapter serves. */
@@ -471,13 +473,25 @@ export class SlackAdapter implements SurfaceAdapter {
     return at;
   }
 
-  /** One thread's messages whose `ts` passes `keep`, oldest first, as lines read back. */
+  /**
+   * One thread's messages whose `ts` passes `keep`, oldest first, as lines read back.
+   *
+   * `latest` stops the walk there, so a read cut at a message does not page through what came
+   * after it. `keep` is still what the result is held to.
+   */
   private async threadLines(
     at: { channel: string; ts: string },
     keep: (ts: string) => boolean,
+    latest?: string,
   ): Promise<ThreadReply[]> {
     const messages = await this.collect((cursor) =>
-      this.api.replies({ channel: at.channel, ts: at.ts, oldest: "0", cursor }),
+      this.api.replies({
+        channel: at.channel,
+        ts: at.ts,
+        oldest: "0",
+        ...(latest ? { latest } : {}),
+        cursor,
+      }),
     );
 
     // Sorted on the Slack `ts` rather than the ISO string it becomes: `ts` carries
@@ -1157,12 +1171,14 @@ export class WebSlackApi implements SlackApiClient {
     channel: string;
     ts: string;
     oldest: string;
+    latest?: string;
     cursor?: string;
   }): Promise<SlackHistoryPage> {
     const response = await this.client.conversations.replies({
       channel: args.channel,
       ts: args.ts,
       oldest: args.oldest,
+      ...(args.latest ? { latest: args.latest } : {}),
       ...(args.cursor ? { cursor: args.cursor } : {}),
     });
     return {
