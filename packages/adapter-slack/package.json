@@ -2,7 +2,7 @@
   "name": "@sageox/agent-toolkit-adapter-slack",
   "version": "0.0.0",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "main": "./src/index.ts",
   "dependencies": {
     "@sageox/agent-toolkit-core": "workspace:*",
