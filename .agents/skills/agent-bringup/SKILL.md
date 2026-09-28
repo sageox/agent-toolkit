@@ -19,7 +19,7 @@ ls "${AGENT_TOOLKIT_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/agent-toolkit/agents
 ```
 
 Each agent is one self-contained directory under that home. There is no `list` subcommand;
-running the CLI with no arguments prints the usage and the home path it resolved.
+`./bin/sageox-agent help` prints the usage and the home path it resolved.
 
 - For a new human-guided agent, `./bin/sageox-agent create` is the user's to run in their own
   terminal. The interview covers mission inputs, definition of done, approval boundaries,

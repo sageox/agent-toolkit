@@ -3069,6 +3069,7 @@ options:
   --agent <name>    which agent            (default: pick interactively)
   --bundle <dir>    use a portable bundle instead of the authoring home
   --secrets <dir>   file-mounted secrets   (default: /mnt/secrets-store, then env)
+  --help, -h        print this and exit; the command it follows does not run
 
 Deployment is a separate concern. The checked-in Compose example and Helm chart consume
 one or more bundles through their native configuration.
@@ -3077,6 +3078,7 @@ one or more bundles through their native configuration.
 const commands: Record<string, (argv: string[]) => Promise<void> | void> = {
   // Spawned by the broker as a stdio child, not typed by a human.
   "brain-server": (argv) => runBrainServer(flag(argv, "vault") ?? process.cwd()),
+  help: () => { process.stdout.write(USAGE); },
   init: initCmd,
   create: async (argv) => { await createCmd(argv, finishCreateJourney); },
   brain: brainCmd,
@@ -3101,7 +3103,10 @@ const commands: Record<string, (argv: string[]) => Promise<void> | void> = {
 };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const cmd = process.argv[2] ?? "";
+  // Anywhere on the line, before any command runs: no command refuses a flag it does not
+  // know, so `memory add local --help` would otherwise add the memory.
+  const asksHelp = process.argv.slice(2).some((arg) => arg === "--help" || arg === "-h");
+  const cmd = asksHelp ? "help" : (process.argv[2] ?? "");
   const handler = commands[cmd];
   if (!handler) {
     process.stderr.write(USAGE);
