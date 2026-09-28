@@ -449,14 +449,17 @@ export class SlackAdapter implements SurfaceAdapter {
    * The thread an inbound message is in, up to it — the same walk, keeping the parent and
    * cutting at the message's own `ts`, which is exact where the ISO `ts` on a line is not.
    */
-  async readThreadBefore(event: InboundEvent): Promise<readonly ThreadReply[]> {
+  async readThreadBefore(
+    event: InboundEvent,
+    signal?: AbortSignal,
+  ): Promise<readonly ThreadReply[]> {
     if (!this.started) {
       throw new Error("SlackAdapter.start() must be called before readThreadBefore()");
     }
     if (!event.threadRoot) return [];
     const at = this.threadAt(event.threadRoot);
     const before = parseSlackEventId(event.id.nativeId).ts;
-    return this.threadLines(at, (ts) => Number(ts) < Number(before), before);
+    return this.threadLines(at, (ts) => Number(ts) < Number(before), before, signal);
   }
 
   /** Where a thread root is, refusing one outside the conversations this adapter serves. */
@@ -477,21 +480,25 @@ export class SlackAdapter implements SurfaceAdapter {
    * One thread's messages whose `ts` passes `keep`, oldest first, as lines read back.
    *
    * `latest` stops the walk there, so a read cut at a message does not page through what came
-   * after it. `keep` is still what the result is held to.
+   * after it. `keep` is still what the result is held to. A fired `signal` stops the walk at its
+   * next page and the name lookups at their next message.
    */
   private async threadLines(
     at: { channel: string; ts: string },
     keep: (ts: string) => boolean,
     latest?: string,
+    signal?: AbortSignal,
   ): Promise<ThreadReply[]> {
-    const messages = await this.collect((cursor) =>
-      this.api.replies({
-        channel: at.channel,
-        ts: at.ts,
-        oldest: "0",
-        ...(latest ? { latest } : {}),
-        cursor,
-      }),
+    const messages = await this.collect(
+      (cursor) =>
+        this.api.replies({
+          channel: at.channel,
+          ts: at.ts,
+          oldest: "0",
+          ...(latest ? { latest } : {}),
+          cursor,
+        }),
+      () => !signal?.aborted,
     );
 
     // Sorted on the Slack `ts` rather than the ISO string it becomes: `ts` carries
@@ -504,7 +511,10 @@ export class SlackAdapter implements SurfaceAdapter {
     // Sharing the map without sharing the lookup is what makes one mention read two ways
     // depending on which door it came through — and a probe tallying replies is exactly
     // the caller that would then disagree with the channel it is reading.
-    for (const message of ordered) await this.learnNames(message.text ?? "");
+    for (const message of ordered) {
+      signal?.throwIfAborted();
+      await this.learnNames(message.text ?? "");
+    }
 
     return ordered.flatMap((message) => this.toChannelLine(message, at.channel) ?? []);
   }
@@ -1014,10 +1024,11 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   /**
-   * Drains one cursor-paged endpoint. Slack pages backwards in time; the caller sorts.
+   * Drains one cursor-paged endpoint. History pages newest first and replies oldest first, so
+   * the caller sorts.
    *
-   * `live` is asked between pages, so a walk whose run has ended stops. A backfill passes
-   * it; a thread read does not, being a caller's request rather than background work.
+   * `live` is asked between pages, so a walk nobody is waiting on stops: a backfill's, once
+   * its run has ended, and a thread read's, once the gateway has stopped waiting for it.
    */
   private async collect(
     page: (cursor?: string) => Promise<SlackHistoryPage>,

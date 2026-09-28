@@ -1542,13 +1542,17 @@ describe("Gateway hands the brain the thread a mention was posted in", () => {
     expect(lines[0]).toMatch(/^thread_read_failed .* error="ratelimited"$/);
   });
 
-  it("stops waiting on a read that never answers, and answers without it", async () => {
+  it("stops waiting on a read that never answers, answers without it, and tells it to stop", async () => {
     // Slack's client waits out a rate limit and retries for half an hour; a read that has not
     // answered by the bound is given up on, not waited out with the channel held behind it.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let signal: AbortSignal | undefined;
     try {
       const { brain, sent, lines } = await serveThreaded(
-        () => new Promise(() => {}),
+        (_e, given) => {
+          signal = given;
+          return new Promise(() => {});
+        },
         inThread(),
         async (gw) => {
           await vi.advanceTimersByTimeAsync(10_000);
@@ -1559,6 +1563,8 @@ describe("Gateway hands the brain the thread a mention was posted in", () => {
       expect(brain.seen[0].thread).toBeUndefined();
       expect(sent.map((s) => s.msg.text)).toEqual(["ok"]);
       expect(lines[0]).toMatch(/^thread_read_failed .* error="the thread read did not finish/);
+      // Nothing reads its answer now, so a read still paging is told to stop.
+      expect(signal?.aborted).toBe(true);
     } finally {
       vi.useRealTimers();
     }

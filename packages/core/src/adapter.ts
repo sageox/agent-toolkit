@@ -138,8 +138,11 @@ export interface SurfaceAdapter {
    * of it. Its authority is the event, which this adapter delivered from a channel it serves —
    * not a root the caller holds, which is {@link readThread}'s. Unlike that read, the root is
    * included: it is what the thread is about. Every text in it is untrusted.
+   *
+   * `signal` fires once the gateway has stopped waiting. A read that can outlive that wait
+   * stops at its next page or lookup instead of finishing for nobody.
    */
-  readThreadBefore?(event: InboundEvent): Promise<readonly ThreadReply[]>;
+  readThreadBefore?(event: InboundEvent, signal?: AbortSignal): Promise<readonly ThreadReply[]>;
 
   /**
    * Channels this agent is a member of, as the surface itself reports membership.

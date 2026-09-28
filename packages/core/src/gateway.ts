@@ -536,9 +536,10 @@ export class Gateway {
     if (!e.threadRoot || !adapter?.readThreadBefore) return undefined;
     const where = `surface=${e.surface} channel=${e.channel.id} event=${e.id.nativeId}`;
     const started = Date.now();
+    const done = new AbortController();
     try {
       const thread = await withTimeout(
-        adapter.readThreadBefore(e),
+        adapter.readThreadBefore(e, done.signal),
         THREAD_READ_TIMEOUT_MS,
         `the thread read did not finish in ${THREAD_READ_TIMEOUT_MS}ms`,
       );
@@ -548,6 +549,10 @@ export class Gateway {
       const reason = error instanceof Error ? error.message : "unknown";
       console.warn(`thread_read_failed ${where} ms=${Date.now() - started} error="${reason}"`);
       return undefined;
+    } finally {
+      // Nothing reads the answer past here. A read still paging after a timeout would keep
+      // calling Slack while it rate-limits, and its client pauses every call behind a 429.
+      done.abort();
     }
   }
 

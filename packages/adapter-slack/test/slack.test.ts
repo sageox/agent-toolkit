@@ -369,6 +369,33 @@ describe("SlackAdapter", () => {
     expect(api.replyCalls).toHaveLength(1);
   });
 
+  it("stops walking a thread once its reader has stopped waiting", async () => {
+    const { instance, api, socket } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    await socket.emit(mention("1786761003.000300", { thread_ts: "1786761001.000100" }));
+
+    api.threads = [
+      {
+        messages: [{ type: "message", user: "U0ALICE", text: "ask <@U0BOB>", ts: "1786761001.000100" }],
+        nextCursor: "page2",
+      },
+      { messages: [{ type: "message", user: "U0BOB", text: "here", ts: "1786761002.000200" }] },
+    ];
+    // The gateway gives up while the first page is in flight.
+    const stop = new AbortController();
+    const replies = api.replies.bind(api);
+    api.replies = async (args) => {
+      stop.abort();
+      return replies(args);
+    };
+
+    await expect(instance.readThreadBefore!(got[0], stop.signal)).rejects.toThrow(/abort/i);
+    // Neither the second page nor a `users.info` for the mention on the first is asked for.
+    expect(api.replyCalls).toHaveLength(1);
+    expect(api.nameCalls).toEqual([]);
+  });
+
   it("refuses a thread read it cannot answer, rather than reporting an empty thread", async () => {
     const { instance, api } = adapter();
     const root = { surface: "slack", nativeId: "GENG:1786761001.000200" } as const;
