@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not run. `<command> --help` shows the full usage, not one command's, and an unknown command
   still prints it to stderr and exits 1.
 
+- **The toolkit is licensed under MIT instead of Apache-2.0.** `LICENSE`, the `license` field
+  of every package manifest, and the `agent-base` image's `org.opencontainers.image.licenses`
+  label say MIT. Earlier releases were published under Apache-2.0.
+
 ## [0.8.0] - 2026-09-22
 
 Everything below shipped after `v0.7.0`.

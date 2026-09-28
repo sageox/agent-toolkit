@@ -2,7 +2,7 @@
   "name": "@sageox/agent-toolkit-core",
   "version": "0.0.0",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "main": "./src/index.ts",
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",

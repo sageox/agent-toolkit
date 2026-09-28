@@ -7,7 +7,7 @@ yours to run.**
 
 [![CI](https://github.com/sageox/agent-toolkit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sageox/agent-toolkit/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/sageox/agent-toolkit?sort=semver)](https://github.com/sageox/agent-toolkit/releases)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](.mise.toml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
@@ -266,4 +266,4 @@ TypeScript · pnpm workspaces · Vitest · zod (manifest) · nostr-tools (Buzz) 
 
 ## License
 
-Apache License 2.0 © 2026 SageOx Inc. See [LICENSE](LICENSE).
+MIT License © 2026 SageOx Inc. See [LICENSE](LICENSE).
