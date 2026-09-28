@@ -20,7 +20,7 @@ depend on `npx` downloading it at startup:
 
 ```bash
 # For a Claude brain:
-npm install -g @agentclientprotocol/claude-agent-acp@0.68.0
+npm install -g @agentclientprotocol/claude-agent-acp@0.84.0
 # For a Codex brain:
 npm install -g @agentclientprotocol/codex-acp@1.11.0
 ```

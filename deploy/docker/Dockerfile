@@ -59,7 +59,7 @@ RUN set -eu; \
 
 # The brains. Installed as real binaries so the gateway does not reach for npx at runtime,
 # which would mean a network fetch on the first turn.
-ARG CLAUDE_AGENT_ACP_VERSION=0.68.0
+ARG CLAUDE_AGENT_ACP_VERSION=0.84.0
 ARG CODEX_ACP_VERSION=1.11.0
 RUN npm install -g "@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}" \
       "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \

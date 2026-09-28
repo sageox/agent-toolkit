@@ -61,7 +61,7 @@ export interface AcpBrainOptions {
 const DEFAULT_SESSION_IDLE_MS = 60 * 60 * 1000;
 
 const FALLBACK_COMMAND = "npx";
-const CLAUDE_AGENT_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp@0.68.0";
+const CLAUDE_AGENT_ACP_PACKAGE = "@agentclientprotocol/claude-agent-acp@0.84.0";
 const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp@1.11.0";
 
 /** How long the ACP handshake may take before we call it dead. */
