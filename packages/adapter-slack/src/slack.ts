@@ -938,8 +938,9 @@ export class SlackAdapter implements SurfaceAdapter {
    *
    * Two Slack facts shape this. `conversations.history` returns thread parents but never
    * their replies, and this agent answers *in* threads — so a threaded mention is exactly
-   * the kind most likely to be missed. And both endpoints page newest-first, so sorting a
-   * single page restores nothing: the whole gap is collected before any of it is replayed.
+   * the kind most likely to be missed. And the two endpoints page in opposite directions,
+   * history newest first and replies oldest first, so the pages of a gap arrive in no one
+   * order: the whole gap is collected and sorted before any of it is replayed.
    *
    * What remains missed is a reply under a parent older than the cursor. That parent is
    * outside the history window, and Slack offers no way to enumerate the threads that
