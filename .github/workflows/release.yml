@@ -298,7 +298,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/sageox/agent-toolkit
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=MIT
 
       # One digest downstream, whether this run built it or found it already published.
       - name: Settle the digest this release publishes
