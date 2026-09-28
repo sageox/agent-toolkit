@@ -144,8 +144,12 @@ whole of what the second mount buys.
                 - --job-secrets
                 - {{ include "agent.jobSecretsMountPath" $context }}
                 {{- end }}
-              {{- if or $job.worker $agent.workEvents }}
+              {{- if or $job.worker $agent.workEvents $agent.authTag }}
               env:
+                {{- if $agent.authTag }}
+                - name: BUZZ_AUTH_TAG
+                  value: {{ $agent.authTag | quote }}
+                {{- end }}
                 {{- if $agent.workEvents }}
                 - name: AGENT_WORK_EVENTS
                   value: "1"

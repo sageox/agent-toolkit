@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Helm: an optional per-agent `authTag` value, injected as `BUZZ_AUTH_TAG` into
+  the agent Deployment and its scheduled-job hosts. Carries a NIP-OA owner
+  attestation so the running agent's authenticated connection binds it to its
+  owner (the "managed by <owner>" badge). The tag is public — minted with the
+  owner secret, which never enters the pod. Omit it to leave an agent
+  "owner unavailable" (the prior behavior). Values-only and backward compatible.
+
 ## [0.6.0] - 2026-09-14
 
 Everything below shipped after `v0.5.2`.

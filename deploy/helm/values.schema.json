@@ -159,6 +159,11 @@
         "terminationGracePeriodSeconds", "resources", "sharedVolumes"
       ],
       "properties": {
+        "authTag": {
+          "type": "string",
+          "minLength": 1,
+          "description": "NIP-OA owner attestation tag (JSON array, public) injected as BUZZ_AUTH_TAG into the agent Deployment and scheduled job hosts, binding the agent to its owner. Minted with the owner secret; the tag itself is not a secret. Omit to leave the agent 'owner unavailable'."
+        },
         "workEvents": {
           "type": "boolean",
           "description": "Opt in to structured job lifecycle events on the agent Deployment and scheduled job hosts. Omitted or false preserves ordinary logging. Requires toolkit 0.4.1 or newer."
