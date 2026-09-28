@@ -438,6 +438,27 @@ export class SlackAdapter implements SurfaceAdapter {
    */
   async readThread(root: EventRef, limit?: number): Promise<readonly ThreadReply[]> {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before readThread()");
+    const at = this.threadAt(root);
+    const replies = await this.threadLines(at, (ts) => ts !== at.ts);
+    return limit === undefined ? replies : replies.slice(0, limit);
+  }
+
+  /**
+   * The thread an inbound message is in, up to it — the same walk, keeping the parent and
+   * cutting at the message's own `ts`, which is exact where the ISO `ts` on a line is not.
+   */
+  async readThreadBefore(event: InboundEvent): Promise<readonly ThreadReply[]> {
+    if (!this.started) {
+      throw new Error("SlackAdapter.start() must be called before readThreadBefore()");
+    }
+    if (!event.threadRoot) return [];
+    const at = this.threadAt(event.threadRoot);
+    const before = Number(parseSlackEventId(event.id.nativeId).ts);
+    return this.threadLines(at, (ts) => Number(ts) < before);
+  }
+
+  /** Where a thread root is, refusing one outside the conversations this adapter serves. */
+  private threadAt(root: EventRef): { channel: string; ts: string } {
     if (root.surface !== SLACK_SURFACE) {
       throw new Error(`a ${root.surface} thread root names no Slack thread`);
     }
@@ -447,7 +468,14 @@ export class SlackAdapter implements SurfaceAdapter {
         "a Slack thread root must name a message in a conversation this agent serves",
       );
     }
+    return at;
+  }
 
+  /** One thread's messages whose `ts` passes `keep`, oldest first, as lines read back. */
+  private async threadLines(
+    at: { channel: string; ts: string },
+    keep: (ts: string) => boolean,
+  ): Promise<ThreadReply[]> {
     const messages = await this.collect((cursor) =>
       this.api.replies({ channel: at.channel, ts: at.ts, oldest: "0", cursor }),
     );
@@ -456,7 +484,7 @@ export class SlackAdapter implements SurfaceAdapter {
     // microseconds and the ISO form is truncated to milliseconds, so two replies inside one
     // millisecond would tie and come back in whatever order the pages happened to arrive.
     const ordered = messages
-      .filter((message) => message.ts !== at.ts)
+      .filter((message) => keep(message.ts ?? ""))
       .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
     // The same directory the inbound path fills, filled the same way before rendering.
     // Sharing the map without sharing the lookup is what makes one mention read two ways
@@ -464,15 +492,7 @@ export class SlackAdapter implements SurfaceAdapter {
     // the caller that would then disagree with the channel it is reading.
     for (const message of ordered) await this.learnNames(message.text ?? "");
 
-    const replies = ordered
-      .flatMap((message) => {
-        const event = toSlackInboundEvent(
-          { ...message, type: message.type ?? "message", channel: at.channel },
-          this.normalizeOptions(),
-        );
-        return event ? [{ author: event.author, text: event.text, ts: event.ts }] : [];
-      });
-    return limit === undefined ? replies : replies.slice(0, limit);
+    return ordered.flatMap((message) => this.toChannelLine(message, at.channel) ?? []);
   }
 
   /**

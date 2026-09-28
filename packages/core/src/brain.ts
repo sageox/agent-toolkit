@@ -1,4 +1,4 @@
-import type { InboundEvent, GuardedMessage } from "./events.ts";
+import type { InboundEvent, GuardedMessage, ThreadReply } from "./events.ts";
 import type { ProbeResult } from "./health.ts";
 
 export interface BrainContext {
@@ -38,6 +38,13 @@ export interface BrainContext {
    * the disclosure has to clear with it.
    */
   capabilities?: readonly ProbeResult[];
+  /**
+   * The thread `event` was posted in, as far as `event` — see
+   * {@link SurfaceAdapter.readThreadBefore}. Untrusted, like `event.text`. Absent both for a
+   * message in no thread and for one whose thread could not be read; `event.threadRoot` tells
+   * the two apart.
+   */
+  thread?: readonly ThreadReply[];
 }
 
 /** The brain returns intent. It holds no transport credential and cannot send. */

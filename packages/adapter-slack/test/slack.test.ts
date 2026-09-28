@@ -322,6 +322,39 @@ describe("SlackAdapter", () => {
     expect(api.nameCalls).toEqual(["U0ALICE"]);
   });
 
+  it("reads the thread a message is in up to it: the parent first, nothing from the message on", async () => {
+    const { instance, api, socket } = adapter();
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    await socket.emit(mention("1786761003.000300", { thread_ts: "1786761001.000100" }));
+
+    api.threads = [
+      {
+        messages: [
+          { type: "message", user: "U0ALICE", text: "the deploy failed", ts: "1786761001.000100" },
+          { type: "message", user: "UBOT", bot_id: "BBOT", text: "it is the lock", ts: "1786761002.000200" },
+          { type: "message", user: "U123", text: "<@UBOT> status?", ts: "1786761003.000300" },
+          { type: "message", user: "U0BOB", text: "fixed now", ts: "1786761004.000400" },
+        ],
+      },
+    ];
+
+    const thread = await instance.readThreadBefore!(got[0]);
+    expect(api.replyCalls).toEqual([
+      { channel: "GENG", ts: "1786761001.000100", oldest: "0", cursor: undefined },
+    ]);
+    // The agent's own earlier answer is its own, so the brain can tell it from anyone else's.
+    expect(thread.map((line) => [line.author.id, line.text, line.author.isSelf])).toEqual([
+      ["U0ALICE", "the deploy failed", false],
+      ["UBOT", "it is the lock", true],
+    ]);
+
+    // A top-level message is in no thread, so there is nothing to ask Slack for.
+    await socket.emit(mention("1786761005.000500"));
+    expect(await instance.readThreadBefore!(got[1])).toEqual([]);
+    expect(api.replyCalls).toHaveLength(1);
+  });
+
   it("refuses a thread read it cannot answer, rather than reporting an empty thread", async () => {
     const { instance, api } = adapter();
     const root = { surface: "slack", nativeId: "GENG:1786761001.000200" } as const;

@@ -20,6 +20,13 @@ The tool policy is not admitting them. `./bin/sageox-agent doctor` names the exa
 that are missing. This is almost always the namespacing above. The log says which call it
 was and which rule stopped it: grep `tool_call` for `outcome=refused`.
 
+**It answered as though it could not see the thread it was asked in.**
+Check the log for `thread_read_failed` beside that turn: `error` names the cause. On Slack,
+`missing_scope` means the app lacks the history scope for that kind of conversation, and a
+timeout means Slack's client was still waiting out a rate limit or retrying when the 10
+seconds ran out. A turn with no `thread_read` line at all was for a message that was not in a
+thread.
+
 **`tool_call … outcome=refused` you did not expect.**
 Something asked for a capability it does not hold. Once is a bundle with a line missing —
 `reason` says which gate answered: the policy, the server's `scope`, or the leak scan.

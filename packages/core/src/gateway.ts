@@ -1,7 +1,7 @@
 import type { AgentManifest } from "./manifest.ts";
 import type { SurfaceAdapter } from "./adapter.ts";
 import type { Brain, BrainContext, GuardFeedback } from "./brain.ts";
-import type { GuardedMessage, InboundEvent } from "./events.ts";
+import type { GuardedMessage, InboundEvent, ThreadReply } from "./events.ts";
 import type { ProbeResult } from "./health.ts";
 import { evaluateEgress, type GuardVerdict } from "./guard.ts";
 import { SurfaceEgress, type LiveTurnHandle } from "./surface-egress.ts";
@@ -486,6 +486,7 @@ export class Gateway {
     timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
     tick: Pick<BrainContext, "scheduled" | "sealed"> = {},
   ): Promise<TurnTally> {
+    const thread = await this.threadOf(e);
     const turn = this.opts.brain.runTurn(e, {
       agentName: this.opts.manifest.name,
       persona: this.opts.persona,
@@ -494,6 +495,7 @@ export class Gateway {
       react: this.opts.react,
       ...tick,
       capabilities: this.opts.capabilities?.(),
+      thread,
     });
     // Published for exactly as long as the bound below applies, and from here rather than
     // from `limits.turnTimeoutMs`, because this is the only place that knows both which
@@ -518,6 +520,34 @@ export class Gateway {
       // resumed, so awaiting its return would hang exactly where the timeout was meant
       // to rescue us. Cleanup runs if it can; releasing the channel does not wait for it.
       void turn.return(undefined).catch(() => {});
+    }
+  }
+
+  /**
+   * The thread `e` was posted in, or nothing when it is in none or the read failed.
+   *
+   * A failure never reaches the turn: an answer without the thread beats no answer, and the
+   * prompt tells the brain the thread could not be read. The read runs before the turn's clock
+   * starts, so it has a bound of its own — Slack's client waits out a rate limit and retries a
+   * failed call for about half an hour, and this channel's queue waits with it.
+   */
+  private async threadOf(e: InboundEvent): Promise<readonly ThreadReply[] | undefined> {
+    const adapter = this.byKind.get(e.surface);
+    if (!e.threadRoot || !adapter?.readThreadBefore) return undefined;
+    const where = `surface=${e.surface} channel=${e.channel.id} event=${e.id.nativeId}`;
+    const started = Date.now();
+    try {
+      const thread = await withTimeout(
+        adapter.readThreadBefore(e),
+        THREAD_READ_TIMEOUT_MS,
+        `the thread read did not finish in ${THREAD_READ_TIMEOUT_MS}ms`,
+      );
+      console.info(`thread_read ${where} messages=${thread.length} ms=${Date.now() - started}`);
+      return thread;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "unknown";
+      console.warn(`thread_read_failed ${where} ms=${Date.now() - started} error="${reason}"`);
+      return undefined;
     }
   }
 
@@ -602,6 +632,9 @@ export class Gateway {
 
 /** Buzz's typing indicator is ephemeral; upstream refreshes it on this cadence. */
 const TYPING_REFRESH_MS = 3_000;
+
+/** Past the Buzz adapter's own 5s read timeout, so a silent relay is logged with its reason. */
+const THREAD_READ_TIMEOUT_MS = 10_000;
 
 /** Rejects if `work` has not settled in time. `work` itself keeps running; only the wait ends. */
 export async function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {

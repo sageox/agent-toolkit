@@ -205,7 +205,8 @@ Create a Slack app, enable **Socket Mode**, and create an app-level token with
   every mention keeps rendering as its id, which is what it did before.
 - the matching history and read scopes for the conversations you configure
   (`channels:history`/`channels:read`, `groups:history`/`groups:read`,
-  `im:history`/`im:read`, or `mpim:history`/`mpim:read`)
+  `im:history`/`im:read`, or `mpim:history`/`mpim:read`). The history scope is also how the
+  agent reads the thread it was mentioned in.
 
 Subscribe the bot to `app_mention` and `message.im`, invite it into each channel, then run:
 
@@ -626,6 +627,30 @@ carries a vocabulary. On Buzz the character is published as-is. Slack names emoj
 of carrying them, so it takes either spelling — `:tada:`, `tada`, or one of the few
 characters the adapter knows a name for — and refuses a character it cannot name rather
 than letting Slack reject it with `invalid_name`.
+
+### A mention in a thread brings the thread
+
+A message posted in a thread arrives with its thread. Before the turn, the gateway reads the
+thread up to that message, starting with the message that opened it. The brain gets it above
+the message, fenced as untrusted like the message, with the agent's own earlier replies marked
+as its own. There is nothing to configure on either surface: on Slack it is one
+`conversations.replies` walk under the history scope above, and on Buzz two reads of the relay
+the agent is already connected to. What was said in the channel outside the thread is not
+included; that is `read_channel`, below.
+
+Everyone who wrote in the thread reaches the brain, not only the people `respondTo` lets wake
+it. An owner-only agent still answers only its owner, and it reads what anyone else wrote in
+the thread it was asked in, as data.
+
+A thread over 200 messages is handed over as its first message and the most recent 199, and
+the brain is told how many were left out. A read that fails, or has not finished in 10
+seconds, costs the thread and not the answer: the brain is told the thread could not be read,
+and the log says why.
+
+```text
+thread_read surface=slack channel=C0123 event=C0123:1790000180.000400 messages=3 ms=212
+thread_read_failed surface=slack channel=C0123 event=C0123:1790000240.000500 ms=10001 error="the thread read did not finish in 10000ms"
+```
 
 ### Let the agent read the surface it is on
 

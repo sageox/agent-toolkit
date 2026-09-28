@@ -6,8 +6,8 @@ import { SurfaceEgress } from "../src/surface-egress.ts";
 import { MockBrain } from "../src/brain.ts";
 import { loadManifest } from "../src/manifest.ts";
 import type { SurfaceAdapter } from "../src/adapter.ts";
-import type { Brain, BrainStep, GuardFeedback } from "../src/brain.ts";
-import type { InboundEvent, GuardedMessage, ChannelRef } from "../src/events.ts";
+import type { Brain, BrainContext, BrainStep, GuardFeedback } from "../src/brain.ts";
+import type { InboundEvent, GuardedMessage, ChannelRef, ThreadReply } from "../src/events.ts";
 
 function fakeAdapter() {
   let emit!: (e: InboundEvent) => void;
@@ -1457,5 +1457,110 @@ describe("Gateway names what a turn left running", () => {
     await long;
     held.land();
     await held.call;
+  });
+});
+
+describe("Gateway hands the brain the thread a mention was posted in", () => {
+  /** Answers every turn, keeping what each one was handed. */
+  class RecordingBrain implements Brain {
+    readonly seen: BrainContext[] = [];
+    async *runTurn(
+      _e: InboundEvent,
+      ctx: BrainContext,
+    ): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+      this.seen.push(ctx);
+      yield { type: "reply", msg: { text: "ok" } };
+    }
+  }
+
+  const inThread = (): InboundEvent => ({
+    ...ev("summarize this thread"),
+    threadRoot: { surface: "console", nativeId: "root" },
+  });
+  const earlier: ThreadReply[] = [
+    {
+      author: { surface: "console", id: "u2", isSelf: false, isAgent: false },
+      text: "the deploy failed on db-3",
+      ts: "2026-08-12T23:59:00.000Z",
+    },
+  ];
+
+  /** One served event, with the gateway's own log lines. */
+  async function serveThreaded(
+    readThreadBefore: SurfaceAdapter["readThreadBefore"],
+    event: InboundEvent,
+    settle: (gw: Gateway) => Promise<void> = (gw) => gw.drain(),
+  ) {
+    const f = fakeAdapter();
+    f.adapter.readThreadBefore = readThreadBefore;
+    const brain = new RecordingBrain();
+    const gw = new Gateway({ manifest: serving, adapters: [f.adapter], brain });
+    const lines: string[] = [];
+    const info = vi.spyOn(console, "info").mockImplementation((l) => void lines.push(String(l)));
+    const warn = vi.spyOn(console, "warn").mockImplementation((l) => void lines.push(String(l)));
+    try {
+      await gw.start();
+      f.inject(event);
+      await settle(gw);
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+    }
+    return { brain, sent: f.sent, lines: lines.filter((l) => l.startsWith("thread_read")) };
+  }
+
+  it("reads the thread before the turn, hands it over, and logs how much it read", async () => {
+    const asked: InboundEvent[] = [];
+    const { brain, sent, lines } = await serveThreaded(async (e) => {
+      asked.push(e);
+      return earlier;
+    }, inThread());
+
+    expect(asked.map((e) => e.id.nativeId)).toEqual(["1"]);
+    expect(brain.seen[0].thread).toEqual(earlier);
+    expect(sent.map((s) => s.msg.text)).toEqual(["ok"]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^thread_read surface=console channel=local event=1 messages=1 ms=\d+$/);
+  });
+
+  it("reads nothing for a message in no thread", async () => {
+    const read = vi.fn(async () => earlier);
+    const { brain, lines } = await serveThreaded(read, ev("hello"));
+    expect(read).not.toHaveBeenCalled();
+    expect(brain.seen[0].thread).toBeUndefined();
+    expect(lines).toEqual([]);
+  });
+
+  it("answers without the thread when the read fails, and names the failure", async () => {
+    const { brain, sent, lines } = await serveThreaded(async () => {
+      throw new Error("ratelimited");
+    }, inThread());
+
+    expect(brain.seen[0].thread).toBeUndefined();
+    expect(sent.map((s) => s.msg.text)).toEqual(["ok"]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^thread_read_failed .* error="ratelimited"$/);
+  });
+
+  it("stops waiting on a read that never answers, and answers without it", async () => {
+    // Slack's client waits out a rate limit and retries for half an hour; a read that has not
+    // answered by the bound is given up on, not waited out with the channel held behind it.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { brain, sent, lines } = await serveThreaded(
+        () => new Promise(() => {}),
+        inThread(),
+        async (gw) => {
+          await vi.advanceTimersByTimeAsync(10_000);
+          await gw.drain();
+        },
+      );
+      expect(brain.seen).toHaveLength(1);
+      expect(brain.seen[0].thread).toBeUndefined();
+      expect(sent.map((s) => s.msg.text)).toEqual(["ok"]);
+      expect(lines[0]).toMatch(/^thread_read_failed .* error="the thread read did not finish/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
