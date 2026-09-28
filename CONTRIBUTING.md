@@ -96,5 +96,5 @@ and email in the issue or PR, and we'll add you.
 ## Copyright
 
 Unless you state otherwise, contributions intentionally submitted for inclusion
-in this project are licensed under the Apache License 2.0, as described in
+in this project are licensed under the MIT License, as described in
 [LICENSE](LICENSE).

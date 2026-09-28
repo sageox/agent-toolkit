@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not run. `<command> --help` shows the full usage, not one command's, and an unknown command
   still prints it to stderr and exits 1.
 
+- **The toolkit is licensed under MIT instead of Apache-2.0.** `LICENSE`, the `license` field
+  of every package manifest, and the `agent-base` image's `org.opencontainers.image.licenses`
+  label say MIT. Earlier releases were published under Apache-2.0.
+
 - **An option no command reads is refused before the command runs, instead of being passed
   over.** A guessed `--dry-run`, a typo such as `--privat`, or a short flag such as `-n` let
   the command run as if it were absent: with one agent in the home,

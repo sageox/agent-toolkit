@@ -2,7 +2,7 @@
   "name": "@sageox/agent-toolkit-cli",
   "version": "0.0.0",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "bin": {
     "sageox-agent": "./src/cli.ts"
   },
