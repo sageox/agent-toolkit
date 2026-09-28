@@ -77,11 +77,11 @@ export function positional(argv: string[], valued: ReadonlySet<string>): string 
  *
  * So a word starting with `-` is checked even right after an option that takes a value: an
  * option the command never reads would otherwise hide it, and `memory add local --args
- * --dry-run` would add the memory. `--args` beside `--command` is the exception, because
- * `mcp add` hands its value to that program: `--args --stdio`.
+ * --dry-run` would add the memory. `handsArgsOn` is the exception, for a command that hands
+ * the value of `--args` to another program unread, as `mcp add --command <program> --args
+ * --stdio` does.
  */
-export function refuseUnknownOptions(argv: string[]): void {
-  const handsArgsOn = hasFlag(argv, "command");
+export function refuseUnknownOptions(argv: string[], handsArgsOn = false): void {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (VALUED_OPTIONS.has(arg)) {

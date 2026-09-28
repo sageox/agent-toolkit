@@ -3096,7 +3096,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   void (async () => {
     try {
       const argv = process.argv.slice(3);
-      if (cmd !== "help") refuseUnknownOptions(argv); // help prints whatever else is on the line
+      // help prints whatever else is on the line, and only `mcp add` hands `--args` on, to the
+      // program `--command` names.
+      if (cmd !== "help") refuseUnknownOptions(argv, cmd === "mcp" && hasFlag(argv, "command"));
       await handler(argv);
     } catch (error: unknown) {
       process.stderr.write(`${errorText(error)}\n`);
