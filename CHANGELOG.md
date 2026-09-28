@@ -75,9 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every installation made since 2025-05-29. For earlier ones Slack's pages disagree: its legacy
   changelog brings them under the limit from 2026-03-03, and its current rate-limit reference
   exempts them. The internal app the guide creates is not limited. On a limited installation, a
-  second threaded mention inside the minute is answered only once the limit clears, because
-  Slack's client holds every call until then, and without its thread if that takes over 10
-  seconds.
+  second threaded mention inside the minute waits for the limit to clear. If that takes over 10
+  seconds, the turn goes ahead without the thread, and its reply still posts only once the limit
+  clears, because Slack's client holds every call until then.
 
 ## [0.8.0] - 2026-09-22
 

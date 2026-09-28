@@ -735,8 +735,9 @@ exempts them. The app the setup above walks you through is an *internal* one bui
 workspace, which is not affected and still serves a thousand messages a request. If your agent
 runs on an unlisted distributed app instead, `read_channel` still works and is simply slow and
 shallow, and `limit` behaves as the ceiling it is documented to be: you will often get fewer
-messages than you asked for. A thread read that hits the same limit waits it out, and after 10
-seconds the agent answers without the thread.
+messages than you asked for. A thread read that hits the same limit waits it out. After 10
+seconds the agent answers without the thread, and Slack's client holds that reply until the limit
+clears.
 
 **Ask for a period with `withinHours`, never by reading a channel and filtering it.**
 `read_channel(surface: "slack", channel: "status", withinHours: 24)` is the last day, cut by
