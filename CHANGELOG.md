@@ -70,12 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. A read that fails, or has not finished in 10 seconds, costs the thread and not the answer:
   the brain is told the thread could not be read, and the log says `thread_read_failed` with the
   reason. A read that works logs `thread_read … messages=N`. Slack needs no new scope; the
-  history scopes the setup guide asks for cover `conversations.replies`. Slack allows one such
-  call a minute to one kind of installation: an installation, made on or after 2025-05-29, of a
-  commercially distributed app that is not on the Slack Marketplace. Earlier installations and
-  the internal app the guide creates are not limited. On a limited installation, a second
-  threaded mention inside the minute is answered only once the limit clears, because Slack's
-  client holds every call until then, and without its thread if that takes over 10 seconds.
+  history scopes the setup guide asks for cover `conversations.replies`. Slack limits apps
+  distributed commercially outside the Slack Marketplace to one such call a minute. That covers
+  every installation made since 2025-05-29. For earlier ones Slack's pages disagree: its legacy
+  changelog brings them under the limit from 2026-03-03, and its current rate-limit reference
+  exempts them. The internal app the guide creates is not limited. On a limited installation, a
+  second threaded mention inside the minute is answered only once the limit clears, because
+  Slack's client holds every call until then, and without its thread if that takes over 10
+  seconds.
 
 ## [0.8.0] - 2026-09-22
 

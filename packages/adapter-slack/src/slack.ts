@@ -174,14 +174,15 @@ const MAX_HISTORY_PAGES = 5;
  * caller's `limit` had it backwards — a small ask made small pages, so the notices that a
  * page can be made of were more likely to fill it, not less.
  *
- * **It is a ceiling, and on some installations a distant one.** Slack cut non-Marketplace
- * distributed apps to 1 request per minute and 15 objects per request for this endpoint —
- * new installs from 2025-05-29, and every such install from 2026-03-03. An internal
- * customer-built app, which is what `docs/guide/chat-surfaces.md` walks an operator
- * through, is unaffected and still serves a thousand. So a page here comes back anywhere
- * between 15 and 200 depending on how the app was distributed, the walk has to read
- * whatever arrives rather than what it asked for, and nothing may be concluded from a page
- * being short.
+ * **It is a ceiling, and on some installations a distant one.** Slack cut apps distributed
+ * commercially outside the Marketplace to 1 request per minute and 15 objects per request for
+ * this endpoint. That covers every installation made since 2025-05-29. For earlier ones
+ * Slack's pages disagree: its legacy changelog brings them under the limit from 2026-03-03,
+ * and its current rate-limit reference exempts them. An internal customer-built app, which is
+ * what `docs/guide/chat-surfaces.md` walks an operator through, is unaffected and still serves
+ * a thousand. So a page here comes back anywhere between 15 and 200 depending on how the app
+ * was distributed, the walk has to read whatever arrives rather than what it asked for, and
+ * nothing may be concluded from a page being short.
  */
 const HISTORY_PAGE = 200;
 

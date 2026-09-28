@@ -727,13 +727,16 @@ an id. On Buzz they are reads of the same relay socket the agent is already auth
 on. Either way the credential never leaves the gateway.
 
 One Slack quota is worth knowing before you rely on `read_channel`. Slack restricts
-`conversations.history` for apps **distributed commercially outside the Marketplace** to one
-request per minute returning at most 15 messages — new installations since 2025-05-29, and
-every such installation since 2026-03-03. The app the setup above walks you through is an
-*internal* one built for your own workspace, which is not affected and still serves a
-thousand messages a request. If your agent runs on an unlisted distributed app instead,
-`read_channel` still works and is simply slow and shallow, and `limit` behaves as the
-ceiling it is documented to be: you will often get fewer messages than you asked for.
+`conversations.history` and `conversations.replies` for apps **distributed commercially outside
+the Marketplace** to one request per minute returning at most 15 messages. That covers every
+installation made since 2025-05-29. For earlier ones Slack's pages disagree: its legacy
+changelog brings them under the limit from 2026-03-03, and its current rate-limit reference
+exempts them. The app the setup above walks you through is an *internal* one built for your own
+workspace, which is not affected and still serves a thousand messages a request. If your agent
+runs on an unlisted distributed app instead, `read_channel` still works and is simply slow and
+shallow, and `limit` behaves as the ceiling it is documented to be: you will often get fewer
+messages than you asked for. A thread read that hits the same limit waits it out, and after 10
+seconds the agent answers without the thread.
 
 **Ask for a period with `withinHours`, never by reading a channel and filtering it.**
 `read_channel(surface: "slack", channel: "status", withinHours: 24)` is the last day, cut by
