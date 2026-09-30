@@ -88,6 +88,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seconds, the turn goes ahead without the thread, and its reply still posts only once the limit
   clears, because Slack's client holds every call until then.
 
+- **A Claude brain can run Sonnet 5.5.** `claude-agent-acp` moves from 0.68.0 to 0.84.0 in the
+  agent base image, the `npx` fallback and the setup guide, which takes the Claude Code it
+  bundles from 2.1.232 to 2.1.284. 2.1.232 does not know Sonnet 5.5: it listed
+  `brain.model: claude-sonnet-5-5` as a custom model named Sonnet 5. On 2.1.284 the same pin
+  selects Sonnet 5.5. A full model ID such as `claude-sonnet-5` stays on its model, but the
+  `sonnet` and `opus` aliases now mean Sonnet 5.5 and Opus 5.5, and an agent with no
+  `brain.model` moves from Opus 5 to Opus 5.5.
+
+  The brain's permission requests now carry the tool's name, which the gateway matches its tool
+  policy against. 0.68.0 sent no name, so the gateway matched the title instead: the tool's name
+  for an MCP tool, but the command for `Bash` and `Read <path>` for `Read`. An MCP tool is
+  decided as before. A built-in tool the policy allows by its bare name, such as `Read`, is now
+  approved when Claude Code asks the gateway about it, where before its title matched no rule
+  and it was refused.
+
 ## [0.8.0] - 2026-09-22
 
 Everything below shipped after `v0.7.0`.
