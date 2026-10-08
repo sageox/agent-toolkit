@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-08
+
+Everything below shipped after `v0.8.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.9.0` takes `:latest` and `:0.9`. `:0.8` stays
+on 0.8.0. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+A minor rather than a patch because an agent that moves from 0.8.0 without changing its
+configuration still behaves differently. A Claude brain with no `brain.model` moves from
+Opus 5 to Opus 5.5. A built-in tool its tool policy allows by bare name, such as `Read`, is
+approved when Claude Code asks, where 0.8.0 refused it. The image's ox sends usage data to
+PostHog unless the gateway's environment sets `DO_NOT_TRACK=1`, which the chart has no
+setting for. A turn for a message posted in a thread carries the thread, including what
+people outside `respondTo` wrote there. A command line with an option no command reads
+exits 1 instead of running. Helm chart 0.15.0 and `deploy/docker/compose.yaml` need no
+change: they pass only options the CLI reads, and they keep the image's entrypoint, so the
+gateway runs under `tini`.
+
 - **A failed ledger sync names its failure in the gateway log, and a failure that repeats is
   retried less often (#128).** When a team-token ledger's sync failed, `team_status` said the
   gateway log named the cause. The `ledger_sync` line it pointed at carried ox's receipt cut at
