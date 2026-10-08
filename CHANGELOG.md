@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- NIP-OA owner attestation now works for chart/env-deployed agents. The TS
+  runtime authenticates via nostr-tools directly and never read `BUZZ_AUTH_TAG`,
+  so an agent given the tag still rendered "owner unavailable" — only the `buzz`
+  CLI honored it, which the agent does not use for its connection. `adapter-buzz`
+  now appends the `["auth", …]` tag to its NIP-42 AUTH event, matching the Rust
+  harness's `send_auth_response`. Empty/malformed tags are ignored, not fatal.
+
 - **A failed ledger sync names its failure in the gateway log, and a failure that repeats is
   retried less often (#128).** When a team-token ledger's sync failed, `team_status` said the
   gateway log named the cause. The `ledger_sync` line it pointed at carried ox's receipt cut at
