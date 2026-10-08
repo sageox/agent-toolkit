@@ -85,10 +85,11 @@ describe("repository warmup", () => {
 
     const saved = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = "must-not-leak";
+    vi.stubEnv("DO_NOT_TRACK", "1");
     try {
       const workspace = createRepoWorkspace(
         parseReposConf("https://github.com/acme/service\n"),
-        { root, run },
+        { root, run, oxClientId: "agent-id" },
       );
       // The re-probe path: the reading is recomputed on every call, so the disclosure the
       // gateway assembles clears itself when the index goes warm. Latch it once at startup
@@ -113,10 +114,13 @@ describe("repository warmup", () => {
       for (const call of calls.filter((call) => call.command === "ox")) {
         expect(call.env.ANTHROPIC_API_KEY).toBeUndefined();
         expect(call.env.XDG_DATA_HOME).toBe(join(root, "ox-data"));
+        expect(call.env.DO_NOT_TRACK).toBe("1");
+        expect(call.env.SAGEOX_CLIENT_ID).toBe("agent-id");
       }
     } finally {
       if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = saved;
+      vi.unstubAllEnvs();
     }
   });
 

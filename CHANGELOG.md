@@ -94,6 +94,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   approved when Claude Code asks the gateway about it, where before its title matched no rule
   and it was refused.
 
+- **The agent base image ships `ox` 0.20.0 and runs the gateway under `tini`, and each agent's
+  ox calls report usage under one ID.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.17.0. The ox calls the toolkit makes — `status`,
+  `team list`, `query`, `session list`, `glance`, `sync --read-only`, `index code`,
+  `code status`, `code search` and `code insights` — take the same flags and return the same
+  fields on 0.20.0, so nothing that reads them changes. A job body that runs ox itself gets
+  0.20.0 too: `ox doctor` now exits non-zero when a check fails, even with `--json`, and
+  `--config` now names the user preferences file and stops the command when that file is
+  missing or malformed.
+
+  Since 0.19.0, ox sends usage data to PostHog by default, and the toolkit leaves it on. ox
+  sends it from a process it detaches after a command. The image's PID 1 was Node, which
+  never reaps such a process, so each ox call behind a code search, a code insights lookup or
+  a repository warmup would have left a zombie until the container restarted. The entrypoint
+  now starts the gateway under `tini`, which reaps them, as it does for a job body's own ox
+  calls; a deployment that replaces the entrypoint needs an init that does the same.
+
+  Every ox call the toolkit makes for an agent with a team brain now carries one ID,
+  `SAGEOX_CLIENT_ID`, hashed from the team and the agent's name, so ox reports that agent's
+  usage under the same ID across restarts, pods and token rotation. Two deployments of one
+  name on one team share it. Without it, the team brain's calls would send nothing: ox sends
+  only under an install ID it can keep, it keeps that ID under its config directory, and the
+  gateway points that directory at the null device. The code-index calls would get a new ID
+  in every new container. ox 0.20.0 still reports nothing for hosted ledger reads or read
+  sync (sageox/ox#1089). Setting `DO_NOT_TRACK=1` in the gateway's environment turns
+  telemetry off, because the gateway now passes it to every ox call it makes. The chart has
+  no setting for it yet.
+
+  Since 0.18.0, ox syncs a ledger path that holds only its own cache, which 0.17.0 refused as
+  `interrupted` (sageox/ox#1045). A path that is not a checkout and holds anything else fails
+  as `path_occupied`, which no retry clears until the path is emptied. `team_status` reports it
+  as a failed sync, and the gateway log names the class.
+
 ## [0.8.0] - 2026-09-22
 
 Everything below shipped after `v0.7.0`.

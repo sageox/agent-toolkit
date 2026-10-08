@@ -36,18 +36,18 @@ RUN pnpm install --frozen-lockfile --config.node-linker=hoisted --config.strictD
 FROM node:22.23.2-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS runtime
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends age ca-certificates curl git \
+ && apt-get install -y --no-install-recommends age ca-certificates curl git tini \
  && rm -rf /var/lib/apt/lists/*
 
 # The gateway runs ox itself — the credential stays on this side of the brain boundary.
 # Pin the release and verify it so rebuilding this image cannot silently install a newer
 # binary. Debian's architecture names match the SageOx release names we support.
-ARG OX_VERSION=0.17.0
+ARG OX_VERSION=0.20.0
 RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) checksum="ea42f62fd6f1ffe7bbdc574b3597f0e097824f783e99e8d437a82920f74ab0a9" ;; \
-      arm64) checksum="57e03ce9c4cb1255096f6b54da4b9bb53459d783e0e379cb375a9c0bdfbd02b6" ;; \
+      amd64) checksum="bcc105ae5b857f5521f7db369eb1f9f7907c796e4734cef3e0bdb010a01a6831" ;; \
+      arm64) checksum="b144cbb9baf80fcace778e0d58469234a46ce6b48317bd2346c2b1881d52dc45" ;; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     archive="ox_${OX_VERSION}_linux_${arch}.tar.gz"; \
@@ -106,5 +106,8 @@ RUN --network=none node deploy/docker/test-ox.mjs
 # Secrets arrive as files under /mnt/secrets-store, which is where resolveSecret looks first.
 # Nothing here carries a credential in ENV, because `docker inspect` can read that.
 
-ENTRYPOINT ["/app/bin/sageox-agent"]
+# tini reaps orphaned processes, which Node as PID 1 never does. Since 0.19.0, ox leaves one
+# behind each command it sends usage telemetry for, so without tini every such call would leave
+# a zombie until the container restarts. `-s` makes tini reap them even when it is not PID 1.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/app/bin/sageox-agent"]
 CMD ["doctor"]

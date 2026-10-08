@@ -168,14 +168,20 @@ function gitEnvironment(repo: RepoSpec, secretsDir?: string): NodeJS.ProcessEnv 
   };
 }
 
-/** Isolate the code index's data and prevent indexing from starting a ledger-sync daemon. */
-function oxEnvironment(dataHome: string): NodeJS.ProcessEnv {
+/**
+ * Isolate the code index's data and prevent indexing from starting a ledger-sync daemon.
+ * `clientId` is the agent's `oxClientId`, so these calls report under the same ID as its
+ * team brain's.
+ */
+function oxEnvironment(dataHome: string, clientId?: string): NodeJS.ProcessEnv {
   return {
-    ...passthroughEnv(process.env),
+    // The operator's opt-out from ox's usage telemetry, which is otherwise on.
+    ...passthroughEnv(process.env, ["DO_NOT_TRACK"]),
     CI: "true",
     XDG_DATA_HOME: dataHome,
     SAGEOX_DAEMON: "false",
     OX_NO_DAEMON: "1",
+    ...(clientId ? { SAGEOX_CLIENT_ID: clientId } : {}),
   };
 }
 
@@ -368,7 +374,7 @@ export interface RepoWorkspace {
 /** Prepares the workspace directories and the initial readings. Starts nothing — see `warm`. */
 export function createRepoWorkspace(
   repos: RepoSpec[],
-  options: { root: string; secretsDir?: string; run?: CommandRunner },
+  options: { root: string; secretsDir?: string; run?: CommandRunner; oxClientId?: string },
 ): RepoWorkspace {
   if (!repos.length) throw new Error("cannot start an empty repository workspace");
   const run = options.run ?? systemRunner;
@@ -432,7 +438,7 @@ export function createRepoWorkspace(
       }
 
       enter("indexing");
-      const oxEnv = oxEnvironment(dataHome);
+      const oxEnv = oxEnvironment(dataHome, options.oxClientId);
       await run("ox", ["index", "code", "--json"], {
         cwd: state.path,
         env: oxEnv,
@@ -505,7 +511,7 @@ export function createRepoWorkspace(
             ["code", "search", query, "--json", "--limit", String(limit)],
             {
               cwd: state.path,
-              env: oxEnvironment(dataHome),
+              env: oxEnvironment(dataHome, options.oxClientId),
               timeout: 60_000,
               maxBuffer: 8 * 1024 * 1024,
             },
@@ -538,7 +544,7 @@ export function createRepoWorkspace(
             ["code", "insights", "--json", "--days", String(days), "--limit", String(limit)],
             {
               cwd: state.path,
-              env: oxEnvironment(dataHome),
+              env: oxEnvironment(dataHome, options.oxClientId),
               timeout: 60_000,
               maxBuffer: 8 * 1024 * 1024,
             },

@@ -7,7 +7,7 @@ around it. A deployment target must preserve this contract instead of translatin
 | Concern | Contract |
 |---|---|
 | Agent definition | Supply one complete bundle directory; its host location is not part of the contract. |
-| Process | Run the image entrypoint with `run --bundle <directory>`. |
+| Process | Run the image entrypoint with `run --bundle <directory>`. It starts the gateway under `tini`, which reaps the processes ox leaves behind; a container that replaces it needs an init that does the same. |
 | Credentials | Mount one file per `secretRef` under `/mnt/secrets-store` — the path is fixed, not a target's to choose, because the bundle's own `settings.json` denies the brain that directory by name and no target can see that file. Never place secret values in generated manifests. A missing one is a failed launch, not a degraded run: `run` checks every declared reference before it connects, and names each one it could not resolve. |
 | Encrypted vaults | When a brain declares `age`, provide the `age` binary and mount its `identitySecret` only where decryption is allowed; the public recipient remains in the bundle. Without the identity, plaintext remains available and encrypted slices are denied. The project image already includes `age`. |
 | Mutable state | The agent directory is writable and durable. It holds cursors, local memory, repository checkouts, and code indexes across restarts. |
@@ -254,8 +254,12 @@ brain subprocess. Kubernetes secret sourcing does not create a filesystem bounda
 future hardened tier must isolate those processes.
 
 The runtime runs `ox index code` and verifies `ox code status`; it does not run `ox daemon`,
-which also ingests and publishes. Ledgers sync through the bounded `ox sync --read-only`
-described below, which is not the repository-index readiness mechanism either.
+which also ingests and publishes. It leaves ox's usage telemetry on. For an agent with a team
+brain, every ox call carries one `SAGEOX_CLIENT_ID`, hashed from the team and the agent's name,
+which ox reports usage under. `DO_NOT_TRACK=1` in the gateway's environment turns the telemetry off, because the
+gateway passes it to every ox call.
+Ledgers sync through the bounded `ox sync --read-only` described below, which is not the
+repository-index readiness mechanism either.
 
 `team_status` checks team-search access and each synced repository's ledger.
 `team_sessions` reads the selected repository's last seven days of sessions, bounded to
@@ -290,7 +294,7 @@ including across pods. The source-code index remains owned by repository warmup.
 
 This needs a team access token (`oxt_`, which ox requires for ledger reads), ox 0.17.0 or
 newer, and ledger reads enabled for the team on the SageOx endpoint. The base image pins ox
-0.17.0 and the gateway refuses to sync with an older one.
+0.20.0, and the gateway refuses to sync with one older than 0.17.0.
 
 Repositories listed in [`ledgerSync`](guide/reference.md#syncing-from-an-explicit-git-remote)
 keep the earlier mechanism, a pull-only sparse checkout of sessions and murmurs from a named
@@ -324,7 +328,7 @@ Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existin
 
 | Case | Coverage / remaining work |
 |---|---|
-| Pinned ox contract | The base image pins ox 0.17.0, and its compatibility test checks `--version`, the guarded readers' refusal, and the read-sync receipt. The gateway refuses to sync with an older ox. |
+| Pinned ox contract | The base image pins ox 0.20.0, and its compatibility test checks `--version`, the guarded readers' refusal, and the read-sync receipt. The gateway refuses to sync with ox older than 0.17.0. |
 | Team-token-only setup | Tested with a fake ox: sync needs only the team token, the configured repositories, and the isolated data home. Verified live: from an empty data home, a 427-session ledger synced with only the team token and a configured repository, and both readers answered from it. |
 | Per-read authorization | Tested: an exact-repository check before each read; an unlinked repository, a revoked token, a mount replaced during the read, a mount that never settles, and a replacement after handoff. |
 | Freshness and failure classes | Tested: fresh, old, missing, invalid, and future sync times; `denied`, `unavailable`, `missing_ledger`, `missing_hydration`, `incomplete_history`, `incomplete_coverage`, `dirty`, `interrupted`, and unknown classes. A resumable first sync reports `initializing` in `team_status` and `Warming` capability health. |
@@ -334,7 +338,7 @@ Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existin
 | `ledgerSync` | Unchanged, and tested beside team-token repositories. ox refuses a `ledgerSync` checkout, so moving a repository to team-token sync means deleting its checkout; the fresh sync that follows has not run against a live backend. |
 | Recent activity | Tested: over the team token, work updates are listed only from 11 hours before the window's end, which `work_updates_since` states; a `ledgerSync` repository lists them across the whole window. |
 
-The runtime build checks the installed ox 0.17.0 binary with an
+The runtime build checks the installed ox 0.20.0 binary with an
 [offline compatibility smoke test](../deploy/docker/test-ox.mjs) on both architectures.
 It exercises `status`, empty and populated `team list`, `session list`, and `glance`
 responses, the hosted-ledger calls' refusals and read-sync receipt, plus indexing,
@@ -346,7 +350,7 @@ gateway's explicit `AGENT_ENV=claude-code` context, retained from the ox 0.14.3 
 for its inherited `--json` flag. These checks establish CLI output compatibility, not live
 sync or migration parity. #24 remains open.
 
-The ox 0.17.0 `glance` check covers populated and empty ledgers.
+The ox 0.20.0 `glance` check covers populated and empty ledgers.
 `team_recent` passes absolute `--since`/`--until` bounds and validates
 the returned repository, window, timestamps, and counts. It projects work updates and
 session activity without forwarding generated collision advice or prompt guidance. The
