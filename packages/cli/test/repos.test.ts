@@ -68,7 +68,7 @@ private https://github.com/acme/service
 });
 
 describe("repository warmup", () => {
-  it("returns immediately, then clones, indexes, canaries, and searches with the same data home", async () => {
+  it("returns immediately, then clones, indexes, canaries, searches, and reads insights with the same data home", async () => {
     const root = mkdtempSync(join(tmpdir(), "sageox-agent-repos-"));
     roots.push(root);
     const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
@@ -102,11 +102,13 @@ describe("repository warmup", () => {
 
       const result = await workspace.search("author gate", 5);
       expect(result).toContain("src/a.ts");
+      await workspace.insights(14, 10);
       expect(calls.map((call) => [call.command, ...call.args].slice(0, 3).join(" "))).toEqual([
         "git clone https://github.com/acme/service",
         "ox index code",
         "ox code status",
         "ox code search",
+        "ox code insights",
       ]);
       const clone = calls.find((call) => call.command === "git")!;
       expect(clone.env.GIT_CONFIG_KEY_0).toBe("core.hooksPath");
