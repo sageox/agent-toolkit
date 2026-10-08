@@ -27,6 +27,7 @@ import {
   serveVaultBrain,
   Vault,
   makeOxTeam,
+  oxClientId,
   serveTeamBrain,
   type HostedMcp,
   type TeamBrain,
@@ -511,6 +512,7 @@ async function buildBrain(
       teamBrain = makeOxTeam({
         team: cfg.team,
         repo: cfg.repo,
+        clientId: oxClientId(cfg.team, manifest.name),
         repositories: codeWorkspace?.states.map(({ dirName, path, url }) => ({ name: dirName, path, url })),
         dataHome: codeWorkspace ? join(agentDir, "workspace", "ox-data") : undefined,
         ledgerSync: cfg.ledgerSync?.map(({ token, ...remote }) => ({
@@ -1376,9 +1378,14 @@ async function runCmd(argv: string[]): Promise<void> {
   const policy = manifest.brain.provider !== "mock" && manifest.tools
     ? loadToolPolicy(readFileSync(resolve(agent.dir, manifest.tools), "utf8"))
     : undefined;
+  const teamBrain = manifest.brains.find((b) => b.preset === "team");
   const codeWorkspace =
     repos.length && manifest.brain.provider !== "mock"
-      ? createRepoWorkspace(repos, { root: join(agent.dir, "workspace"), secretsDir })
+      ? createRepoWorkspace(repos, {
+          root: join(agent.dir, "workspace"),
+          secretsDir,
+          oxClientId: teamBrain?.preset === "team" ? oxClientId(teamBrain.team, manifest.name) : undefined,
+        })
       : undefined;
 
   // The startup verdict, and the only thing in this process allowed to refuse a launch.
@@ -2549,7 +2556,10 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
     const teamBrain = manifest.brains.find((b) => b.preset === "team");
     if (teamBrain?.preset === "team") {
       const tokenRef = teamBrain.token ?? DEFAULT_OX_TOKEN_SECRET;
-      const ox = await oxStatus({ token: () => resolveSecret(tokenRef, { dir: secretsDir }) });
+      const ox = await oxStatus({
+        token: () => resolveSecret(tokenRef, { dir: secretsDir }),
+        clientId: oxClientId(teamBrain.team, manifest.name),
+      });
       if (!ox.installed) {
         problems.push("a team brain is configured but the `ox` CLI is not installed — it cannot search");
       } else if (!ox.authenticated) {

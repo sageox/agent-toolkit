@@ -893,6 +893,12 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
 export interface OxScope {
   team?: string;
   repo?: string;
+  /**
+   * The agent's {@link oxClientId}, which ox sends its usage telemetry under. Without it a
+   * token call sends none: ox keeps its own ID under `$XDG_CONFIG_HOME/sageox`, which
+   * {@link oxEnv} points at the null device, and skips an event it cannot keep an ID for.
+   */
+  clientId?: string;
   /** Runtime repository allowlist from repos.conf; paths never come from a tool call. */
   repositories?: readonly TeamRepository[];
   /** The same isolated ox data home used by this agent's repository workspace. */
@@ -949,6 +955,8 @@ export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): No
   const env = passthroughEnv(base, [
     "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
     "SAGEOX_TOKEN", "SAGEOX_ENDPOINT",
+    // The operator's opt-out from ox's usage telemetry, which is otherwise on.
+    "DO_NOT_TRACK",
   ]);
   if (scope.dataHome) {
     env.XDG_DATA_HOME = scope.dataHome;
@@ -957,6 +965,7 @@ export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): No
   // Read commands must not auto-start ox's daemon: it also publishes pending data.
   env.SAGEOX_DAEMON = "false";
   env.OX_NO_DAEMON = "1";
+  if (scope.clientId) env.SAGEOX_CLIENT_ID = scope.clientId;
   if (scope.ledgerSync?.length && scope.dataHome) {
     env.XDG_STATE_HOME = join(scope.dataHome, "state");
     env.XDG_RUNTIME_DIR = join(scope.dataHome, "run");
@@ -974,6 +983,19 @@ export function oxEnv(scope: OxScope, base: NodeJS.ProcessEnv = process.env): No
     env.XDG_CONFIG_HOME = devNull;
   }
   return env;
+}
+
+/**
+ * The ID every ox call for one agent reports its usage telemetry under, as `SAGEOX_CLIENT_ID`:
+ * a UUID hashed from the agent's team and name. It needs no stored state, so it holds across
+ * restarts, pods and token rotation. Two deployments of one name on one team share it.
+ */
+export function oxClientId(team: string, agent: string): string {
+  const hash = createHash("sha256").update(`sageox-agent\0${team}\0${agent}`).digest();
+  hash[6] = (hash[6] & 0x0f) | 0x80; // version 8, RFC 9562's custom UUID
+  hash[8] = (hash[8] & 0x3f) | 0x80; // RFC 9562 variant
+  const hex = hash.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /**
