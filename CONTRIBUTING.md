@@ -16,9 +16,10 @@ Both are first-class ways to contribute — pick whichever fits:
 
 ## Setting up
 
-The repository uses Node.js 22, pnpm 10, and [`age`](https://age-encryption.org/)
-— the vault tests exercise encrypted `*.md.age` slices through the real `age` and
-`age-keygen` binaries. With those installed:
+The repository uses Node.js 22.12+, 24, or 26+ (the lines Vitest 5 supports),
+pnpm 10, and [`age`](https://age-encryption.org/) — the vault tests exercise
+encrypted `*.md.age` slices through the real `age` and `age-keygen` binaries.
+With those installed:
 
 ```bash
 pnpm install --frozen-lockfile
