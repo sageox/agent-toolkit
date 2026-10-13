@@ -20,10 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mid-transfer, and a refresh stopped there as a failed sync. Both showed as a checkout missing
   part of its history.
 
-  A job body that runs ox itself gets 0.23.0 too. An unknown subcommand such as `ox plan foo`
-  now exits 1 where it printed help and exited 0, `ox init` exits non-zero when ox is not
-  signed in, and `ox plan feedback show --json` prints an object whose `items` field holds what
-  was the whole array. Under a team token with no AI coworker attached, `ox murmur` refuses.
+  A job body that runs ox itself gets 0.23.0 too. An unknown subcommand of a group with no
+  action of its own, such as `ox code foo` or `ox plan foo`, now exits 1 where it printed the
+  group's help and exited 0; `ox init` exits non-zero when ox is not signed in; and
+  `ox plan feedback show --json` prints an object whose `items` field holds what was the whole
+  array. Under a team token with no AI coworker attached, `ox murmur` refuses.
 
 ## [0.9.0] - 2026-10-08
 
