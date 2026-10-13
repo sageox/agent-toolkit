@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The agent base image ships `ox` 0.23.0.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.20.0. The ox calls the toolkit makes — `status`,
+  `team list`, `query`, `session list`, `glance`, `sync --read-only`, `index code`,
+  `code status`, `code search` and `code insights` — take the same flags and return the same
+  fields on 0.23.0, so nothing that reads them changes. A code index that 0.20.0 built is
+  updated in place by the first warmup after the upgrade.
+
+  When a team-token ledger sync's 30-minute attempt ends while ox is checking the checkout's
+  history, ox now reports `interrupted` instead of `incomplete_history` (sageox/ox#1071). A
+  first sync stopped there now shows in `team_status` as initializing, like one stopped
+  mid-transfer, and a refresh stopped there as a failed sync. Both showed as a checkout missing
+  part of its history.
+
+  A job body that runs ox itself gets 0.23.0 too. An unknown subcommand such as `ox plan foo`
+  now exits 1 where it printed help and exited 0, `ox init` exits non-zero when ox is not
+  signed in, and `ox plan feedback show --json` prints an object whose `items` field holds what
+  was the whole array. Under a team token with no AI coworker attached, `ox murmur` refuses.
+
 ## [0.9.0] - 2026-10-08
 
 Everything below shipped after `v0.8.0`.
