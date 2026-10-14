@@ -12,12 +12,12 @@
     "typecheck": "tsc --noEmit && pnpm -r exec tsc --noEmit"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2",
-    "@types/ws": "^8.18.1",
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
     "vitest": "^5.0.3",
-    "ws": "^8.21.3"
+    "ws": "^8.22.0"
   }
 }
