@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anything reading the label to decide what a missing key breaks had to treat a key
   only the jobs read as one the agent itself needs. A deploy preflight keyed on it
   hard-stopped an agent's deploy over a job key nobody had seeded yet. Nothing in the
-  chart selects on that label.
+  chart selects on that label. An agent name longer than 58 characters is cut in that
+  label so it stays within Kubernetes' 63-character limit.
 
 ## [0.6.0] - 2026-09-14
 

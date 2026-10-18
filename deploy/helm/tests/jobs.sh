@@ -425,6 +425,33 @@ spc_component() {
 [ "$(spc_component harry-agent)" = '"harry"' ] || fail 'harry-agent class is not component "harry"'
 [ "$(spc_component harry-job)" = '"harry-jobs"' ] || fail 'harry-job class is not component "harry-jobs"'
 
+# The longest agent name the schema admits (63) must still give the job class a valid label.
+# Kubernetes caps a label value at 63 characters, and `helm template` does not check it: an
+# overlong one renders here and is refused by the API server at apply time.
+long=$(printf '%063d' 0 | tr 0 a)
+cat > "$work/long.yaml" <<YAML
+agents:
+  $long:
+    bundle: { volume: { configMap: { name: agent-long-bundle } } }
+    serviceAccount: { create: true, name: "" }
+    secrets: { kubernetesSecret: agent-long, csi: { secretProviderClass: "" } }
+    jobSecrets: { kubernetesSecret: "", csi: { secretProviderClass: long-job, provider: aws } }
+    persistence: { size: 1Gi }
+    jobs:
+      - slug: sweep
+        suspend: true
+        trigger: { schedules: ["0 3 * * 0"], timezone: UTC }
+        budget: { wallClockMs: 3600000, deadlineHeadroomMs: 300000 }
+    terminationGracePeriodSeconds: 130
+    resources: {}
+    sharedVolumes: []
+YAML
+rendered=$(helm template agents "$chart" --values "$values" --values "$work/long.yaml" \
+  --show-only templates/secretproviderclass.yaml)
+label=$(spc_component long-job | tr -d '"')
+[ -n "$label" ] && [ "${#label}" -le 63 ] && [ "${label%-jobs}" != "$label" ] \
+  || fail "long-job class component '$label' is not a valid label ending in -jobs"
+
 refuses "one agent creating one class from both its sources" \
   "harry/secrets and harry/jobSecrets would both create a SecretProviderClass named harry-agent" \
   --values "$csi" --set agents.harry.jobSecrets.csi.secretProviderClass=harry-agent
