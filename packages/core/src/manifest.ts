@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { parse as parseYaml } from "yaml";
 import { SECRET_REF } from "./secrets.ts";
+import { formatProblems } from "./digest.ts";
 import { HistoryArgs } from "./surface-read.ts";
 
 /**
@@ -923,9 +924,27 @@ export const JobSchema = z
      * `read_channel`'s own arguments and bounds, with the window required: without one an
      * empty read is a fact about the channel's whole history, not about a period. `empty` is
      * what is posted, with no turn at all, when the whole window was read and held nothing.
+     *
+     * The rest is the digest's layout, which is the job's: `title` is posted first, `line` once
+     * per item, and `quiet` after a whole read when some author got no line. The host fills
+     * in only what it checked — `{text}`, `{authors}` of the messages a line cites, `{author}`
+     * under `byAuthor`, and the quiet `{authors}` — and refuses any other field at load.
+     * `byAuthor` makes every line one author's and no author's twice. The default `line` is
+     * the layout from before there was one to choose.
      */
     source: HistoryArgs.required({ withinHours: true })
-      .extend({ empty: z.string().trim().min(1) })
+      .extend({
+        empty: z.string().trim().min(1),
+        title: z.string().trim().min(1).optional(),
+        line: z.string().trim().min(1).default("• {text} — {authors}"),
+        quiet: z.string().trim().min(1).optional(),
+        byAuthor: z.boolean().default(false),
+      })
+      .superRefine((source, ctx) => {
+        for (const [field, problem] of formatProblems(source)) {
+          ctx.addIssue({ code: "custom", message: problem, path: [field] });
+        }
+      })
       .optional(),
     /**
      * Values a caller may hand one run of this job, by name. See {@link JobParameterSchema}.
