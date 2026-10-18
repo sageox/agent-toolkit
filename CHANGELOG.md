@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-17
+
+Everything below shipped after `v0.9.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.10.0` takes `:latest` and `:0.10`. `:0.9` stays
+on 0.9.0. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+A minor rather than a patch because an agent that moves from 0.9.0 without changing its
+configuration still behaves differently: a job body that runs ox itself gets ox 0.23.0's exit
+codes and output shapes, and a digest's items may run to 1000 characters. A digest that sets
+none of the new layout fields posts as before. Helm chart 0.15.0 and
+`deploy/docker/compose.yaml` need no change: the chart's templates and values and the compose
+file are as they were in v0.9.0.
+
 - **A digest job now lays out its own post.** The host posted every digest as
   `• text — authors`, so changing how one agent's digest read meant changing the toolkit. A
   `source` now takes `title`, `line` and `quiet`, written in the job's own words: the host fills
