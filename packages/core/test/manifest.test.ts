@@ -1154,6 +1154,7 @@ describe("a job whose body is a prompt", () => {
   it("refuses a layout naming a field the host does not fill, which would post as nothing", () => {
     for (const [layout, why] of [
       ["line: '{txt}'", /`\{txt\}` is not filled in here; line takes \{text\}, \{authors\}, \{author\}/],
+      ["line: '{text} {author-name}'", /`\{author-name\}` is not filled in here/],
       ["line: '{author}: {text}'", /`\{author\}` needs `byAuthor: true`/],
       ["title: 'Digest for {authors}'", /title takes nothing/],
       ["quiet: 'Quiet: {text}'", /quiet takes \{authors\}/],

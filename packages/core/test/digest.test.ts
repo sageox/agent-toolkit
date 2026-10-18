@@ -70,6 +70,26 @@ describe("acceptDigest", () => {
       ok: false,
       reason: "item 1 cites 2 authors, and a line is one author's",
     });
+    // Two authors who share a name are still two authors.
+    const namesake = { author: { ...bo, id: "U0BO2" }, text: "merged", ts: "2026-09-10T13:00:00.000Z" };
+    const twoBos = { ...history, messages: [...history.messages, namesake] };
+    expect(acceptDigest(digest({ text: "merged", refs: [2, 5] }), twoBos, byAuthor)).toMatchObject({
+      ok: false,
+      reason: "item 1 cites 2 authors, and a line is one author's",
+    });
+  });
+
+  it("can give every author a line in the busiest read there is", () => {
+    const busy: ChannelHistory = {
+      messages: Array.from({ length: 200 }, (_, i) => ({
+        author: { surface: "slack", id: `U${i}`, isSelf: false, isAgent: true, name: `a${i}` },
+        text: `merged https://example.test/pr/${i}`,
+        ts: "2026-09-10T09:00:00.000Z",
+      })),
+      more: false,
+    };
+    const items = busy.messages.map((message, i) => ({ text: message.text, refs: [i + 1] }));
+    expect(acceptDigest(JSON.stringify({ items }), busy, byAuthor).ok).toBe(true);
   });
 
   it("refuses to call an author quiet who posted a link", () => {

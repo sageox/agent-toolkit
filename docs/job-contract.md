@@ -600,7 +600,8 @@ there would keep `post_message` and could publish an answer that never passed th
 { "items": [ { "text": "merged the release fix (https://example.test/pull/110)", "refs": [3, 5] } ] }
 ```
 
-One to 50 items, each `text` one line of at most 1000 characters, each `refs` naming at least
+One to 200 items — as many as a read holds messages — each `text` one line of at most
+1000 characters, each `refs` naming at least
 one message this read returned — so there is no line for an author who posted nothing — and
 every link in a line present in a message that line cites. Anything else is not a digest, and
 the refusal goes back to the turn as a guard refusal does, to be repaired inside its own clock

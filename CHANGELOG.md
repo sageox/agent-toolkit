@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list of them. With `quiet` set, an answer that gives no line to an author who posted a link is
   refused rather than posted with that author called quiet. A field the host does not fill is
   refused at load. `line` defaults to `• {text} — {authors}`, so a job that sets none of these
-  posts as before. A line may hold 1000 characters instead of 500.
+  posts as before. An item may hold 1000 characters instead of 500, and an answer 200 items
+  instead of 50, so a full read can give every author a line.
 
 - **The agent base image ships `ox` 0.23.0.** `OX_VERSION` and both architecture checksums in
   `deploy/docker/Dockerfile` move up from 0.20.0. The ox calls the toolkit makes — `status`,
