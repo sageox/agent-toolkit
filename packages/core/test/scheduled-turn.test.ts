@@ -727,6 +727,8 @@ describe("a job with a source", () => {
       read?: (gateway: Gateway) => Promise<ChannelHistory>;
       post?: SurfaceAdapter["post"];
       limits?: string;
+      /** More `source` fields, written as YAML flow entries after a comma. */
+      layout?: string;
       stopped?: boolean;
       /** More of the test's clock to run after the tick, for what arrives late. */
       after?: number;
@@ -740,7 +742,8 @@ describe("a job with a source", () => {
         `jobs: [{slug: daily-digest, archetype: watch, description: 'One post.', ` +
         `trigger: {schedules: ["0 18 * * *"], timezone: UTC}, killSwitch: {failDirection: closed}, ` +
         `prompt: 'Summarize the day.', ` +
-        `source: {surface: slack, channel: status, withinHours: 24, empty: 'Nothing in status today.'}, ` +
+        `source: {surface: slack, channel: status, withinHours: 24, empty: 'Nothing in status today.'` +
+        `${opts.layout ?? ""}}, ` +
         `report: {surface: slack, channel: hive}}]\n`,
     );
     const [job] = manifest.jobs;
@@ -854,6 +857,20 @@ describe("a job with a source", () => {
         { gate: "job:daily-digest:post", executed: true, exit_code: 0, source: "host" },
       ],
     });
+  });
+
+  it("posts the digest in the layout the job declares", async () => {
+    const r = await fire({
+      replies: [GOOD],
+      layout: ", title: '*Status today*', line: '{authors}: {text}', byAuthor: true",
+    });
+
+    expect(r.posts).toEqual([
+      {
+        channel: "C01",
+        text: "*Status today*\nada: merged the fix (https://example.test/pr/7).\nbo: the deploy is green",
+      },
+    ]);
   });
 
   it.each([

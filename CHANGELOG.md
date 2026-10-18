@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A digest job now lays out its own post.** The host posted every digest as
+  `• text — authors`, so changing how one agent's digest read meant changing the toolkit. A
+  `source` now takes `title`, `line` and `quiet`, written in the job's own words: the host fills
+  in only `{text}` and the facts it checked — `{authors}` of the messages a line cites, and the
+  authors a whole read gave no line. `byAuthor: true` holds the answer to one line per author,
+  which a job's words alone cannot: one that asked for an item per pull request posted a flat
+  list of them. With `quiet` set, an answer that gives no line to an author who posted a link is
+  refused rather than posted with that author called quiet. A field the host does not fill is
+  refused at load. `line` defaults to `• {text} — {authors}`, so a job that sets none of these
+  posts as before. An item may hold 1000 characters instead of 500, and an answer 200 items
+  instead of 50, so a full read can give every author a line.
+
 - **The agent base image ships `ox` 0.23.0.** `OX_VERSION` and both architecture checksums in
   `deploy/docker/Dockerfile` move up from 0.20.0. The ox calls the toolkit makes — `status`,
   `team list`, `query`, `session list`, `glance`, `sync --read-only`, `index code`,

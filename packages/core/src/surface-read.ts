@@ -39,7 +39,7 @@ const MAX_MEMBERS = 200;
  * One Slack page's worth: `conversations.history` answers newest first, so a single page of
  * this size is the recent end of the channel — which is the question a channel read asks.
  */
-const MAX_MESSAGES = 200;
+export const MAX_MESSAGES = 200;
 
 const MS_PER_HOUR = 3_600_000;
 

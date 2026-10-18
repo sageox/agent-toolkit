@@ -1132,6 +1132,9 @@ describe("a job whose body is a prompt", () => {
       channel: "C01",
       withinHours: 24,
       empty: "Quiet day.",
+      // The layout from before a job could choose one.
+      line: "• {text} — {authors}",
+      byAuthor: false,
     });
     for (const bad of [
       "{surface: slack, channel: C01, empty: 'Quiet day.'}", // no window for an empty read to be about
@@ -1146,6 +1149,23 @@ describe("a job whose body is a prompt", () => {
         withJob({ prompt: undefined, run: "{command: node}", budget: "{wallClockMs: 1000}", source }),
       ),
     ).toThrow(/`run` body, so it declares no `source`/);
+  });
+
+  it("refuses a layout naming a field the host does not fill, which would post as nothing", () => {
+    for (const [layout, why] of [
+      ["line: '{txt}'", /`\{txt\}` is not filled in here; line takes \{text\}, \{authors\}, \{author\}/],
+      ["line: '{text} {author-name}'", /`\{author-name\}` is not filled in here/],
+      ["line: '{author}: {text}'", /`\{author\}` needs `byAuthor: true`/],
+      ["title: 'Digest for {authors}'", /title takes nothing/],
+      ["quiet: 'Quiet: {text}'", /quiet takes \{authors\}/],
+    ] as const) {
+      const source = `{surface: slack, channel: C01, withinHours: 24, empty: x, ${layout}}`;
+      expect(() => loadManifest(withJob({ source })), layout).toThrow(why);
+    }
+    const source =
+      "{surface: slack, channel: C01, withinHours: 24, empty: x, byAuthor: true, " +
+      "line: '{author}: {text}', quiet: 'Quiet: {authors}'}";
+    expect(() => loadManifest(withJob({ source }))).not.toThrow();
   });
 
   it("refuses a source on the brain whose turn cannot be sealed", () => {
