@@ -412,6 +412,18 @@ rendered=$(helm template agents "$chart" --values "$values" --values "$csi" \
 counted 2 "kind: SecretProviderClass"
 present "name: harry-agent"
 present "name: harry-job"
+# Each class's own component, read per document: a count of the two labels would still pass
+# with them swapped. A consumer that blocks the agent on a missing key must not block it on a
+# key only its scheduled jobs mount, and this label is the only way it can tell which is which.
+spc_component() {
+  awk -v want="$1" '
+    /^---/ { name = "" }
+    /^  name:/ { name = $2 }
+    /app\.kubernetes\.io\/component:/ && name == want { print $2 }
+  ' <<<"$rendered"
+}
+[ "$(spc_component harry-agent)" = '"harry"' ] || fail 'harry-agent class is not component "harry"'
+[ "$(spc_component harry-job)" = '"harry-jobs"' ] || fail 'harry-job class is not component "harry-jobs"'
 
 refuses "one agent creating one class from both its sources" \
   "harry/secrets and harry/jobSecrets would both create a SecretProviderClass named harry-agent" \

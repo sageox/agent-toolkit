@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owner secret, which never enters the pod. Omit it to leave an agent
   "owner unavailable" (the prior behavior). Values-only and backward compatible.
 
+### Changed
+
+- Helm: an agent's `jobSecrets` SecretProviderClass is labeled
+  `app.kubernetes.io/component: <agent>-jobs`; its `secrets` class keeps `<agent>`.
+  Only scheduled job Pods mount the job class, but both carried the agent's name, so
+  anything reading the label to decide what a missing key breaks had to treat a key
+  only the jobs read as one the agent itself needs. A deploy preflight keyed on it
+  hard-stopped an agent's deploy over a job key nobody had seeded yet. Nothing in the
+  chart selects on that label.
+
 ## [0.6.0] - 2026-09-14
 
 Everything below shipped after `v0.5.2`.
