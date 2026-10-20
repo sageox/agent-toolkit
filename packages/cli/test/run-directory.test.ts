@@ -7,9 +7,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   DIRECTORY_KIND,
   generateKeypair,
+  LocalRelay,
   resolveBuzzSigner,
 } from "@sageox/agent-toolkit-adapter-buzz";
-import { FakeRelay } from "../../adapter-buzz/test/fake-relay.ts";
 import { CLI } from "./cli-harness.ts";
 
 const identity = generateKeypair();
@@ -30,7 +30,7 @@ async function held(content: Record<string, unknown>) {
 }
 
 describe("run reconciles the directory record", () => {
-  let relay: FakeRelay;
+  let relay: LocalRelay;
   let home: string;
   let agent: ChildProcess | undefined;
   let agentClosed: Promise<unknown> | undefined;
@@ -81,7 +81,7 @@ describe("run reconciles the directory record", () => {
   // where a client looks to decide whether a mention may be sent at all — a distinction that
   // has nothing to do with whether the channel is private.
   it("publishes the allowlist and channels the manifest names, with no re-registration", async () => {
-    relay = await FakeRelay.start({
+    relay = await LocalRelay.start({
       requireAuth: true,
       backlog: [
         await held({
@@ -134,7 +134,7 @@ surfaces:
   // turn would leave it listing `late` alone, and a mention in `early` would be stripped at
   // send — the exact failure this reconcile exists to prevent, caused by the reconcile.
   it("unions the channels of two surfaces that resolve to one record", async () => {
-    relay = await FakeRelay.start({
+    relay = await LocalRelay.start({
       requireAuth: true,
       backlog: [
         await held({ name: "demo", channel_ids: [], respond_to: "anyone" }),
@@ -168,7 +168,7 @@ surfaces:
 });
 
 /** What `run` published, or the launch output that explains why it never did. */
-async function waitForRecord(relay: FakeRelay, output: () => string): Promise<unknown> {
+async function waitForRecord(relay: LocalRelay, output: () => string): Promise<unknown> {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     const record = relay.published.find((event) => event.kind === DIRECTORY_KIND);

@@ -21,6 +21,7 @@ with their own runtime image, durable status and cancellation, see [external job
 | `JOB_HARNESS_TIMEOUT_MS` · `JOB_MAX_ITERATIONS` · `JOB_MAX_ATTEMPTS` · `JOB_MAX_SPEND_USD` · `JOB_MODEL` | The declared bounds the runtime cannot enforce for you. It can hold a job to a clock without knowing what it does; it cannot count an iteration or a dollar. |
 | `JOB_PARAM_<NAME>` | One per parameter this run was given, uppercased. Already validated against the declaration — see below. Absent when the run was given none. |
 | `JOB_CHANNEL_URL` · `JOB_CHANNEL_TOKEN` | Where this run talks to its report channel, for a job declaring `report.probe`. Absent for every other job. |
+| `JOB_REHEARSAL` | `1` when the run was started with `--rehearse`: its posts go to a relay inside the host's process, and every secret the operator did not give it is unset. A body that publishes on a credential of its own can skip that step on this instead of failing at it. Empty otherwise, and never taken from `run.env`. |
 
 **And nothing else you did not ask for.** A job body's environment is declared, not
 inherited: it starts from `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ` and `TMPDIR`, and grows

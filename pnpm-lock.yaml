@@ -38,6 +38,9 @@ importers:
       nostr-tools:
         specifier: ^2.24.2
         version: 2.25.0(typescript@7.0.2)
+      ws:
+        specifier: ^8.21.3
+        version: 8.21.3
 
   packages/adapter-console:
     dependencies:

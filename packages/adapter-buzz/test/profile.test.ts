@@ -3,7 +3,7 @@ import { createServer, type Socket } from "node:net";
 import { nip19 } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools/pure";
 import { DIRECTORY_KIND, mergeDirectoryContent, publishDirectory } from "../src/profile.ts";
-import { FakeRelay } from "./fake-relay.ts";
+import { LocalRelay } from "../src/local-relay.ts";
 
 const anyone = { name: "demo", channelIds: ["c1"], respondTo: "anyone" as const };
 
@@ -71,7 +71,7 @@ const held = (content: Record<string, unknown>) =>
     agentSk,
   );
 
-let relay: FakeRelay;
+let relay: LocalRelay;
 afterEach(async () => {
   await relay?.stop();
 });
@@ -88,7 +88,7 @@ const written = () => relay.published.filter((event) => event.kind === DIRECTORY
 
 describe("publishDirectory", () => {
   it("writes nothing when the relay's copy already says all of this", async () => {
-    relay = await FakeRelay.start({
+    relay = await LocalRelay.start({
       requireAuth: true,
       backlog: [
         held({
@@ -110,7 +110,7 @@ describe("publishDirectory", () => {
   it("republishes when the config names a principal the record omits", async () => {
     // The drift that shipped: a manifest gained a third principal, the record kept two, and
     // the two whose mentions still landed made the agent look healthy.
-    relay = await FakeRelay.start({
+    relay = await LocalRelay.start({
       requireAuth: true,
       backlog: [
         held({

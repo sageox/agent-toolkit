@@ -162,6 +162,7 @@ import {
   type RepoWorkspace,
 } from "./repos.ts";
 import { agentPaths, agentsHome, bundlePaths, listAgents, selectAgentName } from "./home.ts";
+import { leaveTheShell, Rehearsal } from "./rehearse.ts";
 
 type SelectedAgent = ReturnType<typeof agentPaths> & { name: string };
 
@@ -281,6 +282,7 @@ async function buildBrain(
   policy?: ToolPolicy,
   switchSource?: SwitchSource,
   turnClock?: TurnClock,
+  rehearsal = false,
 ): Promise<{
   brain: Brain;
   closeHosted: () => Promise<void>;
@@ -436,6 +438,7 @@ async function buildBrain(
       ...jobWorkEvents(manifest.name),
       switchSource,
       secretOpts: { dir: secretsDir },
+      rehearsal,
       // A job started from chat announces itself exactly as a scheduled one does. The
       // gateway already holds the adapters and the guarded path through them, so this
       // needs none of the connecting `job run` has to do for itself — and without it a
@@ -1351,11 +1354,14 @@ async function probeCmd(argv: string[]): Promise<void> {
 /** Run an agent, warm its read capabilities in the background, and coordinate shutdown. */
 async function runCmd(argv: string[]): Promise<void> {
   const agent = await agentFrom(argv);
+  // Before the agent's `.env` loads, so that and `--secrets` are all a rehearsal holds.
+  const rehearsalDir = hasFlag(argv, "rehearse") ? leaveTheShell() : undefined;
   loadDotEnv(agent.env);
   const secretsDir = secretsDirFrom(argv); // before the chdir below
   const statePath = agent.state;
 
   const manifest = readManifest(agent.config);
+  const rehearsal = rehearsalDir ? await Rehearsal.start(manifest, rehearsalDir) : undefined;
   process.chdir(agent.dir);
 
   // Resolve the spend credential before starting any background network work. A failed
@@ -1369,10 +1375,14 @@ async function runCmd(argv: string[]): Promise<void> {
   // fails where it is first used — and the ones on background paths become a status line
   // rather than a failed launch.
   const declared = declaredSecrets(manifest, repos);
-  for (const secret of requireDeclaredSecrets(declared, { dir: secretsDir })) {
-    process.stdout.write(
-      `  note: ${secret.where}: ${secret.name} does not resolve — ${secret.degraded}\n`,
-    );
+  if (rehearsal) {
+    rehearsal.withheld(declared.map((secret) => secret.name), { dir: secretsDir });
+  } else {
+    for (const secret of requireDeclaredSecrets(declared, { dir: secretsDir })) {
+      process.stdout.write(
+        `  note: ${secret.where}: ${secret.name} does not resolve — ${secret.degraded}\n`,
+      );
+    }
   }
 
   const policy = manifest.brain.provider !== "mock" && manifest.tools
@@ -1425,7 +1435,8 @@ async function runCmd(argv: string[]): Promise<void> {
     });
   }
 
-  const state = loadState(statePath);
+  // The cursor is a position on the real relay, so a rehearsal neither reads nor writes it.
+  const state = rehearsal ? { since: {} } : loadState(statePath);
   const adapters = await buildAdapters(manifest, { secretsDir, since: state.since });
   const egress = new SurfaceEgress({ manifest, adapters });
   // Written by the gateway below, read by the job tool built above it: a job is waited for
@@ -1443,6 +1454,7 @@ async function runCmd(argv: string[]): Promise<void> {
     policy,
     switchSource,
     turnClock,
+    rehearsal !== undefined,
   );
 
   // One lookup, so a credential that was already dead at deploy time is not first noticed
@@ -1497,6 +1509,7 @@ async function runCmd(argv: string[]): Promise<void> {
   // Persist the resume cursor periodically and on exit, so a restart does not reopen a
   // deaf window over the messages that arrived while the process was down.
   const persist = () => {
+    if (rehearsal) return;
     for (const a of adapters) {
       const cursor = a.cursor?.();
       if (cursor !== undefined) state.since[a.kind] = cursor;
@@ -1541,6 +1554,10 @@ async function runCmd(argv: string[]): Promise<void> {
   // reading the record, so it should agree with this config before anybody can send one.
   await reconcileDirectories(manifest, secretsDir);
 
+  // Unless a console surface is already reading stdin.
+  if (rehearsal && !manifest.surfaces.some((s) => s.kind === "console")) {
+    rehearsal.chat(adapters, () => void gw.drain().then(shutdown));
+  }
   await gw.start();
   await starting; // report a brain that never came up, now that we are listening
   // After the surfaces are up: a tick whose turn landed before them would post through an
@@ -1549,7 +1566,7 @@ async function runCmd(argv: string[]): Promise<void> {
   const surfaces = manifest.surfaces.map((s) => s.kind).join(", ");
   const model = manifest.brain.model ? ` model=${manifest.brain.model}` : "";
   process.stdout.write(
-    `sageox-agent "${manifest.name}" is live — brain=${manifest.brain.provider}${model} surfaces=[${surfaces}] respondTo=${manifest.respondTo}\n`,
+    `sageox-agent "${manifest.name}" is ${rehearsal ? "rehearsing" : "live"} — brain=${manifest.brain.provider}${model} surfaces=[${surfaces}] respondTo=${manifest.respondTo}\n`,
   );
 }
 
@@ -1969,6 +1986,8 @@ async function jobCmd(argv: string[]): Promise<void> {
   }
 
   const agent = await agentFromFlag(argv);
+  // Before the agent's `.env` loads, so that and `--secrets` are all a rehearsal holds.
+  const rehearsalDir = hasFlag(argv, "rehearse") ? leaveTheShell() : undefined;
   loadDotEnv(agent.env);
   const secretsDir = secretsDirFrom(argv); // before the chdir below
   const manifest = readManifest(agent.config);
@@ -2008,6 +2027,13 @@ async function jobCmd(argv: string[]): Promise<void> {
   // connection and a chdir that a throw would leave behind.
   const params = jobParamFlags(argv, job, trigger);
 
+  const rehearsal = rehearsalDir ? await Rehearsal.start(manifest, rehearsalDir) : undefined;
+  if (rehearsal && job.run) {
+    rehearsal.withheld(Object.values({ ...job.run.secrets, ...job.run.jobSecrets }), {
+      dir: jobSecretDirs(argv, secretsDir),
+    });
+  }
+
   const switchSource = await jobSwitchSource(manifest, secretsDir);
   if (job.killSwitch && !switchSource) {
     process.stdout.write(
@@ -2035,6 +2061,7 @@ async function jobCmd(argv: string[]): Promise<void> {
     switchSource,
     ...reporter?.channel,
     secretOpts: { dir: jobSecretDirs(argv, secretsDir) },
+    rehearsal: rehearsal !== undefined,
   });
   let run: JobRun;
   try {
@@ -2047,6 +2074,7 @@ async function jobCmd(argv: string[]): Promise<void> {
   } finally {
     // Or the open socket keeps this process alive long past the run it was opened for.
     await reporter?.stop().catch(() => {});
+    await rehearsal?.stop().catch(() => {});
   }
 
   // Headline, then the gates beneath it — the shape a job's status post takes, and the
@@ -3040,6 +3068,12 @@ running it:
                                run one declared job once and exit — what a CronJob execs.
                                The trigger is stamped from this flag; a run started here is
                                \`system\`, so it does not bypass a parked job
+  run | job run <slug> --rehearse
+                               the same run with nobody listening: Buzz is a relay inside
+                               this process, no credential comes from your shell's
+                               environment, and a secret you did not give it is left unset.
+                               With \`run\`, each line you type is a message to it from its
+                               owner
   job status | cancel <slug> --run-id <id>
                                retrieve a durable external result or cancel its worker
                                status --output includes the declared JSON answer (operator access)
@@ -3109,6 +3143,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       // help prints whatever else is on the line, and only `mcp add` hands `--args` on, to the
       // program `--command` names.
       if (cmd !== "help") refuseUnknownOptions(argv, cmd === "mcp" && hasFlag(argv, "command"));
+      // Every other command would run as if it were absent — `job arm x --rehearse` arms the
+      // real switch.
+      const rehearsable = cmd === "help" || cmd === "run" || (cmd === "job" && argv[0] === "run");
+      if (hasFlag(argv, "rehearse") && !rehearsable) {
+        throw new Error("--rehearse applies to `run` and `job run` only");
+      }
       await handler(argv);
     } catch (error: unknown) {
       process.stderr.write(`${errorText(error)}\n`);
