@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory moves to a fresh directory, and the resume cursor is neither read nor written. Under
   `run`, each line on stdin is a message from you, as the agent's owner, in its first Buzz
   channel; replies print, and the command exits once the input ends and the turns it started
-  finish. A Slack surface has no stand-in yet and is refused, and every command but `run` and
-  `job run` refuses `--rehearse` rather than acting on the real agent.
+  finish. Its directory, `HOME` included, is removed when it exits. What has no stand-in is
+  refused rather than reached: a Slack surface, Buzz surfaces on more than one relay, and a job
+  that runs on an external worker, whose dispatcher a rehearsal is never given. Every command
+  but `run` and `job run` refuses `--rehearse` rather than acting on the real agent.
 
 ## [0.10.0] - 2026-10-17
 

@@ -434,7 +434,9 @@ async function buildBrain(
     // handed back to the caller, because a detached run outlives the turn that started it
     // and something has to settle it when this process is told to stop.
     jobs = new JobHost({
-      external: externalJobs(),
+      // A rehearsal has no stand-in for the dispatcher, so its worker jobs are refused by
+      // the host rather than started where it cannot reach them.
+      external: rehearsal ? undefined : externalJobs(),
       ...jobWorkEvents(manifest.name),
       switchSource,
       secretOpts: { dir: secretsDir },
@@ -1436,7 +1438,10 @@ async function runCmd(argv: string[]): Promise<void> {
   }
 
   // The cursor is a position on the real relay, so a rehearsal neither reads nor writes it.
-  const state = rehearsal ? { since: {} } : loadState(statePath);
+  // It starts from 0 rather than the adapter's fresh-start lookback: the stand-in holds
+  // nothing older than this rehearsal, and a line read before the adapter subscribed has to
+  // be replayed however long startup took.
+  const state = rehearsal ? { since: { buzz: 0 } } : loadState(statePath);
   const adapters = await buildAdapters(manifest, { secretsDir, since: state.since });
   const egress = new SurfaceEgress({ manifest, adapters });
   // Written by the gateway below, read by the job tool built above it: a job is waited for
@@ -2055,7 +2060,8 @@ async function jobCmd(argv: string[]): Promise<void> {
   process.chdir(agent.dir);
 
   const host = new JobHost({
-    external: externalJobs(),
+    // See buildBrain: no dispatcher has a stand-in.
+    external: rehearsal ? undefined : externalJobs(),
     requestId: process.env.AGENT_JOB_REQUEST_ID ? `${process.env.AGENT_JOB_REQUEST_ID}:${slug}` : undefined,
     ...jobWorkEvents(manifest.name),
     switchSource,

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -24,6 +24,9 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
+
+/** What a rehearsal left in the temporary directory it was given. */
+const leftovers = () => readdirSync(home).filter((name) => name.startsWith("sageox-agent-rehearsal-"));
 
 function cli(args: string[], input = "") {
   const env: NodeJS.ProcessEnv = {
@@ -62,6 +65,53 @@ surfaces:
     expect(status).toBe(0);
     // The resume cursor belongs to the real relay.
     expect(existsSync(join(bundle, "state.json"))).toBe(false);
+    expect(leftovers()).toEqual([]);
+  }, 30_000);
+
+  it("answers a line typed twice, twice", () => {
+    writeFileSync(
+      join(bundle, "agent.yaml"),
+      `name: demo
+brain: {provider: mock}
+respondTo: anyone
+surfaces:
+  - kind: buzz
+    relayUrl: wss://relay.invalid
+    identity: BUZZ_NSEC
+    channels: [{ id: c1, name: hive, reply: private }]
+`,
+    );
+
+    // Signed in the same second, the two lines would otherwise be one event id: the second
+    // dropped as already seen, and the command waiting on it for ever.
+    const { status, output } = cli(["run", "--bundle", bundle, "--rehearse"], "same\nsame\n");
+
+    expect(output.split("#hive demo> echo: same").length - 1).toBe(2);
+    expect(status).toBe(0);
+  }, 30_000);
+
+  it("refuses Buzz surfaces on two relays, which one stand-in would merge", () => {
+    writeFileSync(
+      join(bundle, "agent.yaml"),
+      `name: demo
+brain: {provider: mock}
+respondTo: anyone
+surfaces:
+  - kind: buzz
+    relayUrl: wss://one.invalid
+    identity: BUZZ_NSEC
+    channels: [{ id: c1, reply: private }]
+  - kind: buzz
+    relayUrl: wss://two.invalid
+    identity: BUZZ_NSEC_TWO
+    channels: [{ id: c1, reply: private }]
+`,
+    );
+
+    const { status, output } = cli(["run", "--bundle", bundle, "--rehearse"]);
+
+    expect(output).toContain("--rehearse stands in for one Buzz relay");
+    expect(status).toBe(1);
   }, 30_000);
 
   it("refuses a surface it has no stand-in for, before connecting anything", () => {
@@ -130,6 +180,39 @@ require("fs").writeFileSync(process.env.JOB_VERDICT_PATH,
     // The status post, through the stand-in, read back at the terminal.
     expect(output).toContain("#hive demo> job announce completed");
     expect(status).toBe(0);
+    expect(leftovers()).toEqual([]);
+  }, 30_000);
+
+  it("refuses a job that runs on an external worker, even with a dispatcher in .env", () => {
+    writeFileSync(
+      join(bundle, "agent.yaml"),
+      `name: demo
+brain: {provider: mock}
+respondTo: anyone
+brains: [{preset: local}]
+killSwitchParkBy: []
+surfaces: [{kind: console}]
+jobs:
+  - slug: task
+    archetype: queue
+    description: Runs on a worker.
+    trigger: {schedules: ["0 * * * *"]}
+    killSwitch: {failDirection: open}
+    budget: {wallClockMs: 10000, deadlineHeadroomMs: 1000}
+    worker: {image: "example/worker@sha256:${"a".repeat(64)}", directory: /work}
+    run: {command: node, args: [task.cjs]}
+`,
+    );
+    // Restored by the agent's own .env after the shell is left behind, and real: the
+    // dispatcher would run the body with the cluster's secrets and no rehearsal flag.
+    writeFileSync(
+      join(bundle, ".env"),
+      "AGENT_JOB_DISPATCHER_URL=http://127.0.0.1:9\nAGENT_JOB_DISPATCHER_TOKEN=dispatch-token\n",
+    );
+
+    const { output } = cli(["job", "run", "task", "--bundle", bundle, "--rehearse"]);
+
+    expect(output).toContain("job task requires an external dispatcher");
   }, 30_000);
 
   it("is refused by every other job subcommand, which would act on the real agent", () => {

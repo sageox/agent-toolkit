@@ -1308,13 +1308,17 @@ export class JobHost {
     channel?: HostedMcp,
   ): NodeJS.ProcessEnv {
     const secrets: NodeJS.ProcessEnv = {};
+    const withheld: string[] = [];
     // Both maps, one loop: `jobSecrets` says which processes are given the directory a ref
     // lives in, not how it is found. The manifest refuses a name declared in both.
     for (const [envVar, ref] of Object.entries({ ...job.run.secrets, ...job.run.jobSecrets })) {
       const value = resolveSecret(ref, this.opts.secretOpts ?? {});
       // A rehearsal holds only the credentials its operator gave it, so a ref it was not
       // given is one it should not have, not a fault.
-      if (!value && this.opts.rehearsal) continue;
+      if (!value && this.opts.rehearsal) {
+        withheld.push(envVar);
+        continue;
+      }
       // Refusing here names the missing ref. Handing the body a hole instead produces an
       // auth failure several minutes into unattended work, attributed to whatever it called.
       if (!value) throw new Error(`job ${job.slug}: secretRef ${ref} did not resolve`);
@@ -1355,6 +1359,9 @@ export class JobHost {
     for (const [name, value] of Object.entries(jobParams(job, base.parameters))) {
       env[`JOB_PARAM_${name.toUpperCase()}`] = String(value);
     }
+    // Unset, not left to `run.env` or `passthrough`: those rank below a secret, and the body
+    // would otherwise run on a value the secret was declared to replace.
+    for (const name of withheld) delete env[name];
     return env;
   }
 

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -17,6 +17,7 @@ import {
   LocalRelay,
   resolveBuzzSigner,
 } from "@sageox/agent-toolkit-adapter-buzz";
+import { sameRelay } from "./register.ts";
 
 /** The secretRef a rehearsal's Buzz surfaces sign with, set in this process's env alone. */
 const IDENTITY = "REHEARSAL_BUZZ_IDENTITY";
@@ -32,10 +33,12 @@ const OPERATOR = "REHEARSAL_OPERATOR";
  * for the same reason: a child that reads its home would read the operator's, from the Claude
  * brain's user settings to `gh`'s login.
  *
- * Returns the directory the rehearsal keeps its files in.
+ * Returns the directory the rehearsal keeps its files in, which is removed when the process
+ * exits however it exits — a job's caches under `HOME` would otherwise pile up per run.
  */
 export function leaveTheShell(): string {
   const dir = mkdtempSync(join(tmpdir(), "sageox-agent-rehearsal-"));
+  process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
   const home = join(dir, "home");
   mkdirSync(home);
   const keep = passthroughEnv(process.env);
@@ -55,6 +58,7 @@ export class Rehearsal {
   private readonly you = generateKeypair();
   /** Each line sent and not yet handed to the gateway, by event id. */
   private readonly pending = new Map<string, () => void>();
+  private sent = 0;
 
   private constructor(
     private readonly manifest: AgentManifest,
@@ -77,6 +81,12 @@ export class Rehearsal {
         `--rehearse has no local stand-in for the ${other.kind} surface yet — rehearse a ` +
           "copy of this agent without it",
       );
+    }
+    // One stand-in keeps the surfaces of one relay apart only by their channels, so two
+    // relays' surfaces sharing a channel id would both answer the same line.
+    const urls = manifest.surfaces.flatMap((s) => (s.kind === "buzz" ? [String(s.relayUrl)] : []));
+    if (urls.some((url) => !sameRelay(url, urls[0]))) {
+      throw new Error("--rehearse stands in for one Buzz relay, and this agent names more — rehearse a copy with one");
     }
 
     const agent = generateKeypair();
@@ -111,7 +121,7 @@ export class Rehearsal {
     process.stdout.write(
       `  rehearsal: Buzz is a relay in this process (${relay.url}); the agent signs as ` +
         `${agent.npub}, and you, its owner, as ${rehearsal.you.npub}\n` +
-        `  rehearsal: HOME and memory are under ${dir}\n`,
+        `  rehearsal: HOME and memory are under ${dir}, removed when this exits\n`,
     );
     const armed = await rehearsal.arm();
     if (armed.length) process.stdout.write(`  rehearsal: armed ${armed.join(", ")}\n`);
@@ -190,10 +200,16 @@ export class Rehearsal {
       if (!text) return;
       // Chained, so the lines reach the channel in the order they were typed.
       sending = sending.then(async () => {
+        // The sequence tag is what makes two identical lines in one second two events: an
+        // event's id is a hash of its content, and a repeated id is dropped as already seen.
         const event = await (await signer).signEvent({
           kind: BUZZ_DEFAULTS.kind,
           created_at: Math.floor(Date.now() / 1000),
-          tags: [[BUZZ_DEFAULTS.channelTag, channel], [BUZZ_DEFAULTS.mentionTag, this.agent]],
+          tags: [
+            [BUZZ_DEFAULTS.channelTag, channel],
+            [BUZZ_DEFAULTS.mentionTag, this.agent],
+            ["rehearsal", String(++this.sent)],
+          ],
           content: text,
         });
         handed.push(new Promise((resolve) => this.pending.set(event.id, resolve)));

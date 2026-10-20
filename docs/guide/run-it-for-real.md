@@ -145,7 +145,10 @@ directory or the agent's `.env`. A declared secret you leave out is listed at th
 job body runs without it, and an MCP server that needs it fails its calls. Under `run`, each
 line you type is a message from you, as its owner, in its first Buzz channel, and with input
 from a file the command exits once the input ends and the turns it started finish. A job
-body is told `JOB_REHEARSAL=1` ([the job contract](../job-contract.md)).
+body is told `JOB_REHEARSAL=1` ([the job contract](../job-contract.md)). What has no
+stand-in is refused: a Slack surface, Buzz surfaces on more than one relay, and a job that
+runs on an external worker. The rehearsal's directory, `HOME` included, is removed when it
+exits.
 
 A secret you do give it is used for real. Run from source, a job body runs as you, so your
 logins outside `HOME`, such as SSH keys, may still be within its reach; the image has none:

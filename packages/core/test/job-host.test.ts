@@ -610,6 +610,8 @@ describe("bounding", () => {
       ...declared,
       run: {
         ...declared.run,
+        // The value a declared secret ranks above, and must not stand in for it.
+        env: { GITHUB_TOKEN: "placeholder" },
         secrets: { GITHUB_TOKEN: "NEVER_MOUNTED" },
         jobSecrets: { GH_APP_PEM: "NEVER_MOUNTED_EITHER" },
       },
