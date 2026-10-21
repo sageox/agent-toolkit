@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`run --rehearse` and `job run <slug> --rehearse` run the real agent with nobody
+  listening.** Watching an agent with a private brain take a turn meant deploying it, because
+  that brain needs a Buzz relay and the only one was the real one. A rehearsal points every
+  Buzz surface at a relay inside the process and signs as a throwaway key, so replies, status
+  posts, memory and the directory record reach nobody. It first empties its own environment
+  down to `PATH`, `LANG`, `LC_ALL`, `TZ` and `TMPDIR`, and moves `HOME` to a directory of its
+  own: a secret comes from `--secrets` or the agent's `.env`, never from your shell, and the
+  Claude brain does not read your `~/.claude`. A declared secret it was not given no longer
+  stops the launch: it is listed at the start, a job body runs without it, and an MCP server
+  that needs it fails its calls. A job body is told `JOB_REHEARSAL=1`, so one that publishes on
+  its own credential can skip that step. Kill switches are armed on the stand-in relay, vault
+  memory moves to a fresh directory, and the resume cursor is neither read nor written. Under
+  `run`, each line on stdin is a message from you, as the agent's owner, in its first Buzz
+  channel; replies print, and the command exits once the input ends and the turns it started
+  finish. Its directory, `HOME` included, is removed when it exits. What has no stand-in is
+  refused rather than reached: a Slack surface, Buzz surfaces on more than one relay, and a job
+  that runs on an external worker, whose dispatcher a rehearsal is never given. Every command
+  but `run` and `job run` refuses `--rehearse` rather than acting on the real agent.
+
 ## [0.10.0] - 2026-10-17
 
 Everything below shipped after `v0.9.0`.

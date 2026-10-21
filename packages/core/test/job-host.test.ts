@@ -595,6 +595,47 @@ describe("bounding", () => {
     expect(spawns()).toBe(0);
   });
 
+  it("runs a rehearsal without the secrets it was not given, rather than refusing it", async () => {
+    const envelope = join(workDir, "envelope");
+    const declared = body(
+      `fs.writeFileSync(${JSON.stringify(envelope)},JSON.stringify(process.env));${PROVES}`,
+      { trigger: '{schedules: ["0 3 * * 0"]}' },
+    );
+    const run = await new JobHost({
+      workDir,
+      env: { ...process.env, MARKER: marker },
+      secretOpts: { dir: secretsDir },
+      rehearsal: true,
+    }).tick({
+      ...declared,
+      run: {
+        ...declared.run,
+        // The value a declared secret ranks above, and must not stand in for it.
+        env: { GITHUB_TOKEN: "placeholder" },
+        secrets: { GITHUB_TOKEN: "NEVER_MOUNTED" },
+        jobSecrets: { GH_APP_PEM: "NEVER_MOUNTED_EITHER" },
+      },
+    });
+    const seen = JSON.parse(readFileSync(envelope, "utf8")) as Record<string, string>;
+
+    expect(run.outcome).toBe("completed");
+    expect(seen.GITHUB_TOKEN).toBeUndefined();
+    expect(seen.GH_APP_PEM).toBeUndefined();
+    expect(seen.JOB_REHEARSAL).toBe("1");
+  });
+
+  it("tells a body it is rehearsing only when it is", async () => {
+    const envelope = join(workDir, "envelope");
+    const declared = body(
+      `fs.writeFileSync(${JSON.stringify(envelope)},JSON.stringify(process.env));${PROVES}`,
+    );
+    // A body that skips publishing under `JOB_REHEARSAL` must not be talked into it by config.
+    await host().tick({ ...declared, run: { ...declared.run, env: { JOB_REHEARSAL: "1" } } });
+    const seen = JSON.parse(readFileSync(envelope, "utf8")) as Record<string, string>;
+
+    expect(seen.JOB_REHEARSAL).toBe("");
+  });
+
   it("leaves an undeclared bound unset rather than inventing a default for the body", async () => {
     const envelope = join(workDir, "envelope");
     await host().tick(

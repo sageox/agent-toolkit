@@ -7,13 +7,13 @@ import { nip19 } from "nostr-tools";
 import { probeRelay } from "../src/probe.ts";
 import { publishProfile } from "../src/profile.ts";
 import { BUZZ_DEFAULTS } from "../src/normalize.ts";
-import { FakeRelay } from "./fake-relay.ts";
+import { LocalRelay } from "../src/local-relay.ts";
 
 const agentSk = generateSecretKey();
 const agentPk = getPublicKey(agentSk);
 const otherSk = generateSecretKey();
 
-let relay: FakeRelay;
+let relay: LocalRelay;
 let dir: string;
 
 afterEach(async () => {
@@ -33,7 +33,7 @@ function event(kind: number, tags: string[][]) {
 
 describe("probeRelay", () => {
   it("reports the kinds and tags a relay actually serves", async () => {
-    relay = await FakeRelay.start({
+    relay = await LocalRelay.start({
       backlog: [
         event(BUZZ_DEFAULTS.kind, [["h", "hive"], ["p", agentPk]]),
         event(BUZZ_DEFAULTS.kind, [["h", "eng"]]),
@@ -59,7 +59,7 @@ describe("probeRelay", () => {
   });
 
   it("answers a NIP-42 challenge when the relay demands one", async () => {
-    relay = await FakeRelay.start({ requireAuth: true });
+    relay = await LocalRelay.start({ requireAuth: true });
     const report = await probeRelay({
       relayUrl: relay.url,
       identityRef: "BUZZ_NSEC",
@@ -70,7 +70,7 @@ describe("probeRelay", () => {
   });
 
   it("shows zero matches when the relay uses different conventions", async () => {
-    relay = await FakeRelay.start({
+    relay = await LocalRelay.start({
       backlog: [event(42, [["group", "hive"]]), event(42, [["group", "eng"]])],
     });
 
@@ -89,13 +89,13 @@ describe("probeRelay", () => {
   });
 
   it("says auth was required when it had no identity, rather than 'not requested'", async () => {
-    relay = await FakeRelay.start({ requireAuth: true });
+    relay = await LocalRelay.start({ requireAuth: true });
     const report = await probeRelay({ relayUrl: relay.url, seconds: 1 });
     expect(report.auth).toBe("required-no-identity");
   });
 
   it("surfaces relay NOTICE lines", async () => {
-    relay = await FakeRelay.start({ notice: "auth-required: authenticate before subscribing" });
+    relay = await LocalRelay.start({ notice: "auth-required: authenticate before subscribing" });
     const report = await probeRelay({ relayUrl: relay.url, seconds: 1 });
     expect(report.notices.join(" ")).toMatch(/auth-required/);
     // a NOTICE alone is enough to diagnose it, even with no AUTH challenge
@@ -103,7 +103,7 @@ describe("probeRelay", () => {
   });
 
   it("never publishes — a probe is read-only", async () => {
-    relay = await FakeRelay.start({ backlog: [event(BUZZ_DEFAULTS.kind, [["h", "hive"]])] });
+    relay = await LocalRelay.start({ backlog: [event(BUZZ_DEFAULTS.kind, [["h", "hive"]])] });
     await probeRelay({
       relayUrl: relay.url,
       identityRef: "BUZZ_NSEC",
@@ -116,7 +116,7 @@ describe("probeRelay", () => {
 
 describe("publishProfile", () => {
   it("authenticates, then publishes a signed kind-0 the relay accepts", async () => {
-    relay = await FakeRelay.start({ requireAuth: true });
+    relay = await LocalRelay.start({ requireAuth: true });
     const result = await publishProfile({
       relayUrl: relay.url,
       identityRef: "BUZZ_NSEC",

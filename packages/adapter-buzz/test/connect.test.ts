@@ -4,9 +4,9 @@ import { generateSecretKey } from "nostr-tools/pure";
 import { nip19 } from "nostr-tools";
 import { connectAuthenticated } from "../src/connect.ts";
 import { resolveBuzzSigner } from "../src/identity.ts";
-import { FakeRelay } from "./fake-relay.ts";
+import { LocalRelay } from "../src/local-relay.ts";
 
-let relay: FakeRelay;
+let relay: LocalRelay;
 const opened: Relay[] = [];
 
 afterEach(async () => {
@@ -27,7 +27,7 @@ async function connect(url: string, opts: { enableReconnect?: boolean } = {}) {
 
 describe("connectAuthenticated", () => {
   it("survives a relay that refuses the AUTH it verified, and reports the reason", async () => {
-    relay = await FakeRelay.start({ requireAuth: true, rejectAuth: true });
+    relay = await LocalRelay.start({ requireAuth: true, rejectAuth: true });
 
     // nostr-tools rethrows the refusal inside its own `.catch`, on a promise it never
     // returns. Node exits on that unless the toolkit answers the challenge itself; a
@@ -49,7 +49,7 @@ describe("connectAuthenticated", () => {
   });
 
   it("still reports a refusal the relay gave no reason for, rather than an empty one", async () => {
-    relay = await FakeRelay.start({ requireAuth: true, rejectAuth: true, rejectAuthReason: "" });
+    relay = await LocalRelay.start({ requireAuth: true, rejectAuth: true, rejectAuthReason: "" });
 
     const result = await connect(relay.url);
 
@@ -59,7 +59,7 @@ describe("connectAuthenticated", () => {
   });
 
   it("reports the relay's acceptance, not merely that we signed something", async () => {
-    relay = await FakeRelay.start({ requireAuth: true });
+    relay = await LocalRelay.start({ requireAuth: true });
 
     const result = await connect(relay.url);
 
@@ -69,7 +69,7 @@ describe("connectAuthenticated", () => {
   });
 
   it("answers the second challenge too — a reconnected socket is unauthenticated", async () => {
-    relay = await FakeRelay.start({ requireAuth: true });
+    relay = await LocalRelay.start({ requireAuth: true });
 
     const { relay: client } = await connect(relay.url, { enableReconnect: true });
     expect(relay.authEvents).toHaveLength(1);
@@ -83,7 +83,7 @@ describe("connectAuthenticated", () => {
   });
 
   it("returns without a challenge rather than waiting on a relay that never asks", async () => {
-    relay = await FakeRelay.start();
+    relay = await LocalRelay.start();
 
     const result = await connect(relay.url);
 
