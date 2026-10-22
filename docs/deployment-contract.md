@@ -294,7 +294,7 @@ including across pods. The source-code index remains owned by repository warmup.
 
 This needs a team access token (`oxt_`, which ox requires for ledger reads), ox 0.17.0 or
 newer, and ledger reads enabled for the team on the SageOx endpoint. The base image pins ox
-0.23.0, and the gateway refuses to sync with one older than 0.17.0.
+0.24.2, and the gateway refuses to sync with one older than 0.17.0.
 
 Repositories listed in [`ledgerSync`](guide/reference.md#syncing-from-an-explicit-git-remote)
 keep the earlier mechanism, a pull-only sparse checkout of sessions and murmurs from a named
@@ -328,7 +328,7 @@ Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existin
 
 | Case | Coverage / remaining work |
 |---|---|
-| Pinned ox contract | The base image pins ox 0.23.0, and its compatibility test checks `--version`, the guarded readers' refusal, and the read-sync receipt. The gateway refuses to sync with ox older than 0.17.0. |
+| Pinned ox contract | The base image pins ox 0.24.2, and its compatibility test checks `--version`, the guarded readers' refusal, and the read-sync receipt. The gateway refuses to sync with ox older than 0.17.0. |
 | Team-token-only setup | Tested with a fake ox: sync needs only the team token, the configured repositories, and the isolated data home. Verified live: from an empty data home, a 427-session ledger synced with only the team token and a configured repository, and both readers answered from it. |
 | Per-read authorization | Tested: an exact-repository check before each read; an unlinked repository, a revoked token, a mount replaced during the read, a mount that never settles, and a replacement after handoff. |
 | Freshness and failure classes | Tested: fresh, old, missing, invalid, and future sync times; `denied`, `unavailable`, `missing_ledger`, `missing_hydration`, `incomplete_history`, `incomplete_coverage`, `dirty`, `interrupted`, and unknown classes. A resumable first sync reports `initializing` in `team_status` and `Warming` capability health. |
@@ -338,7 +338,7 @@ Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existin
 | `ledgerSync` | Unchanged, and tested beside team-token repositories. ox refuses a `ledgerSync` checkout, so moving a repository to team-token sync means deleting its checkout; the fresh sync that follows has not run against a live backend. |
 | Recent activity | Tested: over the team token, work updates are listed only from 11 hours before the window's end, which `work_updates_since` states; a `ledgerSync` repository lists them across the whole window. |
 
-The runtime build checks the installed ox 0.23.0 binary with an
+The runtime build checks the installed ox 0.24.2 binary with an
 [offline compatibility smoke test](../deploy/docker/test-ox.mjs) on both architectures.
 It exercises `status`, empty and populated `team list`, `session list`, and `glance`
 responses, the hosted-ledger calls' refusals and read-sync receipt, plus indexing,
@@ -350,7 +350,7 @@ gateway's explicit `AGENT_ENV=claude-code` context, retained from the ox 0.14.3 
 for its inherited `--json` flag. These checks establish CLI output compatibility, not live
 sync or migration parity. #24 remains open.
 
-The ox 0.23.0 `glance` check covers populated and empty ledgers.
+The ox 0.24.2 `glance` check covers populated and empty ledgers.
 `team_recent` passes absolute `--since`/`--until` bounds and validates
 the returned repository, window, timestamps, and counts. It projects work updates and
 session activity without forwarding generated collision advice or prompt guidance. The
