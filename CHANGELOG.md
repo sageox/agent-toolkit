@@ -26,6 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that runs on an external worker, whose dispatcher a rehearsal is never given. Every command
   but `run` and `job run` refuses `--rehearse` rather than acting on the real agent.
 
+- **The agent base image ships `ox` 0.24.2.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.23.0. The ox calls the toolkit makes — `status`,
+  `team list`, `query`, `session list`, `glance`, `sync --read-only`, `index code`,
+  `code status`, `code search` and `code insights` — take the same flags, exit with the same
+  codes and return the same fields on 0.24.2, so nothing that reads them changes. A code index
+  that 0.23.0 built is updated in place by the first warmup after the upgrade, and until then
+  a job that reads it through `persistence.jobCodeIndex` still passes the readiness check in
+  the chart's README.
+
+  A job body that runs ox itself gets 0.24.2 too. The calls the job contract and the chart's
+  README show a job making — `ox query`, `ox code status`, `ox code search` and
+  `ox agent prime --agent claude-code` — exit as they did on 0.23.0, and the first three
+  return the same fields. ox's
+  [0.24.2 release notes](https://github.com/sageox/ox/releases/tag/v0.24.2) list what else
+  changed.
+
 ## [0.10.0] - 2026-10-17
 
 Everything below shipped after `v0.9.0`.
