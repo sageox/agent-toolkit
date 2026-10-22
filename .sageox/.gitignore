@@ -28,3 +28,6 @@ teams/
 !config.json
 !discovered.jsonl
 !offline/
+
+# SageOx required entries
+.session-recovery.json
