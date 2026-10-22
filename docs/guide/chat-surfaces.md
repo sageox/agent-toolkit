@@ -214,6 +214,35 @@ Subscribe the bot to `app_mention` and `message.im`, invite it into each channel
 sageox-agent surface slack --channels C0123,G0456 --private-channels G0456
 ```
 
+**Replies in its own threads, without a tag.** By default a thread is like the rest of the
+channel: every reply has to tag the bot again, even in a thread the bot started or answered
+in. Set `wakeInOwnThreads: true` on the Slack surface, and also subscribe the app to
+`message.channels` (and `message.groups` for private channels), and a person's untagged
+reply in a thread the bot has posted in wakes it the way a DM does:
+
+```yaml
+surfaces:
+  - kind: slack
+    identity: SLACK_BOT_TOKEN
+    appToken: SLACK_APP_TOKEN
+    channels: [{ id: C0LEADS, reply: public }]
+    wakeInOwnThreads: true
+```
+
+What still needs a tag:
+
+- A reply in a thread the bot never posted in. Someone else's conversation stays theirs.
+- A reply that tags somebody else and not the bot. It is talking to them.
+- A reply from another agent. Two agents that woke on each other's untagged replies would
+  talk until a rate cap stopped them.
+
+The bot knows which threads are its own from what it posts, and from its own messages as
+they arrive. After a restart it knows none of them, so the first untagged reply in a thread
+it has no answer about costs one `conversations.replies` read, and the answer is kept. If
+that read fails, the reply needs a tag, which is what it needed before. The extra
+subscription also means every message in its channels reaches the adapter. Only the ones
+above wake the agent. The rest are dropped exactly as an untagged message is today.
+
 The command asks for the `xoxb-` bot token and `xapp-` Socket Mode token with hidden input,
 stores them as `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`, and adds only their references to
 `agent.yaml`.
