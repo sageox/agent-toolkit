@@ -10,6 +10,9 @@
 
 # ---- dependencies ------------------------------------------------------------
 FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS deps
+# Docker pulls by the digest and ignores the tag beside it, so a stale digest under a new tag
+# builds silently. This fails the build when the digest is not the Node named here.
+RUN test "$(node --version)" = "v22.23.4"
 WORKDIR /app
 ARG PNPM_VERSION=10.25.0
 RUN corepack enable \
@@ -34,6 +37,7 @@ RUN pnpm install --frozen-lockfile --config.node-linker=hoisted --config.strictD
 
 # ---- runtime -----------------------------------------------------------------
 FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
+RUN test "$(node --version)" = "v22.23.4"
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends age ca-certificates curl git tini \
