@@ -1899,3 +1899,158 @@ describe("SlackAdapter reads the surface it is on", () => {
     expect(more).toBe(false);
   });
 });
+
+describe("SlackAdapter wakeInOwnThreads", () => {
+  /** A plain channel message, as `message.groups` delivers one: no tag, no app_mention. */
+  function reply(ts: string, threadTs: string, extra: Record<string, unknown> = {}) {
+    return {
+      type: "message",
+      channel: "GENG",
+      channel_type: "group",
+      user: "U0RYAN",
+      text: "also met Dana from Acme",
+      ts,
+      thread_ts: threadTs,
+      ...extra,
+    };
+  }
+
+  const ROOT = "1786761000.000100";
+
+  /** Starts an adapter, has it answer a mention at `ROOT`, and returns what it delivered. */
+  async function answered(extra: Partial<ConstructorParameters<typeof SlackAdapter>[0]> = {}) {
+    const harness = adapter({ wakeInOwnThreads: true, ...extra });
+    const got: InboundEvent[] = [];
+    await harness.instance.start((event) => got.push(event));
+    await harness.socket.emit(mention(ROOT));
+    await harness.instance.send(got[0].channel, { text: "saved Dana" }, got[0]);
+    return { ...harness, got };
+  }
+
+  it("wakes on an untagged reply in a thread it answered in, without asking Slack", async () => {
+    const { socket, api, got } = await answered();
+    await socket.emit(reply("1786761000.000300", ROOT));
+
+    expect(got.at(-1)).toMatchObject({ text: "also met Dana from Acme", mentionsMe: true });
+    expect(api.replyCalls).toEqual([]);
+  });
+
+  it("does not wake on a reply in someone else's thread, and asks about that thread once", async () => {
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    api.threads = [
+      {
+        messages: [
+          { type: "message", user: "U0MILK", text: "launch plan", ts: "1786760000.000001" },
+          { type: "message", user: "U0LAU", text: "looks good", ts: "1786760000.000002" },
+        ],
+      },
+    ];
+
+    await socket.emit(reply("1786761000.000300", "1786760000.000001"));
+    await socket.emit(reply("1786761000.000400", "1786760000.000001"));
+
+    expect(got.map((event) => event.mentionsMe)).toEqual([false, false]);
+    expect(api.replyCalls).toEqual([
+      { channel: "GENG", ts: "1786760000.000001", oldest: "0", cursor: undefined },
+    ]);
+  });
+
+  it("still wakes in a thread it posted in before a restart, by asking Slack once", async () => {
+    // A fresh adapter remembers nothing. Slack still has the thread, bot reply included.
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    api.threads = [
+      {
+        messages: [
+          { type: "message", user: "U0RYAN", text: "<@UBOT> log Dana", ts: ROOT },
+          { type: "message", user: "UBOT", bot_id: "BBOT", text: "saved Dana", ts: "1786761000.000200" },
+        ],
+      },
+    ];
+
+    await socket.emit(reply("1786761000.000300", ROOT));
+    await socket.emit(reply("1786761000.000400", ROOT));
+
+    expect(got.map((event) => event.mentionsMe)).toEqual([true, true]);
+    expect(api.replyCalls).toHaveLength(1);
+  });
+
+  it("wakes under a top-level post of its own, which roots the thread its answers start", async () => {
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    const root = await instance.post(
+      { surface: "slack", id: "GENG", isPublic: false },
+      { text: "who did you meet at the summit?" },
+    );
+
+    await socket.emit(reply("1786761000.000300", root!.nativeId.split(":")[1]));
+
+    expect(got.at(-1)?.mentionsMe).toBe(true);
+    expect(api.replyCalls).toEqual([]);
+  });
+
+  it("learns a thread from its own message arriving on the socket", async () => {
+    // Another process posting as the same bot — a `job run`, say — is still this agent.
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    await socket.emit(reply("1786761000.000200", ROOT, { user: "UBOT", bot_id: "BBOT", text: "nightly digest" }));
+    await socket.emit(reply("1786761000.000300", ROOT));
+
+    expect(got.at(-1)?.mentionsMe).toBe(true);
+    expect(api.replyCalls).toEqual([]);
+  });
+
+  it("does not wake on a reply in its thread that tags somebody else", async () => {
+    const { socket, api, got } = await answered();
+    api.names = { U0MILK: "milkana" };
+    await socket.emit(reply("1786761000.000300", ROOT, { text: "<@U0MILK> can you confirm?" }));
+
+    expect(got.at(-1)).toMatchObject({ text: "@milkana can you confirm?", mentionsMe: false });
+  });
+
+  it("does not wake on another agent's untagged reply, so two agents cannot loop", async () => {
+    const { socket, got } = await answered();
+    await socket.emit(reply("1786761000.000300", ROOT, { user: "U0BEEK", bot_id: "B0BEEK" }));
+
+    expect(got.at(-1)?.mentionsMe).toBe(false);
+  });
+
+  it("answers no when the lookup fails, and asks again next time", async () => {
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    let calls = 0;
+    api.replies = async () => {
+      calls += 1;
+      throw new Error("ratelimited");
+    };
+
+    await socket.emit(reply("1786761000.000300", ROOT));
+    await socket.emit(reply("1786761000.000400", ROOT));
+
+    expect(got.map((event) => event.mentionsMe)).toEqual([false, false]);
+    expect(calls).toBe(2);
+  });
+
+  it("leaves a top-level untagged message alone: only a reply in a thread can wake", async () => {
+    const { socket, api, got } = await answered();
+    await socket.emit({ ...reply("1786761000.000300", ROOT), thread_ts: undefined });
+
+    expect(got.at(-1)?.mentionsMe).toBe(false);
+    expect(api.replyCalls).toEqual([]);
+  });
+
+  it("is off unless asked for: a reply in its own thread still needs a tag", async () => {
+    const { socket, api, got } = await answered({ wakeInOwnThreads: undefined });
+    await socket.emit(reply("1786761000.000300", ROOT));
+
+    expect(got.at(-1)?.mentionsMe).toBe(false);
+    expect(api.replyCalls).toEqual([]);
+  });
+});

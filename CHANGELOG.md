@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned by digest. An agent keeps running 22.23.2 until it runs an image built from this
   change. `.mise.toml` selects Node 22.23.4 for a source checkout, up from 22.12.0; run
   `mise install` to get it.
+- **A Slack agent can be woken by an untagged reply in a thread it has posted in.** Set
+  `wakeInOwnThreads: true` on the Slack surface and subscribe the app to `message.channels`
+  (and `message.groups`), and a person replying in a thread the bot started or answered in no
+  longer has to tag it again. A reply in a thread the bot never posted in, one that tags
+  somebody else, and one from another agent still need a tag. The adapter learns its threads
+  from its own posts and its own messages as they arrive; after a restart, the first untagged
+  reply in an unknown thread costs one `conversations.replies` read, and a failed read means
+  the reply needs a tag. Off by default, so no existing agent changes.
 
 - **`run --rehearse` and `job run <slug> --rehearse` run the real agent with nobody
   listening.** Watching an agent with a private brain take a turn meant deploying it, because
