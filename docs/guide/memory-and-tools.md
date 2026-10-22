@@ -268,6 +268,50 @@ Nothing about this is GitHub-shaped — `scope: {teamId: [ENG]}` and
 `scope: {database: [analytics]}` work the same. Reaching GitHub is a server you point at,
 not a feature of the toolkit.
 
+**`stampTurn: true` tells a server who it is working for.** A tool otherwise learns who is
+asking only as an argument the brain fills in, and never learns which message it is
+answering. That is fine for a read. It is not enough for a server that records who asked
+for a write, or that must not save the same message twice: the brain has read the channel,
+and text in it can talk the brain into sending someone else's id. With `stampTurn` the
+gateway writes the live turn into every `tools/call` itself:
+
+```yaml
+mcpServers:
+  - name: gtm
+    command: node
+    args: ["_base/gtm-mcp.js"]
+    stampTurn: true
+```
+
+```json
+"_meta": {
+  "sageox.ai/turn": {
+    "surface": "slack",
+    "channel": "C0LEADS",
+    "message": "C0LEADS:1786761000.000200",
+    "thread": "C0LEADS:1786760000.000100",
+    "author": { "id": "U0RYAN", "isAgent": false }
+  }
+}
+```
+
+It is the same answer the reaction tool and the job door use: the message the gateway is
+answering, from the event it received. The brain cannot set it — anything it sends under
+that key is replaced — and every other `_meta` key passes through. `message` and `thread`
+are the surface's own references, so `message` is a deduplication key as it stands. When
+no single turn is live the value is `null`, not missing: nothing is mid-turn, or two
+channels are and there is no saying whose call this is. Treat `null` as "unknown caller"
+and refuse what needs one; a missing key means a toolkit too old to stamp. A scheduled turn
+is not a live turn in that registry, so its calls stamp `null` — except while a chat turn is
+live at the same moment, when they carry that chat turn, exactly as the reaction tool and
+the job door would read it. An agent whose scheduled jobs call a stamped server should not
+trust the stamp from those calls. With the default
+`limits.maxConcurrentChannels: 4`, a busy agent will see `null` whenever two conversations
+overlap; set it to `1` if a stamped server must always know who asked.
+
+Off unless you write it, because it hands a third-party process member and message ids it
+never had before. A server without it receives each call exactly as the brain sent it.
+
 **Every MCP server is gateway-hosted**, credential or not. The gateway runs the server as
 its own child with the credential in *that* process, and publishes it to the brain over
 HTTP behind a per-server capability token. The brain asks for a tool call; it never holds

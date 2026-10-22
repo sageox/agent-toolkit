@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { McpBroker, type McpTransport } from "../src/mcp-broker.ts";
+import type { InboundEvent } from "../src/events.ts";
+import { McpBroker, TURN_META_KEY, type McpTransport } from "../src/mcp-broker.ts";
 import { loadToolPolicy, qualifyTool } from "../src/tool-policy.ts";
+import { loadManifest } from "../src/manifest.ts";
+import { SurfaceEgress } from "../src/surface-egress.ts";
 
 const policy = loadToolPolicy(
   JSON.stringify({
@@ -111,6 +114,182 @@ describe("McpBroker policy chokepoint", () => {
     const id = await b.connect("github");
     await b.message(id, "resources/list", {});
     expect(f.received.at(-1)?.method).toBe("resources/list");
+  });
+});
+
+describe("McpBroker live-turn stamp", () => {
+  const turnPolicy = loadToolPolicy(
+    JSON.stringify({
+      permissions: {
+        defaultMode: "acceptEdits",
+        allow: ["mcp__gtm__save_lead", "mcp__github__list_issues"],
+        deny: ["Read(//mnt/secrets-store/**)", "mcp__gtm__delete_lead"],
+      },
+    }),
+  );
+
+  /** A reply in a Slack thread, as the adapter normalizes one. */
+  const live: InboundEvent = {
+    id: { surface: "slack", nativeId: "CLEADS:1786761000.000200" },
+    surface: "slack",
+    channel: { surface: "slack", id: "CLEADS", isPublic: true },
+    author: { surface: "slack", id: "U0RYAN", isSelf: false, isAgent: false },
+    text: "met Dana at the summit",
+    mentionsMe: true,
+    threadRoot: { surface: "slack", nativeId: "CLEADS:1786760000.000100" },
+    ts: "2026-08-12T00:00:00.000Z",
+    raw: {},
+  };
+
+  function stampingBroker(f: ReturnType<typeof fakeServer>, answering: () => InboundEvent | null) {
+    return new McpBroker({
+      servers: [
+        { name: "gtm", command: "x", args: [], secrets: {}, stampTurn: true },
+        { name: "github", command: "x", args: [], secrets: {} },
+      ],
+      policy: turnPolicy,
+      transport: f.transport,
+      secretOpts: { dir: "/nonexistent", env: {} },
+      answering,
+    });
+  }
+
+  it("hands an opted-in server the message being answered and who sent it", async () => {
+    const f = fakeServer();
+    const b = stampingBroker(f, () => live);
+    const id = await b.connect("gtm");
+    await b.message(id, "tools/call", { name: "save_lead", arguments: { note: "Dana, Acme" } });
+
+    expect(f.received.at(-1)).toEqual({
+      method: "tools/call",
+      params: {
+        name: "save_lead",
+        arguments: { note: "Dana, Acme" },
+        _meta: {
+          [TURN_META_KEY]: {
+            surface: "slack",
+            channel: "CLEADS",
+            message: "CLEADS:1786761000.000200",
+            thread: "CLEADS:1786760000.000100",
+            author: { id: "U0RYAN", isAgent: false },
+          },
+        },
+      },
+    });
+  });
+
+  it("replaces a stamp the brain wrote itself, and keeps the rest of its `_meta`", async () => {
+    // The brain has read the channel and can be told what to send. A stamp it supplies is
+    // the one thing that must never reach the server: the whole point is that it is not
+    // the brain's to say.
+    const f = fakeServer();
+    const b = stampingBroker(f, () => live);
+    const id = await b.connect("gtm");
+    await b.message(id, "tools/call", {
+      name: "save_lead",
+      arguments: {},
+      _meta: {
+        progressToken: 7,
+        [TURN_META_KEY]: { surface: "slack", channel: "CLEADS", message: "x", author: { id: "U0CEO", isAgent: false } },
+      },
+    });
+
+    const meta = (f.received.at(-1)?.params as { _meta: Record<string, unknown> })._meta;
+    expect(meta.progressToken).toBe(7);
+    expect(meta[TURN_META_KEY]).toMatchObject({ author: { id: "U0RYAN" } });
+  });
+
+  it("says `null` when no single turn is live, rather than leaving the key out", async () => {
+    // None live, or two at once: either way the gateway cannot say who is asking, and the
+    // server has to be able to tell that from a gateway that never stamps.
+    const f = fakeServer();
+    const b = stampingBroker(f, () => null);
+    const id = await b.connect("gtm");
+    await b.message(id, "tools/call", { name: "save_lead" });
+
+    expect(f.received.at(-1)?.params).toEqual({ name: "save_lead", _meta: { [TURN_META_KEY]: null } });
+  });
+
+  it("stamps `null` when the broker was given no way to ask", async () => {
+    const f = fakeServer();
+    const b = new McpBroker({
+      servers: [{ name: "gtm", command: "x", args: [], secrets: {}, stampTurn: true }],
+      policy: turnPolicy,
+      transport: f.transport,
+      secretOpts: { dir: "/nonexistent", env: {} },
+    });
+    const id = await b.connect("gtm");
+    await b.message(id, "tools/call", { name: "save_lead" });
+
+    expect((f.received.at(-1)?.params as { _meta: unknown })._meta).toEqual({ [TURN_META_KEY]: null });
+  });
+
+  it("passes a server that did not opt in exactly what the brain sent", async () => {
+    const f = fakeServer();
+    const b = stampingBroker(f, () => live);
+    const id = await b.connect("github");
+    const params = { name: "list_issues", arguments: { repo: "acme/service" }, _meta: { progressToken: 1 } };
+    const before = JSON.stringify(params);
+    await b.message(id, "tools/call", params);
+
+    // The same object, untouched — not an equal copy, and not one with a key added.
+    expect(f.received.at(-1)?.params).toBe(params);
+    expect(JSON.stringify(f.received.at(-1)?.params)).toBe(before);
+  });
+
+  it("does not read the turn for a call the policy refuses", async () => {
+    const f = fakeServer();
+    let asked = 0;
+    const b = stampingBroker(f, () => {
+      asked += 1;
+      return live;
+    });
+    const id = await b.connect("gtm");
+    await expect(b.message(id, "tools/call", { name: "delete_lead" })).rejects.toThrow(/denied/i);
+
+    expect(asked).toBe(0);
+    expect(f.received.some((r) => r.method === "tools/call")).toBe(false);
+  });
+
+  it("reads the same live turn the reaction tool does, and names nobody when two overlap", async () => {
+    // Wired as `run` wires it. A turn opens when the gateway starts answering and closes
+    // when it is done; between two channels mid-turn there is no saying whose call it is.
+    const egress = new SurfaceEgress({
+      manifest: loadManifest("name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: slack}]\n"),
+      adapters: [],
+    });
+    const f = fakeServer();
+    const b = stampingBroker(f, () => egress.answeringEvent());
+    const id = await b.connect("gtm");
+    const stamp = () => (f.received.at(-1)?.params as { _meta: Record<string, unknown> })._meta[TURN_META_KEY];
+
+    const ryan = egress.answers(live);
+    await b.message(id, "tools/call", { name: "save_lead" });
+    expect(stamp()).toMatchObject({ message: "CLEADS:1786761000.000200", author: { id: "U0RYAN" } });
+
+    const other = egress.answers({
+      ...live,
+      id: { surface: "slack", nativeId: "DMILK:1786761000.000900" },
+      channel: { surface: "slack", id: "DMILK", isPublic: false },
+      author: { ...live.author, id: "U0MILK" },
+    });
+    await b.message(id, "tools/call", { name: "save_lead" });
+    expect(stamp()).toBeNull();
+
+    other.close();
+    ryan.close();
+    await b.message(id, "tools/call", { name: "save_lead" });
+    expect(stamp()).toBeNull();
+  });
+
+  it("stamps only `tools/call`, leaving the handshake and listing alone", async () => {
+    const f = fakeServer();
+    const b = stampingBroker(f, () => live);
+    const id = await b.connect("gtm");
+    const params = {};
+    await b.message(id, "tools/list", params);
+
+    expect(f.received.at(-1)?.params).toBe(params);
   });
 });
 

@@ -437,6 +437,22 @@ export const McpServerSchema = z
           .min(1, "a bound argument needs at least one permitted value — an empty list refuses every call"),
       )
       .optional(),
+    /**
+     * Hand this server the live turn — the message being answered and who sent it — on every
+     * `tools/call`, under `params._meta["sageox.ai/turn"]`. Off unless written down.
+     *
+     * A tool otherwise learns who is asking only as an argument the brain fills in, copied
+     * from a header it was shown, and never learns which message it is answering at all. That
+     * is fine for a read and not for a server that records who asked for a write, or that
+     * deduplicates on the message: the brain can be talked into another id. The stamp is the
+     * gateway's own answer, from the same live-turn registry the reaction tool and the job
+     * door read, and the brain cannot set it — a value it sends under that key is replaced.
+     *
+     * Opt-in per server because it hands a third-party process a member id and a message id
+     * it never had before. A server that does not opt in receives its calls exactly as the
+     * brain sent them.
+     */
+    stampTurn: z.boolean().optional(),
   })
   .strict();
 
@@ -450,6 +466,7 @@ export function resolveMcpServer(decl: McpServerDecl): {
   env: Record<string, string>;
   secrets: Record<string, string>;
   scope: Record<string, string[]>;
+  stampTurn: boolean;
 } {
   return {
     name: decl.name,
@@ -458,6 +475,7 @@ export function resolveMcpServer(decl: McpServerDecl): {
     env: decl.env ?? {},
     secrets: decl.secrets ?? {},
     scope: decl.scope ?? {},
+    stampTurn: decl.stampTurn ?? false,
   };
 }
 
