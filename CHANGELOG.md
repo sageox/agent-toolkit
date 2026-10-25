@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The agent base image runs Node.js 22.23.4.** It ran 22.23.2, which the
+  [October 2026 Node.js security release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)
+  patches. On the 22.x line that release fixes seven CVEs, three of them high: an out-of-bounds
+  write in the Brotli decoder that can run code (CVE-2026-111497), a TLS certificate hostname
+  bypass (CVE-2026-106069), and `dns.resolve` truncating a name that contains a NUL character
+  (CVE-2026-105482). Both stages of `deploy/docker/Dockerfile` move to `node:22.23.4-slim`,
+  pinned by digest. An agent keeps running 22.23.2 until it runs an image built from this
+  change. `.mise.toml` selects Node 22.23.4 for a source checkout, up from 22.12.0; run
+  `mise install` to get it.
+
 - **`run --rehearse` and `job run <slug> --rehearse` run the real agent with nobody
   listening.** Watching an agent with a private brain take a turn meant deploying it, because
   that brain needs a Buzz relay and the only one was the real one. A rehearsal points every
