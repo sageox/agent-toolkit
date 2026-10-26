@@ -2125,8 +2125,48 @@ describe("SlackAdapter wakeInOwnThreads", () => {
       await vi.advanceTimersByTimeAsync(10_000);
       expect(api.replyCalls).toHaveLength(1);
       expect(warn).toHaveBeenCalledWith(
-        'thread_owner_read_failed surface=slack channel=GENG thread=1786761000.000100 reason="timeout" ms=2000',
+        'thread_owner_read_failed surface=slack channel=GENG thread=1786761000.000100 reason="timeout" ' +
+          "ms=2000 paused_ms=30000",
       );
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks nothing more in that channel for a while after a lookup times out", async () => {
+    // Slack is slow for the whole channel, not for one thread: the next unknown thread would
+    // only wait out the same two seconds, with the channel's mentions queued behind it.
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { socket, api, got } = await answered();
+      const replies = api.replies.bind(api);
+      let slow = true;
+      api.replies = async (args) => {
+        const page = await replies(args);
+        if (slow) await new Promise((resolve) => setTimeout(resolve, 10_000));
+        return page;
+      };
+
+      const first = socket.emit(reply("1786761000.000300", "1786760000.000001")) as Promise<void>;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await first;
+      expect(api.replyCalls).toHaveLength(1);
+
+      // Inside the pause: an unknown thread is not asked about, and answers at once.
+      await socket.emit(reply("1786761000.000400", "1786760000.000002"));
+      expect(got.at(-1)).toMatchObject({ id: { nativeId: "GENG:1786761000.000400" }, mentionsMe: false });
+      expect(api.replyCalls).toHaveLength(1);
+      // A thread it already knows is its own still wakes: that answer needed no lookup.
+      await socket.emit(reply("1786761000.000500", ROOT));
+      expect(got.at(-1)?.mentionsMe).toBe(true);
+
+      // After it, Slack is asked again — nothing was recorded as not owned.
+      slow = false;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await socket.emit(reply("1786761000.000600", "1786760000.000002"));
+      expect(api.replyCalls).toHaveLength(2);
     } finally {
       warn.mockRestore();
       vi.useRealTimers();
@@ -2146,16 +2186,33 @@ describe("SlackAdapter wakeInOwnThreads", () => {
       }
       return Response.json({ ok: true, user: { id: "U0MILK", name: "milkana", profile: {} } });
     };
-    const api = new WebSlackApi("xoxb-test", { fetch: fetch as never });
-    const started = Date.now();
+    // The clock is held still: a client that waited out the 30 s Retry-After, or paused its
+    // queue for it, cannot settle while no time passes.
+    vi.useFakeTimers();
+    try {
+      const api = new WebSlackApi("xoxb-test", { fetch: fetch as never });
+      const outcome = (work: Promise<unknown>) =>
+        work.then(
+          (value) => ({ settled: "resolved", value }),
+          (error: unknown) => ({ settled: "rejected", code: (error as { code?: string }).code }),
+        );
+      const read = outcome(api.replies({ channel: "GENG", ts: "1786761000.000100", oldest: "0", once: true }));
+      const lookup = outcome(api.user("U0MILK"));
+      await vi.advanceTimersByTimeAsync(0);
+      const pending = { settled: "pending" };
 
-    await expect(
-      api.replies({ channel: "GENG", ts: "1786761000.000100", oldest: "0", once: true }),
-    ).rejects.toMatchObject({ code: "slack_webapi_rate_limited_error" });
-    await expect(api.user("U0MILK")).resolves.toMatchObject({ name: "milkana" });
-
-    expect(Date.now() - started).toBeLessThan(2_000);
-    expect(asked).toEqual(["conversations.replies", "users.info"]);
+      expect(await Promise.race([read, pending])).toEqual({
+        settled: "rejected",
+        code: "slack_webapi_rate_limited_error",
+      });
+      expect(await Promise.race([lookup, pending])).toMatchObject({
+        settled: "resolved",
+        value: { name: "milkana" },
+      });
+      expect(asked).toEqual(["conversations.replies", "users.info"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("logs a failed lookup with where it was and Slack's reason, and never the text", async () => {

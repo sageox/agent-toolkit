@@ -243,9 +243,12 @@ it has no answer about costs a `conversations.replies` read, and the answer is k
 read stops at the first page that shows a post of the bot's, and gives up after two seconds,
 because messages behind it in that channel wait for it. It runs on a Slack client of its
 own that rejects a rate limit rather than waiting it out, so a rate-limited read cannot
-pause the bot's replies or name lookups. If the read fails or runs out of
+pause the bot's replies or name lookups. After a read times out or is rate-limited, that
+channel makes no more of these reads for 30 seconds: an untagged reply in a thread the bot
+does not already know needs a tag until then. If the read fails or runs out of
 time, the reply needs a tag, which is what it needed before, and the log says so with
-`thread_owner_read_failed` (channel, thread, and Slack's error code or `timeout`). The extra
+`thread_owner_read_failed` (channel, thread, Slack's error code or `timeout`, and
+`paused_ms` when the channel pauses). The extra
 subscription also means every message in its channels reaches the adapter. Only the ones
 above wake the agent. The rest are dropped exactly as an untagged message is today.
 

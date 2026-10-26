@@ -226,6 +226,18 @@ const THREAD_LIMIT = 2_048;
  */
 const OWN_THREAD_LOOKUP_MS = 2_000;
 
+/**
+ * How long a channel asks Slack nothing about thread ownership after a lookup there timed
+ * out or was rate-limited.
+ *
+ * Without it every untagged reply in an unknown thread repeats the wait while Slack is slow,
+ * each holding the channel's mentions behind it. During the pause such a reply needs a tag,
+ * which is the answer a timed-out lookup gives anyway; threads already known still answer
+ * from memory, and nothing is recorded as not owned, so the thread is asked about again
+ * after.
+ */
+const OWN_THREAD_PAUSE_MS = 30_000;
+
 /** Adds to an insertion-ordered set, dropping the oldest entry once it is over `limit`. */
 function remember(set: Set<string>, key: string, limit: number): void {
   set.delete(key);
@@ -277,6 +289,8 @@ export class SlackAdapter implements SurfaceAdapter {
    * Cleared for a thread the moment it posts there — only a post of its own can change it.
    */
   private readonly otherThreads = new Set<string>();
+  /** Per channel, until when no ownership lookup is made there. See `OWN_THREAD_PAUSE_MS`. */
+  private readonly ownerReadsPaused = new Map<string, number>();
   /**
    * Member id to name, filled as messages mention people and never expired. A rename goes
    * unnoticed until restart — the alternative, `users.list` at boot, spends a whole
@@ -1008,6 +1022,12 @@ export class SlackAdapter implements SurfaceAdapter {
     if (this.ownThreads.has(key)) return true;
     if (this.otherThreads.has(key)) return false;
 
+    const paused = this.ownerReadsPaused.get(channel);
+    if (paused !== undefined) {
+      if (paused > Date.now()) return false;
+      this.ownerReadsPaused.delete(channel);
+    }
+
     const where = `surface=${SLACK_SURFACE} channel=${channel} thread=${root}`;
     let expired = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1021,16 +1041,22 @@ export class SlackAdapter implements SurfaceAdapter {
     } catch (error) {
       // The reason is Slack's own error code, or the client's: a closed vocabulary, never the
       // message text, never the token.
-      console.warn(`thread_owner_read_failed ${where} reason=${JSON.stringify(slackFailure(error))}`);
+      const reason = slackFailure(error);
+      const limited = reason === "ratelimited" || reason === "slack_webapi_rate_limited_error";
+      const pause = limited ? ` paused_ms=${this.pauseOwnerReads(channel)}` : "";
+      console.warn(`thread_owner_read_failed ${where} reason=${JSON.stringify(reason)}${pause}`);
       return false;
     } finally {
-      // Whichever won, nothing reads another page: a lookup nobody waits on would keep
-      // calling Slack while it rate-limits, and its client pauses every call behind a 429.
+      // Whichever won, nothing reads another page: a lookup nobody waits on would only spend
+      // Slack's quota on an answer nobody reads.
       expired = true;
       clearTimeout(timer);
     }
     if (found === "expired") {
-      console.warn(`thread_owner_read_failed ${where} reason="timeout" ms=${OWN_THREAD_LOOKUP_MS}`);
+      console.warn(
+        `thread_owner_read_failed ${where} reason="timeout" ms=${OWN_THREAD_LOOKUP_MS} ` +
+          `paused_ms=${this.pauseOwnerReads(channel)}`,
+      );
       return false;
     }
     // Stopped before the last page for a reason other than an answer — a moved generation.
@@ -1038,6 +1064,12 @@ export class SlackAdapter implements SurfaceAdapter {
     if (found) remember(this.ownThreads, key, THREAD_LIMIT);
     else remember(this.otherThreads, key, THREAD_LIMIT);
     return found;
+  }
+
+  /** Stops ownership lookups in `channel` for {@link OWN_THREAD_PAUSE_MS}, and says how long. */
+  private pauseOwnerReads(channel: string): number {
+    this.ownerReadsPaused.set(channel, Date.now() + OWN_THREAD_PAUSE_MS);
+    return OWN_THREAD_PAUSE_MS;
   }
 
   /**
