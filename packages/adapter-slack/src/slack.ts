@@ -118,20 +118,6 @@ export interface SlackAdapterOptions {
   channels: readonly ChannelDecl[];
   /** Resume point persisted by the CLI; Slack timestamps are Unix seconds. */
   since?: number;
-  /**
-   * Wake on an untagged reply in a thread this agent has posted in. Off unless set.
-   *
-   * Without it a channel thread works like any channel message: someone has to tag the bot
-   * again on every reply, even in the thread it started or answered in. With it, a person's
-   * reply there is a direct address the way a DM is — unless it tags somebody else and not
-   * this bot, which addresses them. Another agent's reply still has to tag: two agents that
-   * woke on each other's untagged replies would talk until a cap stopped them.
-   *
-   * A thread anyone else started and the agent never posted in stays mention-only. It also
-   * needs the app subscribed to `message.channels` (and `message.groups` for private
-   * channels), which is how an untagged message reaches this adapter at all.
-   */
-  wakeInOwnThreads?: boolean;
   api?: SlackApiClient;
   socket?: SlackSocketClient;
 }
@@ -203,24 +189,6 @@ const HISTORY_PAGE = 200;
 /** A dedup key only has to outlive Slack's retries and the backfill/live overlap. */
 const SEEN_LIMIT = 2_048;
 
-/**
- * How many threads' ownership one run remembers, each way. Enough for every thread a busy
- * agent is in over a day; one that falls out costs one `conversations.replies` to relearn.
- */
-const THREAD_LIMIT = 2_048;
-
-/** Adds to an insertion-ordered set, dropping the oldest entry once it is over `limit`. */
-function remember(set: Set<string>, key: string, limit: number): void {
-  set.delete(key);
-  set.add(key);
-  if (set.size > limit) set.delete(set.values().next().value!);
-}
-
-/** The `ts` of the thread an event sits in. Only for an event that has a `threadRoot`. */
-function rootTs(event: InboundEvent): string {
-  return parseSlackEventId(event.threadRoot!.nativeId).ts;
-}
-
 /** Reads a reply target straight off the event, which is where it was all along. */
 function contextOf(event: InboundEvent): SlackInboundContext {
   return {
@@ -247,19 +215,6 @@ export class SlackAdapter implements SurfaceAdapter {
   /** One entry per channel, for a reply with no triggering event to thread onto. */
   private readonly lastByChannel = new Map<string, SlackInboundContext>();
   private readonly seen = new Set<string>();
-  /** `wakeInOwnThreads`, as constructed. Every use of the two sets below is behind it. */
-  private readonly wakeInOwnThreads: boolean;
-  /**
-   * Threads this agent has posted in, as `channel:root ts` — learned from its own sends and
-   * posts, from its own messages arriving on the socket, and from a lookup when a reply
-   * lands in a thread it has no answer about.
-   */
-  private readonly ownThreads = new Set<string>();
-  /**
-   * Threads a lookup found it had not posted in, so the next reply there spends no call.
-   * Cleared for a thread the moment it posts there — only a post of its own can change it.
-   */
-  private readonly otherThreads = new Set<string>();
   /**
    * Member id to name, filled as messages mention people and never expired. A rename goes
    * unnoticed until restart — the alternative, `users.list` at boot, spends a whole
@@ -319,7 +274,6 @@ export class SlackAdapter implements SurfaceAdapter {
       opts.channels.flatMap((channel) => (channel.name ? [[channel.id, channel.name]] : [])),
     );
     this.since = opts.since;
-    this.wakeInOwnThreads = opts.wakeInOwnThreads ?? false;
     this.api = opts.api ?? new WebSlackApi(opts.botToken);
     this.socket =
       opts.socket ??
@@ -434,7 +388,6 @@ export class SlackAdapter implements SurfaceAdapter {
     const threadTs =
       target.threadTs ?? (this.dmChannels.has(channel.id) ? undefined : target.eventTs);
     await this.api.postMessage({ channel: channel.id, text, threadTs });
-    if (threadTs) this.postedIn(channel.id, threadTs);
   }
 
   postTargets(): ChannelRef[] {
@@ -474,9 +427,6 @@ export class SlackAdapter implements SurfaceAdapter {
       text: address(mentions) + text,
       threadTs: root?.ts,
     });
-    // A top-level post is the root of the thread its answers will start.
-    const thread = root?.ts ?? ts;
-    if (thread) this.postedIn(channel.id, thread);
     return ts ? { surface: SLACK_SURFACE, nativeId: slackEventId(channel.id, ts) } : undefined;
   }
 
@@ -917,16 +867,8 @@ export class SlackAdapter implements SurfaceAdapter {
     // is a name the brain never saw.
     await this.learnNames(message.text ?? "");
     if (generation !== this.generation) return;
-    let normalized = toSlackInboundEvent(message, this.normalizeOptions());
+    const normalized = toSlackInboundEvent(message, this.normalizeOptions());
     if (!normalized) return;
-    if (this.wakeInOwnThreads && normalized.author.isSelf) {
-      // Its own message, however it got here — this process, another one posting as the
-      // same bot, or a backfill. A top-level one roots the thread its answers start.
-      this.postedIn(message.channel, normalized.threadRoot ? rootTs(normalized) : message.ts!);
-    } else if (this.wakeInOwnThreads && (await this.repliedToMe(normalized, message, generation))) {
-      normalized = { ...normalized, mentionsMe: true };
-    }
-    if (generation !== this.generation) return;
 
     const key = normalized.id.nativeId;
     if (this.seen.has(key)) return;
@@ -943,65 +885,6 @@ export class SlackAdapter implements SurfaceAdapter {
       this.lastByChannel.set(normalized.channel.id, context);
     }
     this.onEvent?.(normalized);
-  }
-
-  /** Records that this agent has posted in a thread, when it was asked to care. */
-  private postedIn(channel: string, rootTs: string): void {
-    if (!this.wakeInOwnThreads) return;
-    const key = slackEventId(channel, rootTs);
-    this.otherThreads.delete(key);
-    remember(this.ownThreads, key, THREAD_LIMIT);
-  }
-
-  /**
-   * Whether an untagged message is a person's reply in a thread this agent has posted in —
-   * the one case `wakeInOwnThreads` adds to the wake rule.
-   *
-   * Everything cheap is decided first, so the lookup is spent only on a reply that would
-   * wake if the answer is yes. A reply that tags somebody else and not this bot is talking
-   * to them. Another agent still has to tag, so two agents cannot wake each other forever.
-   */
-  private async repliedToMe(
-    event: InboundEvent,
-    message: SlackMessage,
-    generation: number,
-  ): Promise<boolean> {
-    if (event.mentionsMe || !event.threadRoot) return false;
-    if (event.author.isAgent) return false;
-    if (slackMentionedMembers(message.text ?? "").some((id) => id !== this.botUserId)) {
-      return false;
-    }
-    return this.ownsThread(message.channel!, rootTs(event), generation);
-  }
-
-  /**
-   * Whether this agent has posted in a thread, asking Slack only when nothing here knows.
-   *
-   * A restart forgets every thread it was in, and a reply in one of those must not go deaf
-   * until somebody tags the bot again — so an unknown thread is read once and the answer
-   * kept. A lookup that fails is not kept and answers no: the reply then needs a tag, which
-   * is what it needed before this option existed.
-   */
-  private async ownsThread(channel: string, root: string, generation: number): Promise<boolean> {
-    const key = slackEventId(channel, root);
-    if (this.ownThreads.has(key)) return true;
-    if (this.otherThreads.has(key)) return false;
-    let messages: SlackMessage[];
-    try {
-      messages = await this.collect(
-        (cursor) => this.api.replies({ channel, ts: root, oldest: "0", cursor }),
-        () => generation === this.generation,
-      );
-    } catch {
-      return false;
-    }
-    if (generation !== this.generation) return false;
-    const mine = messages.some(
-      (m) => m.user === this.botUserId || (!!this.botId && m.bot_id === this.botId),
-    );
-    if (mine) remember(this.ownThreads, key, THREAD_LIMIT);
-    else remember(this.otherThreads, key, THREAD_LIMIT);
-    return mine;
   }
 
   /** What the privacy answers resolved at startup amount to. Only valid once `started`. */
