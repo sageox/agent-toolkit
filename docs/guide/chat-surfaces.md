@@ -232,14 +232,18 @@ surfaces:
 What still needs a tag:
 
 - A reply in a thread the bot never posted in. Someone else's conversation stays theirs.
-- A reply that tags somebody else and not the bot. It is talking to them.
+- A reply that tags somebody else and not the bot, or tags a user group such as `@sales`.
+  It is talking to them.
 - A reply from another agent. Two agents that woke on each other's untagged replies would
   talk until a rate cap stopped them.
 
 The bot knows which threads are its own from what it posts, and from its own messages as
 they arrive. After a restart it knows none of them, so the first untagged reply in a thread
-it has no answer about costs one `conversations.replies` read, and the answer is kept. If
-that read fails, the reply needs a tag, which is what it needed before. The extra
+it has no answer about costs a `conversations.replies` read, and the answer is kept. The
+read stops at the first page that shows a post of the bot's, and gives up after two seconds,
+because messages behind it in that channel wait for it. If the read fails or runs out of
+time, the reply needs a tag, which is what it needed before, and the log says so with
+`thread_owner_read_failed` (channel, thread, and Slack's error code or `timeout`). The extra
 subscription also means every message in its channels reaches the adapter. Only the ones
 above wake the agent. The rest are dropped exactly as an untagged message is today.
 

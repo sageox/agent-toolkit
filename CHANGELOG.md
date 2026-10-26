@@ -20,10 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wakeInOwnThreads: true` on the Slack surface and subscribe the app to `message.channels`
   (and `message.groups`), and a person replying in a thread the bot started or answered in no
   longer has to tag it again. A reply in a thread the bot never posted in, one that tags
-  somebody else, and one from another agent still need a tag. The adapter learns its threads
-  from its own posts and its own messages as they arrive; after a restart, the first untagged
-  reply in an unknown thread costs one `conversations.replies` read, and a failed read means
-  the reply needs a tag. Off by default, so no existing agent changes.
+  somebody else or a user group, and one from another agent still need a tag. The adapter
+  learns its threads from its own posts and its own messages as they arrive; after a restart,
+  the first untagged reply in an unknown thread costs a `conversations.replies` read, which
+  stops at the first page showing a post of the bot's and gives up after two seconds so the
+  channel's next mention is not held behind it. A read that fails or times out means the
+  reply needs a tag, and is logged as `thread_owner_read_failed`. Off by default, so no
+  existing agent changes.
 
 - **`run --rehearse` and `job run <slug> --rehearse` run the real agent with nobody
   listening.** Watching an agent with a private brain take a turn meant deploying it, because
