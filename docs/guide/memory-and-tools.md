@@ -295,19 +295,21 @@ mcpServers:
 }
 ```
 
-It is the same answer the reaction tool and the job door use: the message the gateway is
-answering, from the event it received. The brain cannot set it — anything it sends under
+It comes from the registry the reaction tool and the job door use: the message the gateway
+is answering, from the event it received. The brain cannot set it — anything it sends under
 that key is replaced — and every other `_meta` key passes through. `message` and `thread`
-are the surface's own references, so `message` is a deduplication key as it stands. When
-no single turn is live the value is `null`, not missing: nothing is mid-turn, or two
-channels are and there is no saying whose call this is. Treat `null` as "unknown caller"
-and refuse what needs one; a missing key means a toolkit too old to stamp. A scheduled turn
-is not a live turn in that registry, so its calls stamp `null` — except while a chat turn is
-live at the same moment, when they carry that chat turn, exactly as the reaction tool and
-the job door would read it. An agent whose scheduled jobs call a stamped server should not
-trust the stamp from those calls. With the default
+are the surface's own references, so `message` is a deduplication key as it stands.
+
+A `tools/call` names no turn, so the stamp names one only when no other answer is possible:
+exactly one turn is live, and the only brain work running is that turn's own. Otherwise the
+value is `null`, not missing. That covers nothing being mid-turn, two channels mid-turn at
+once, a scheduled tick running, and a turn that timed out while its brain was still working
+— the timeout frees the channel but cannot stop the prompt, which can go on calling tools,
+and those calls must not be credited to whoever's turn is live by then. The stamp stays
+`null` until that prompt finishes. Treat `null` as "unknown caller" and refuse what needs
+one; a missing key means a toolkit too old to stamp. With the default
 `limits.maxConcurrentChannels: 4`, a busy agent will see `null` whenever two conversations
-overlap; set it to `1` if a stamped server must always know who asked.
+overlap; set it to `1` if a stamped server should usually know who asked.
 
 Off unless you write it, because it hands a third-party process member and message ids it
 never had before. A server without it receives each call exactly as the brain sent it.

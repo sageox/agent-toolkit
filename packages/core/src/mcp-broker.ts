@@ -172,12 +172,13 @@ export interface McpBrokerOptions {
   /** Called when a pinned tool's schema changes — a rug-pull is reported, not passed on. */
   onSchemaChange?: (tool: string, server: string) => void;
   /**
-   * The message this agent is answering, when exactly one turn is live.
+   * The message a call arriving now was made for, or `null` when that cannot be known.
    *
    * Read only for a server that sets `stampTurn`. A `tools/call` carries nothing about the
-   * turn that produced it, and the gateway is what knows — the registry the reaction tool
-   * and the job door already read. Absent, as it is with no surface to answer on, every
-   * stamp is `null`.
+   * turn that produced it, and the gateway is what knows — `run` wires this to
+   * `SurfaceEgress.callerEvent`, which names the live turn only while no other brain work
+   * (a prompt a timed-out turn left running, a scheduled tick) could have made the call.
+   * Absent, as it is with no surface to answer on, every stamp is `null`.
    */
   answering?: () => InboundEvent | null;
 }

@@ -503,12 +503,14 @@ export class Gateway {
     // with its own, shorter one.
     const closeClock = this.clock.open(Date.now() + timeoutMs);
     const closeAudit = turnListening();
+    // Held until the brain's own work settles, not until the bound below gives up on it: a
+    // prompt abandoned by the timeout can still call tools, and the live-turn stamp must not
+    // credit those calls to whichever turn is live by then. See `SurfaceEgress.callerEvent`.
+    const closePrompt = this.egress.prompting(e);
+    const driving = this.drive(turn, e, send, tally);
+    void driving.then(closePrompt, closePrompt);
     try {
-      return await withTimeout(
-        this.drive(turn, e, send, tally),
-        timeoutMs,
-        `turn timed out after ${timeoutMs}ms`,
-      );
+      return await withTimeout(driving, timeoutMs, `turn timed out after ${timeoutMs}ms`);
     } finally {
       closeClock();
       closeAudit();

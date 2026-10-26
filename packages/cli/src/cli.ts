@@ -409,9 +409,9 @@ async function buildBrain(
           process.stdout.write(
             `  warning: ${server}'s "${tool}" changed shape since it was approved — held back\n`,
           ),
-        // Who a stamped call is from, for the servers that set `stampTurn`: the same live
-        // turn the job door's `answering` reads below.
-        answering: egress && (() => egress.answeringEvent()),
+        // Who a stamped call is from, for the servers that set `stampTurn`: the live turn,
+        // and only while no other brain work is running that could have made the call.
+        answering: egress && (() => egress.callerEvent()),
       })
     : undefined;
 

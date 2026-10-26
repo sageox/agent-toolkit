@@ -114,6 +114,11 @@ export class SurfaceEgress {
    * know is that it is mid-turn, and the gateway knows which message that turn is for.
    */
   private answering = new Map<string, LiveTurn>();
+  /**
+   * The brain work still running, each entry the event it was started for. See
+   * {@link prompting}.
+   */
+  private prompts = new Set<{ event: InboundEvent }>();
   /** Posts made on a conversation's behalf, and where their answers go. See `links.ts`. */
   private links = new Links();
 
@@ -217,6 +222,40 @@ export class SurfaceEgress {
    */
   answeringEvent(): InboundEvent | null {
     return this.liveTurn()?.event ?? null;
+  }
+
+  /**
+   * Records brain work as running for `event`, until the returned closer runs.
+   *
+   * Not the same span as {@link answers}. A turn that times out is closed there at once —
+   * its channel moves on — but the timeout cannot cancel a brain suspended inside an
+   * `await`, so the prompt it started can go on calling tools for minutes. This is held for
+   * as long as that prompt can, which only the turn's own work settling can say.
+   */
+  prompting(event: InboundEvent): () => void {
+    const prompt = { event };
+    this.prompts.add(prompt);
+    return () => {
+      this.prompts.delete(prompt);
+    };
+  }
+
+  /**
+   * The message a tool call arriving now was made for, or `null` when that cannot be known.
+   *
+   * Stricter than {@link answeringEvent}, because it is handed to a server as the gateway's
+   * word on who asked, and a server may record a write against it. A `tools/call` names no
+   * turn, so a call is attributed only when exactly one turn is live **and** the only brain
+   * work running is that turn's own. A prompt left running by a turn that timed out, or a
+   * scheduled tick's, could otherwise make a call stamped with whoever's turn happened to
+   * be live next — a different person, and a different message. While such work runs, the
+   * answer is `null`, which a server reads as "the gateway does not know who is asking".
+   */
+  callerEvent(): InboundEvent | null {
+    const turn = this.liveTurn();
+    if (!turn || this.prompts.size !== 1) return null;
+    const [prompt] = this.prompts;
+    return prompt.event === turn.event ? turn.event : null;
   }
 
   /**

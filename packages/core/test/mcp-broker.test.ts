@@ -4,6 +4,9 @@ import { McpBroker, TURN_META_KEY, type McpTransport } from "../src/mcp-broker.t
 import { loadToolPolicy, qualifyTool } from "../src/tool-policy.ts";
 import { loadManifest } from "../src/manifest.ts";
 import { SurfaceEgress } from "../src/surface-egress.ts";
+import { Gateway } from "../src/gateway.ts";
+import type { SurfaceAdapter } from "../src/adapter.ts";
+import type { BrainStep, GuardFeedback } from "../src/brain.ts";
 
 const policy = loadToolPolicy(
   JSON.stringify({
@@ -259,27 +262,93 @@ describe("McpBroker live-turn stamp", () => {
       adapters: [],
     });
     const f = fakeServer();
-    const b = stampingBroker(f, () => egress.answeringEvent());
+    const b = stampingBroker(f, () => egress.callerEvent());
     const id = await b.connect("gtm");
     const stamp = () => (f.received.at(-1)?.params as { _meta: Record<string, unknown> })._meta[TURN_META_KEY];
 
     const ryan = egress.answers(live);
+    const ryanPrompt = egress.prompting(live);
     await b.message(id, "tools/call", { name: "save_lead" });
     expect(stamp()).toMatchObject({ message: "CLEADS:1786761000.000200", author: { id: "U0RYAN" } });
 
-    const other = egress.answers({
+    const milk: InboundEvent = {
       ...live,
       id: { surface: "slack", nativeId: "DMILK:1786761000.000900" },
       channel: { surface: "slack", id: "DMILK", isPublic: false },
       author: { ...live.author, id: "U0MILK" },
-    });
+    };
+    const other = egress.answers(milk);
+    const otherPrompt = egress.prompting(milk);
     await b.message(id, "tools/call", { name: "save_lead" });
     expect(stamp()).toBeNull();
 
     other.close();
+    otherPrompt();
     ryan.close();
+    ryanPrompt();
     await b.message(id, "tools/call", { name: "save_lead" });
     expect(stamp()).toBeNull();
+  });
+
+  it("names nobody while a prompt from a timed-out turn can still call tools", async () => {
+    // Ryan's turn times out with its brain still running. Milkana's turn, in another
+    // channel, is then the only one live — and the call Ryan's prompt makes late is still
+    // Ryan's, not hers. With no way to tell from the call, it is stamped `null`.
+    const consoleEvent = (channel: string, author: string): InboundEvent => ({
+      id: { surface: "console", nativeId: `${channel}:1` },
+      surface: "console",
+      channel: { surface: "console", id: channel, isPublic: false },
+      author: { surface: "console", id: author, isSelf: false, isAgent: false },
+      text: "save the lead",
+      mentionsMe: true,
+      ts: "2026-08-13T00:00:00Z",
+      raw: null,
+    });
+    let emit!: (e: InboundEvent) => void;
+    const adapter: SurfaceAdapter = {
+      kind: "console",
+      start: async (onEvent) => {
+        emit = onEvent!;
+      },
+      send: async () => {},
+      stop: async () => {},
+    };
+    const manifest = loadManifest(
+      "name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: console}]\n" +
+        "limits: {turnTimeoutMs: 40}\n",
+    );
+    const egress = new SurfaceEgress({ manifest, adapters: [adapter] });
+    const f = fakeServer();
+    const b = stampingBroker(f, () => egress.callerEvent());
+    const id = await b.connect("gtm");
+    const stamp = () => (f.received.at(-1)?.params as { _meta: Record<string, unknown> })._meta[TURN_META_KEY];
+
+    const gates = new Map<string, () => void>();
+    const gate = (who: string) => new Promise<void>((resolve) => gates.set(who, resolve));
+    const brain = {
+      async *runTurn(event: InboundEvent): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        await gate(event.author.id); // the model thinking, past the turn's deadline for Ryan
+        await b.message(id, "tools/call", { name: "save_lead" });
+        yield { type: "reply", msg: { text: "saved" } };
+      },
+    };
+    const gw = new Gateway({ manifest, adapters: [adapter], brain, egress, onError: () => {} });
+    await gw.start();
+
+    emit(consoleEvent("CRYAN", "U0RYAN"));
+    await new Promise((r) => setTimeout(r, 80)); // Ryan's turn has timed out and closed
+    emit(consoleEvent("CMILK", "U0MILK"));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(egress.answeringEvent()?.author.id).toBe("U0MILK");
+
+    gates.get("U0RYAN")!();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(stamp()).toBeNull();
+
+    // Once the abandoned prompt has finished, Milkana's own call is hers again.
+    gates.get("U0MILK")!();
+    await gw.drain();
+    expect(stamp()).toMatchObject({ channel: "CMILK", author: { id: "U0MILK" } });
   });
 
   it("stamps only `tools/call`, leaving the handshake and listing alone", async () => {
