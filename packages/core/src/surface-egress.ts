@@ -240,6 +240,11 @@ export class SurfaceEgress {
     };
   }
 
+  /** How much brain work is running, abandoned prompts included. For a log line. */
+  promptsRunning(): number {
+    return this.prompts.size;
+  }
+
   /**
    * The message a tool call arriving now was made for, or `null` when that cannot be known.
    *

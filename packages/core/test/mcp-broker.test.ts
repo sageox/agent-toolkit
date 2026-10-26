@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { InboundEvent } from "../src/events.ts";
 import { McpBroker, TURN_META_KEY, type McpTransport } from "../src/mcp-broker.ts";
 import { loadToolPolicy, qualifyTool } from "../src/tool-policy.ts";
@@ -315,7 +315,7 @@ describe("McpBroker live-turn stamp", () => {
     };
     const manifest = loadManifest(
       "name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: console}]\n" +
-        "limits: {turnTimeoutMs: 40}\n",
+        "limits: {turnTimeoutMs: 250}\n",
     );
     const egress = new SurfaceEgress({ manifest, adapters: [adapter] });
     const f = fakeServer();
@@ -323,32 +323,67 @@ describe("McpBroker live-turn stamp", () => {
     const id = await b.connect("gtm");
     const stamp = () => (f.received.at(-1)?.params as { _meta: Record<string, unknown> })._meta[TURN_META_KEY];
 
-    const gates = new Map<string, () => void>();
-    const gate = (who: string) => new Promise<void>((resolve) => gates.set(who, resolve));
+    /** A promise and the function that settles it, for stepping the turns by hand. */
+    const signal = <T = void>() => {
+      let fire!: (value: T) => void;
+      const fired = new Promise<T>((resolve) => (fire = resolve));
+      return { fired, fire };
+    };
+    const thinking: Record<string, { fired: Promise<void>; fire: () => void }> = {
+      U0RYAN: signal(),
+      U0MILK: signal(),
+    };
+    const done: Record<string, { fired: Promise<void>; fire: () => void }> = {
+      U0RYAN: signal(),
+      U0MILK: signal(),
+    };
+    const called = { U0RYAN: signal<Promise<unknown>>(), U0MILK: signal<Promise<unknown>>() };
+    const timedOut = signal<string>();
     const brain = {
       async *runTurn(event: InboundEvent): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
-        await gate(event.author.id); // the model thinking, past the turn's deadline for Ryan
-        await b.message(id, "tools/call", { name: "save_lead" });
+        const who = event.author.id as "U0RYAN" | "U0MILK";
+        thinking[who].fire();
+        await done[who].fired; // the model thinking, past the turn's deadline for Ryan
+        const call = b.message(id, "tools/call", { name: "save_lead" });
+        called[who].fire(call);
+        await call;
         yield { type: "reply", msg: { text: "saved" } };
       },
     };
-    const gw = new Gateway({ manifest, adapters: [adapter], brain, egress, onError: () => {} });
-    await gw.start();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const gw = new Gateway({
+        manifest,
+        adapters: [adapter],
+        brain,
+        egress,
+        onError: (_error, event) => timedOut.fire(event.author.id),
+      });
+      await gw.start();
 
-    emit(consoleEvent("CRYAN", "U0RYAN"));
-    await new Promise((r) => setTimeout(r, 80)); // Ryan's turn has timed out and closed
-    emit(consoleEvent("CMILK", "U0MILK"));
-    await new Promise((r) => setTimeout(r, 5));
-    expect(egress.answeringEvent()?.author.id).toBe("U0MILK");
+      emit(consoleEvent("CRYAN", "U0RYAN"));
+      await thinking.U0RYAN.fired;
+      expect(await timedOut.fired).toBe("U0RYAN"); // Ryan's turn has timed out and closed
+      expect(warn.mock.calls.map(([line]) => String(line))).toContainEqual(
+        expect.stringMatching(/^prompt_outlived_turn surface=console channel=CRYAN event=CRYAN:1 ms=\d+ prompts=1$/),
+      );
+      emit(consoleEvent("CMILK", "U0MILK"));
+      await thinking.U0MILK.fired;
+      expect(egress.answeringEvent()?.author.id).toBe("U0MILK");
 
-    gates.get("U0RYAN")!();
-    await new Promise((r) => setTimeout(r, 5));
-    expect(stamp()).toBeNull();
+      done.U0RYAN.fire();
+      await (await called.U0RYAN.fired);
+      expect(stamp()).toBeNull();
 
-    // Once the abandoned prompt has finished, Milkana's own call is hers again.
-    gates.get("U0MILK")!();
-    await gw.drain();
-    expect(stamp()).toMatchObject({ channel: "CMILK", author: { id: "U0MILK" } });
+      // Once the abandoned prompt has finished, Milkana's own call is hers again.
+      await vi.waitFor(() => expect(egress.promptsRunning()).toBe(1), { interval: 1 });
+      done.U0MILK.fire();
+      await (await called.U0MILK.fired);
+      expect(stamp()).toMatchObject({ channel: "CMILK", author: { id: "U0MILK" } });
+      await gw.drain();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("stamps only `tools/call`, leaving the handshake and listing alone", async () => {

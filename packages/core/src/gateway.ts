@@ -507,14 +507,30 @@ export class Gateway {
     // prompt abandoned by the timeout can still call tools, and the live-turn stamp must not
     // credit those calls to whichever turn is live by then. See `SurfaceEgress.callerEvent`.
     const closePrompt = this.egress.prompting(e);
+    const prompted = Date.now();
+    let prompting = true;
+    const settled = () => {
+      prompting = false;
+      closePrompt();
+    };
+    // Registered before the bound below, so a turn that settles runs this first and the
+    // `finally` sees it done.
     const driving = this.drive(turn, e, send, tally);
-    void driving.then(closePrompt, closePrompt);
+    void driving.then(settled, settled);
     try {
       return await withTimeout(driving, timeoutMs, `turn timed out after ${timeoutMs}ms`);
     } finally {
       closeClock();
       closeAudit();
       this.reportStranded();
+      // Said once, here, because nothing else will: until this prompt ends, every stamped
+      // tool call names nobody, and a server refusing `null` refuses them all.
+      if (prompting) {
+        console.warn(
+          `prompt_outlived_turn surface=${e.surface} channel=${e.channel.id} event=${e.id.nativeId} ` +
+            `ms=${Date.now() - prompted} prompts=${this.egress.promptsRunning()}`,
+        );
+      }
       // An abandoned generator never runs its own `finally`, so the brain would never
       // close its ACP session on a failed send or a timeout. Returning it does.
       //
