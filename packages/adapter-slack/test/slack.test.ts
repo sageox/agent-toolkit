@@ -2173,6 +2173,66 @@ describe("SlackAdapter wakeInOwnThreads", () => {
     }
   });
 
+  it("pauses the channel when the Slack client's own timeout ends the read", async () => {
+    // The client's timeout and the adapter's are the same two seconds, so either can fire
+    // first. When the client's does, the read fails rather than expiring, and must still
+    // count as Slack being slow.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+      await instance.start(() => {});
+      api.replies = async (args) => {
+        api.replyCalls.push(args);
+        throw Object.assign(new Error("A request error occurred: The operation was aborted due to timeout"), {
+          code: "slack_webapi_request_error",
+          original: new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+        });
+      };
+
+      await socket.emit(reply("1786761000.000300", "1786760000.000001"));
+      await socket.emit(reply("1786761000.000400", "1786760000.000002"));
+
+      expect(api.replyCalls).toHaveLength(1);
+      expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+        'thread_owner_read_failed surface=slack channel=GENG thread=1786760000.000001 reason="timeout" ' +
+          "paused_ms=30000",
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not let a lookup from a stopped run pause the run that replaced it", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+      const got: InboundEvent[] = [];
+      await instance.start((event) => got.push(event));
+      const replies = api.replies.bind(api);
+      let slow = true;
+      api.replies = async (args) => {
+        const page = await replies(args);
+        if (slow) await new Promise((resolve) => setTimeout(resolve, 10_000));
+        return page;
+      };
+
+      const stale = socket.emit(reply("1786761000.000300", "1786760000.000001")) as Promise<void>;
+      await vi.advanceTimersByTimeAsync(0);
+      await instance.stop();
+      await instance.start((event) => got.push(event));
+      await vi.advanceTimersByTimeAsync(2_000); // the old run's lookup runs out of time now
+      await stale;
+
+      slow = false;
+      await socket.emit(reply("1786761000.000400", "1786760000.000002"));
+      expect(api.replyCalls).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("reads ownership on a client that rejects a rate limit instead of pausing the rest", async () => {
     // WebClient answers a 429 by pausing its whole queue for the Retry-After. On the shared
     // client, a rate-limited ownership read would hold the next name lookup and the agent's

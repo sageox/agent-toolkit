@@ -1041,9 +1041,10 @@ export class SlackAdapter implements SurfaceAdapter {
     } catch (error) {
       // The reason is Slack's own error code, or the client's: a closed vocabulary, never the
       // message text, never the token.
-      const reason = slackFailure(error);
-      const limited = reason === "ratelimited" || reason === "slack_webapi_rate_limited_error";
-      const pause = limited ? ` paused_ms=${this.pauseOwnerReads(channel)}` : "";
+      const reason = slackTimedOut(error) ? "timeout" : slackFailure(error);
+      const slow = reason === "timeout" || reason === "ratelimited" ||
+        reason === "slack_webapi_rate_limited_error";
+      const pause = slow ? this.pauseOwnerReads(channel, generation) : "";
       console.warn(`thread_owner_read_failed ${where} reason=${JSON.stringify(reason)}${pause}`);
       return false;
     } finally {
@@ -1054,8 +1055,8 @@ export class SlackAdapter implements SurfaceAdapter {
     }
     if (found === "expired") {
       console.warn(
-        `thread_owner_read_failed ${where} reason="timeout" ms=${OWN_THREAD_LOOKUP_MS} ` +
-          `paused_ms=${this.pauseOwnerReads(channel)}`,
+        `thread_owner_read_failed ${where} reason="timeout" ms=${OWN_THREAD_LOOKUP_MS}` +
+          this.pauseOwnerReads(channel, generation),
       );
       return false;
     }
@@ -1066,10 +1067,15 @@ export class SlackAdapter implements SurfaceAdapter {
     return found;
   }
 
-  /** Stops ownership lookups in `channel` for {@link OWN_THREAD_PAUSE_MS}, and says how long. */
-  private pauseOwnerReads(channel: string): number {
+  /**
+   * Stops ownership lookups in `channel` for {@link OWN_THREAD_PAUSE_MS}, and says so for the
+   * log line — unless the lookup belongs to a run that has ended, which has no say over the
+   * run serving now.
+   */
+  private pauseOwnerReads(channel: string, generation: number): string {
+    if (generation !== this.generation) return "";
     this.ownerReadsPaused.set(channel, Date.now() + OWN_THREAD_PAUSE_MS);
-    return OWN_THREAD_PAUSE_MS;
+    return ` paused_ms=${OWN_THREAD_PAUSE_MS}`;
   }
 
   /**
@@ -1566,6 +1572,15 @@ function slackErrorCode(error: unknown): string | undefined {
 function slackFailure(error: unknown): string {
   const client = (error as { code?: unknown } | null)?.code;
   return slackErrorCode(error) ?? (typeof client === "string" ? client : "unknown");
+}
+
+/**
+ * Whether a Web API call failed by running out of time: the client's own `timeout`, which
+ * it reports as a request error wrapping the `TimeoutError` its `AbortSignal` rejected with.
+ */
+function slackTimedOut(error: unknown): boolean {
+  const failure = error as { code?: unknown; original?: { name?: unknown } } | null;
+  return failure?.code === "slack_webapi_request_error" && failure.original?.name === "TimeoutError";
 }
 
 /**
