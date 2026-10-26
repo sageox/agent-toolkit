@@ -241,7 +241,9 @@ The bot knows which threads are its own from what it posts, and from its own mes
 they arrive. After a restart it knows none of them, so the first untagged reply in a thread
 it has no answer about costs a `conversations.replies` read, and the answer is kept. The
 read stops at the first page that shows a post of the bot's, and gives up after two seconds,
-because messages behind it in that channel wait for it. If the read fails or runs out of
+because messages behind it in that channel wait for it. It runs on a Slack client of its
+own that rejects a rate limit rather than waiting it out, so a rate-limited read cannot
+pause the bot's replies or name lookups. If the read fails or runs out of
 time, the reply needs a tag, which is what it needed before, and the log says so with
 `thread_owner_read_failed` (channel, thread, and Slack's error code or `timeout`). The extra
 subscription also means every message in its channels reaches the adapter. Only the ones

@@ -1,6 +1,6 @@
 import { ConsoleLogger } from "@slack/logger";
 import { SocketModeClient } from "@slack/socket-mode";
-import { WebClient } from "@slack/web-api";
+import { WebClient, type FetchFunction } from "@slack/web-api";
 import type {
   ActorRef,
   ChannelDecl,
@@ -82,13 +82,19 @@ export interface SlackApiClient {
     cursor?: string;
     limit?: number;
   }): Promise<SlackHistoryPage>;
-  /** `latest` is exclusive, as Slack takes it: a message at exactly that `ts` is not returned. */
+  /**
+   * `latest` is exclusive, as Slack takes it: a message at exactly that `ts` is not returned.
+   *
+   * `once` is for a read that must not wait: one attempt, a rate limit rejected rather than
+   * waited out, and nothing else held up behind it. The thread-ownership lookup uses it.
+   */
   replies(args: {
     channel: string;
     ts: string;
     oldest: string;
     latest?: string;
     cursor?: string;
+    once?: boolean;
   }): Promise<SlackHistoryPage>;
   /** Who a member id is, or `undefined` when Slack will not say. */
   user(id: string): Promise<SlackUser | undefined>;
@@ -1049,7 +1055,7 @@ export class SlackAdapter implements SurfaceAdapter {
   ): Promise<boolean | undefined> {
     let cursor: string | undefined;
     do {
-      const page = await this.api.replies({ channel, ts: root, oldest: "0", cursor });
+      const page = await this.api.replies({ channel, ts: root, oldest: "0", cursor, once: true });
       const mine = (page.messages ?? []).some(
         (m) => m.user === this.botUserId || (!!this.botId && m.bot_id === this.botId),
       );
@@ -1297,9 +1303,27 @@ export function privacyOf(
  */
 export class WebSlackApi implements SlackApiClient {
   private readonly client: WebClient;
+  /**
+   * The same token on a client of its own, for a read asked for `once`.
+   *
+   * Its own because `WebClient` answers a 429 by pausing its whole request queue until the
+   * `Retry-After` has passed: a rate-limited read on the shared client would hold the name
+   * lookups and `chat.postMessage` behind it even after its caller had stopped waiting. This
+   * one rejects a rate limit at once, tries once, and gives up on a slow answer at
+   * {@link OWN_THREAD_LOOKUP_MS}.
+   */
+  private readonly once: WebClient;
 
-  constructor(botToken: string) {
-    this.client = new WebClient(botToken);
+  /** `fetch` replaces the network, for a test; nothing in production passes it. */
+  constructor(botToken: string, opts: { fetch?: FetchFunction } = {}) {
+    const transport = opts.fetch ? { fetch: opts.fetch } : {};
+    this.client = new WebClient(botToken, transport);
+    this.once = new WebClient(botToken, {
+      ...transport,
+      rejectRateLimitedCalls: true,
+      retryConfig: { retries: 0 },
+      timeout: OWN_THREAD_LOOKUP_MS,
+    });
   }
 
   async authTest(): Promise<{ userId?: string; botId?: string }> {
@@ -1359,8 +1383,9 @@ export class WebSlackApi implements SlackApiClient {
     oldest: string;
     latest?: string;
     cursor?: string;
+    once?: boolean;
   }): Promise<SlackHistoryPage> {
-    const response = await this.client.conversations.replies({
+    const response = await (args.once ? this.once : this.client).conversations.replies({
       channel: args.channel,
       ts: args.ts,
       oldest: args.oldest,

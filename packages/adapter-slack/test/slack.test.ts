@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { InboundEvent } from "@sageox/agent-toolkit-core";
 import {
   SlackAdapter,
+  WebSlackApi,
   privacyOf,
   type SlackApiClient,
   type SlackConversationPage,
@@ -49,8 +50,14 @@ class FakeApi implements SlackApiClient {
   histories: SlackHistoryPage[] = [];
   historyCalls: Array<{ channel: string; oldest: string; cursor?: string; limit?: number }> = [];
   threads: SlackHistoryPage[] = [];
-  replyCalls: Array<{ channel: string; ts: string; oldest: string; latest?: string; cursor?: string }> =
-    [];
+  replyCalls: Array<{
+    channel: string;
+    ts: string;
+    oldest: string;
+    latest?: string;
+    cursor?: string;
+    once?: boolean;
+  }> = [];
   posts: Array<{ channel: string; text: string; threadTs?: string }> = [];
   added: Array<{ channel: string; timestamp: string; name: string }> = [];
   removed: Array<{ channel: string; timestamp: string; name: string }> = [];
@@ -90,6 +97,7 @@ class FakeApi implements SlackApiClient {
     oldest: string;
     latest?: string;
     cursor?: string;
+    once?: boolean;
   }) {
     this.replyCalls.push(args);
     return this.threads.shift() ?? {};
@@ -1953,7 +1961,7 @@ describe("SlackAdapter wakeInOwnThreads", () => {
 
     expect(got.map((event) => event.mentionsMe)).toEqual([false, false]);
     expect(api.replyCalls).toEqual([
-      { channel: "GENG", ts: "1786760000.000001", oldest: "0", cursor: undefined },
+      { channel: "GENG", ts: "1786760000.000001", oldest: "0", cursor: undefined, once: true },
     ]);
   });
 
@@ -2123,6 +2131,31 @@ describe("SlackAdapter wakeInOwnThreads", () => {
       warn.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it("reads ownership on a client that rejects a rate limit instead of pausing the rest", async () => {
+    // WebClient answers a 429 by pausing its whole queue for the Retry-After. On the shared
+    // client, a rate-limited ownership read would hold the next name lookup and the agent's
+    // reply behind it long after the adapter had stopped waiting for the read.
+    const asked: string[] = [];
+    const fetch = async (url: string | URL) => {
+      const method = String(url).split("/").at(-1)!;
+      asked.push(method);
+      if (method === "conversations.replies") {
+        return new Response("", { status: 429, headers: { "retry-after": "30" } });
+      }
+      return Response.json({ ok: true, user: { id: "U0MILK", name: "milkana", profile: {} } });
+    };
+    const api = new WebSlackApi("xoxb-test", { fetch: fetch as never });
+    const started = Date.now();
+
+    await expect(
+      api.replies({ channel: "GENG", ts: "1786761000.000100", oldest: "0", once: true }),
+    ).rejects.toMatchObject({ code: "slack_webapi_rate_limited_error" });
+    await expect(api.user("U0MILK")).resolves.toMatchObject({ name: "milkana" });
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(asked).toEqual(["conversations.replies", "users.info"]);
   });
 
   it("logs a failed lookup with where it was and Slack's reason, and never the text", async () => {

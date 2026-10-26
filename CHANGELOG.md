@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   learns its threads from its own posts and its own messages as they arrive; after a restart,
   the first untagged reply in an unknown thread costs a `conversations.replies` read, which
   stops at the first page showing a post of the bot's and gives up after two seconds so the
-  channel's next mention is not held behind it. A read that fails or times out means the
+  channel's next mention is not held behind it. It runs on a Slack client of its own that
+  rejects a rate limit instead of waiting it out, so it cannot pause the agent's replies. A read that fails or times out means the
   reply needs a tag, and is logged as `thread_owner_read_failed`. Off by default, so no
   existing agent changes.
 
