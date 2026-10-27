@@ -1337,6 +1337,96 @@ describe("SlackAdapter", () => {
     expect(got.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000100"]);
   });
 
+  it("starts and backfills its other channels when Slack refuses to read one", async () => {
+    // Listed first, so the backfill has to carry on past it to reach GENG.
+    const { instance, socket, api } = adapter({
+      since: 1786760000,
+      channels: [
+        { id: "CNOTJOINED", reply: "public" },
+        { id: "GENG", reply: "private" },
+      ],
+    });
+    const pages = api.history.bind(api);
+    api.history = async (args) => {
+      if (args.channel !== "CNOTJOINED") return pages(args);
+      api.historyCalls.push(args);
+      throw Object.assign(new Error("An API error occurred: not_in_channel"), {
+        data: { ok: false, error: "not_in_channel" },
+      });
+    };
+    api.histories.push({ messages: [mention("1786761000.000100")] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const got: InboundEvent[] = [];
+
+    try {
+      await instance.start((event) => got.push(event));
+
+      expect(socket.disconnected).toBe(false);
+      expect(api.historyCalls.map((call) => call.channel)).toEqual(["CNOTJOINED", "GENG"]);
+      expect(got.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000100"]);
+      expect(warn).toHaveBeenCalledWith(
+        'backfill_read_failed surface=slack channel=CNOTJOINED reason="not_in_channel"',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("replays what it read before Slack refused a thread page, then reads the next thread", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    const refused = "1786761000.000200";
+    const next = "1786761000.000100";
+    // Newest first, so the refused thread is read first.
+    api.histories.push({
+      messages: [
+        mention(refused, { thread_ts: refused, latest_reply: "1786761000.000400" }),
+        mention(next, { thread_ts: next, latest_reply: "1786761000.000300" }),
+      ],
+    });
+    api.replies = async (args) => {
+      api.replyCalls.push(args);
+      if (args.ts === next) return { messages: [mention("1786761000.000300", { thread_ts: next })] };
+      if (!args.cursor) {
+        return { messages: [mention("1786761000.000400", { thread_ts: refused })], nextCursor: "page2" };
+      }
+      // Deleted while it was being read: the page already read still replays.
+      throw Object.assign(new Error("An API error occurred: thread_not_found"), {
+        data: { ok: false, error: "thread_not_found" },
+      });
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const got: InboundEvent[] = [];
+
+    try {
+      await instance.start((event) => got.push(event));
+
+      expect(got.map((event) => event.id.nativeId)).toEqual([
+        "GENG:1786761000.000100",
+        "GENG:1786761000.000200",
+        "GENG:1786761000.000300",
+        "GENG:1786761000.000400",
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        `backfill_read_failed surface=slack channel=GENG thread=${refused} reason="thread_not_found"`,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Failing keeps the gap for the next start; skipping would let the cursor pass it by.
+  it.each([
+    ["a network fault", { code: "slack_webapi_request_error" }],
+    ["a refusal a retry can clear", { data: { ok: false, error: "invalid_cursor" } }],
+  ])("still fails to start when a backfill read fails with %s", async (_, shape) => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    api.history = async () => {
+      throw Object.assign(new Error("backfill read failed"), shape);
+    };
+
+    await expect(instance.start(() => {})).rejects.toThrow("backfill read failed");
+  });
+
   it("asks for replies only in threads that moved after the cursor", async () => {
     const { instance, api } = adapter({ since: 1786760000 });
     api.histories.push({ messages: [mention("1786761000.000100")] });
