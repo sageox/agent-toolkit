@@ -1176,25 +1176,44 @@ export class SlackAdapter implements SurfaceAdapter {
    */
   private async backfill(oldest: number, session: number): Promise<void> {
     const live = () => session === this.generation;
+    // A refusal no restart will change costs the read it refused, not the launch: `start`
+    // rethrows, so `not_in_channel` from one channel the app was never invited to stopped
+    // the agent on every restart. Anything else still throws, so the next start retries.
+    const skip = (error: unknown, where: string): void => {
+      if (!live() || !PERMANENT_READ_FAILURES.has(slackErrorCode(error) ?? "")) throw error;
+      console.warn(
+        `backfill_read_failed surface=${SLACK_SURFACE} ${where} ` +
+          `reason=${JSON.stringify(slackFailure(error))}`,
+      );
+    };
     // Built before the walk it guards: enumerating DMs pages too, and a `stop` landing in
     // the middle of that is the same waste as one landing in the middle of a history page.
     for (const channel of [...this.allowedChannels, ...(await this.directChannels(live))]) {
       if (!live()) return;
-      const parents = await this.collect(
-        (cursor) => this.api.history({ channel, oldest: String(oldest), cursor }),
-        live,
-      );
+      // Filled page by page, so a read refused partway still replays what it got.
+      const missed: SlackMessage[] = [];
+      try {
+        await this.collect(
+          (cursor) => this.api.history({ channel, oldest: String(oldest), cursor }),
+          live,
+          missed,
+        );
+      } catch (error) {
+        skip(error, `channel=${channel}`);
+      }
 
-      const missed = [...parents];
-      for (const parent of parents) {
+      for (const parent of [...missed]) {
         if (!live()) return;
         if (!hasRepliesSince(parent, oldest)) continue;
-        missed.push(
-          ...(await this.collect(
+        try {
+          await this.collect(
             (cursor) => this.api.replies({ channel, ts: parent.ts!, oldest: String(oldest), cursor }),
             live,
-          )),
-        );
+            missed,
+          );
+        } catch (error) {
+          skip(error, `channel=${channel} thread=${parent.ts}`);
+        }
       }
 
       // `conversations.replies` can hand back the thread parent whatever `oldest` says, so
@@ -1247,12 +1266,14 @@ export class SlackAdapter implements SurfaceAdapter {
    *
    * `live` is asked between pages, so a walk nobody is waiting on stops: a backfill's, once
    * its run has ended, and a thread read's, once the gateway has stopped waiting for it.
+   * Pages are appended to `messages` as they arrive, so a caller that passes its own array
+   * keeps what was read before a later page failed.
    */
   private async collect(
     page: (cursor?: string) => Promise<SlackHistoryPage>,
     live: () => boolean = () => true,
+    messages: SlackMessage[] = [],
   ): Promise<SlackMessage[]> {
-    const messages: SlackMessage[] = [];
     let cursor: string | undefined;
     do {
       const result = await page(cursor);
@@ -1548,6 +1569,19 @@ const PERMANENT_NAME_FAILURES = new Set([
   "not_allowed_token_type",
   "user_not_found",
   "account_inactive",
+]);
+
+/**
+ * `conversations.history` and `conversations.replies` refusals that no restart changes: the
+ * app is not in the conversation, the conversation or thread is gone, or the token may not
+ * read it. Deliberately short, like {@link PERMANENT_NAME_FAILURES}: `invalid_cursor`,
+ * `internal_error` and a network fault fail the backfill, so the next start retries the gap.
+ */
+const PERMANENT_READ_FAILURES = new Set([
+  "not_in_channel",
+  "channel_not_found",
+  "thread_not_found",
+  "missing_scope",
 ]);
 
 function isPermanentNameFailure(error: unknown): boolean {
