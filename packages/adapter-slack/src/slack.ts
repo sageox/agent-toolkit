@@ -1,6 +1,6 @@
 import { ConsoleLogger } from "@slack/logger";
 import { SocketModeClient } from "@slack/socket-mode";
-import { WebClient } from "@slack/web-api";
+import { WebClient, type FetchFunction } from "@slack/web-api";
 import type {
   ActorRef,
   ChannelDecl,
@@ -82,13 +82,19 @@ export interface SlackApiClient {
     cursor?: string;
     limit?: number;
   }): Promise<SlackHistoryPage>;
-  /** `latest` is exclusive, as Slack takes it: a message at exactly that `ts` is not returned. */
+  /**
+   * `latest` is exclusive, as Slack takes it: a message at exactly that `ts` is not returned.
+   *
+   * `once` is for a read that must not wait: one attempt, a rate limit rejected rather than
+   * waited out, and nothing else held up behind it. The thread-ownership lookup uses it.
+   */
   replies(args: {
     channel: string;
     ts: string;
     oldest: string;
     latest?: string;
     cursor?: string;
+    once?: boolean;
   }): Promise<SlackHistoryPage>;
   /** Who a member id is, or `undefined` when Slack will not say. */
   user(id: string): Promise<SlackUser | undefined>;
@@ -118,6 +124,20 @@ export interface SlackAdapterOptions {
   channels: readonly ChannelDecl[];
   /** Resume point persisted by the CLI; Slack timestamps are Unix seconds. */
   since?: number;
+  /**
+   * Wake on an untagged reply in a thread this agent has posted in. Off unless set.
+   *
+   * Without it a channel thread works like any channel message: someone has to tag the bot
+   * again on every reply, even in the thread it started or answered in. With it, a person's
+   * reply there is a direct address the way a DM is — unless it tags somebody else and not
+   * this bot, which addresses them. Another agent's reply still has to tag: two agents that
+   * woke on each other's untagged replies would talk until a cap stopped them.
+   *
+   * A thread anyone else started and the agent never posted in stays mention-only. It also
+   * needs the app subscribed to `message.channels` (and `message.groups` for private
+   * channels), which is how an untagged message reaches this adapter at all.
+   */
+  wakeInOwnThreads?: boolean;
   api?: SlackApiClient;
   socket?: SlackSocketClient;
 }
@@ -189,6 +209,47 @@ const HISTORY_PAGE = 200;
 /** A dedup key only has to outlive Slack's retries and the backfill/live overlap. */
 const SEEN_LIMIT = 2_048;
 
+/**
+ * How many threads' ownership one run remembers, each way. Enough for every thread a busy
+ * agent is in over a day; one that falls out costs one `conversations.replies` to relearn.
+ */
+const THREAD_LIMIT = 2_048;
+
+/**
+ * How long one thread-ownership lookup may hold its conversation.
+ *
+ * The lookup runs inside the conversation's ordered `accept` chain, before the gateway sees
+ * the event, so every message behind it in that channel waits on it — an explicit mention
+ * included. Slack's client waits out a rate limit and retries for far longer than that wait
+ * is worth: past this, the reply is treated as untagged, which is what it was before
+ * `wakeInOwnThreads` existed. Two seconds is several `conversations.replies` round trips.
+ */
+const OWN_THREAD_LOOKUP_MS = 2_000;
+
+/**
+ * How long a channel asks Slack nothing about thread ownership after a lookup there timed
+ * out or was rate-limited.
+ *
+ * Without it every untagged reply in an unknown thread repeats the wait while Slack is slow,
+ * each holding the channel's mentions behind it. During the pause such a reply needs a tag,
+ * which is the answer a timed-out lookup gives anyway; threads already known still answer
+ * from memory, and nothing is recorded as not owned, so the thread is asked about again
+ * after.
+ */
+const OWN_THREAD_PAUSE_MS = 30_000;
+
+/** Adds to an insertion-ordered set, dropping the oldest entry once it is over `limit`. */
+function remember(set: Set<string>, key: string, limit: number): void {
+  set.delete(key);
+  set.add(key);
+  if (set.size > limit) set.delete(set.values().next().value!);
+}
+
+/** The `ts` of the thread an event sits in. Only for an event that has a `threadRoot`. */
+function rootTs(event: InboundEvent): string {
+  return parseSlackEventId(event.threadRoot!.nativeId).ts;
+}
+
 /** Reads a reply target straight off the event, which is where it was all along. */
 function contextOf(event: InboundEvent): SlackInboundContext {
   return {
@@ -215,6 +276,21 @@ export class SlackAdapter implements SurfaceAdapter {
   /** One entry per channel, for a reply with no triggering event to thread onto. */
   private readonly lastByChannel = new Map<string, SlackInboundContext>();
   private readonly seen = new Set<string>();
+  /** `wakeInOwnThreads`, as constructed. Every use of the two sets below is behind it. */
+  private readonly wakeInOwnThreads: boolean;
+  /**
+   * Threads this agent has posted in, as `channel:root ts` — learned from its own sends and
+   * posts, from its own messages arriving on the socket, and from a lookup when a reply
+   * lands in a thread it has no answer about.
+   */
+  private readonly ownThreads = new Set<string>();
+  /**
+   * Threads a lookup found it had not posted in, so the next reply there spends no call.
+   * Cleared for a thread the moment it posts there — only a post of its own can change it.
+   */
+  private readonly otherThreads = new Set<string>();
+  /** Per channel, until when no ownership lookup is made there. See `OWN_THREAD_PAUSE_MS`. */
+  private readonly ownerReadsPaused = new Map<string, number>();
   /**
    * Member id to name, filled as messages mention people and never expired. A rename goes
    * unnoticed until restart — the alternative, `users.list` at boot, spends a whole
@@ -274,6 +350,7 @@ export class SlackAdapter implements SurfaceAdapter {
       opts.channels.flatMap((channel) => (channel.name ? [[channel.id, channel.name]] : [])),
     );
     this.since = opts.since;
+    this.wakeInOwnThreads = opts.wakeInOwnThreads ?? false;
     this.api = opts.api ?? new WebSlackApi(opts.botToken);
     this.socket =
       opts.socket ??
@@ -388,6 +465,7 @@ export class SlackAdapter implements SurfaceAdapter {
     const threadTs =
       target.threadTs ?? (this.dmChannels.has(channel.id) ? undefined : target.eventTs);
     await this.api.postMessage({ channel: channel.id, text, threadTs });
+    if (threadTs) this.postedIn(channel.id, threadTs);
   }
 
   postTargets(): ChannelRef[] {
@@ -427,6 +505,9 @@ export class SlackAdapter implements SurfaceAdapter {
       text: address(mentions) + text,
       threadTs: root?.ts,
     });
+    // A top-level post is the root of the thread its answers will start.
+    const thread = root?.ts ?? ts;
+    if (thread) this.postedIn(channel.id, thread);
     return ts ? { surface: SLACK_SURFACE, nativeId: slackEventId(channel.id, ts) } : undefined;
   }
 
@@ -867,8 +948,20 @@ export class SlackAdapter implements SurfaceAdapter {
     // is a name the brain never saw.
     await this.learnNames(message.text ?? "");
     if (generation !== this.generation) return;
-    const normalized = toSlackInboundEvent(message, this.normalizeOptions());
+    let normalized = toSlackInboundEvent(message, this.normalizeOptions());
     if (!normalized) return;
+    // A duplicate is dropped before the ownership lookup below, not after it: a Slack retry
+    // or the backfill/live overlap of a reply whose first lookup failed must not spend a
+    // second `conversations.replies` read only to be discarded.
+    if (this.seen.has(normalized.id.nativeId)) return;
+    if (this.wakeInOwnThreads && normalized.author.isSelf) {
+      // Its own message, however it got here — this process, another one posting as the
+      // same bot, or a backfill. A top-level one roots the thread its answers start.
+      this.postedIn(message.channel, normalized.threadRoot ? rootTs(normalized) : message.ts!);
+    } else if (this.wakeInOwnThreads && (await this.repliedToMe(normalized, message, generation))) {
+      normalized = { ...normalized, mentionsMe: true };
+    }
+    if (generation !== this.generation) return;
 
     const key = normalized.id.nativeId;
     if (this.seen.has(key)) return;
@@ -885,6 +978,130 @@ export class SlackAdapter implements SurfaceAdapter {
       this.lastByChannel.set(normalized.channel.id, context);
     }
     this.onEvent?.(normalized);
+  }
+
+  /** Records that this agent has posted in a thread, when it was asked to care. */
+  private postedIn(channel: string, rootTs: string): void {
+    if (!this.wakeInOwnThreads) return;
+    const key = slackEventId(channel, rootTs);
+    this.otherThreads.delete(key);
+    remember(this.ownThreads, key, THREAD_LIMIT);
+  }
+
+  /**
+   * Whether an untagged message is a person's reply in a thread this agent has posted in —
+   * the one case `wakeInOwnThreads` adds to the wake rule.
+   *
+   * Everything cheap is decided first, so the lookup is spent only on a reply that would
+   * wake if the answer is yes. A reply that tags somebody else and not this bot is talking
+   * to them. Another agent still has to tag, so two agents cannot wake each other forever.
+   */
+  private async repliedToMe(
+    event: InboundEvent,
+    message: SlackMessage,
+    generation: number,
+  ): Promise<boolean> {
+    if (event.mentionsMe || !event.threadRoot) return false;
+    if (event.author.isAgent) return false;
+    if (addressesSomeoneElse(message.text ?? "", this.botUserId)) return false;
+    return this.ownsThread(message.channel!, rootTs(event), generation);
+  }
+
+  /**
+   * Whether this agent has posted in a thread, asking Slack only when nothing here knows.
+   *
+   * A restart forgets every thread it was in, and a reply in one of those must not go deaf
+   * until somebody tags the bot again — so an unknown thread is read and the answer kept. A
+   * lookup that fails, or runs past {@link OWN_THREAD_LOOKUP_MS}, is not kept and answers
+   * no: the reply then needs a tag, which is what it needed before this option existed. It
+   * is logged either way, so an unreadable thread is not mistaken for one the agent never
+   * joined.
+   */
+  private async ownsThread(channel: string, root: string, generation: number): Promise<boolean> {
+    const key = slackEventId(channel, root);
+    if (this.ownThreads.has(key)) return true;
+    if (this.otherThreads.has(key)) return false;
+
+    const paused = this.ownerReadsPaused.get(channel);
+    if (paused !== undefined) {
+      if (paused > Date.now()) return false;
+      this.ownerReadsPaused.delete(channel);
+    }
+
+    const where = `surface=${SLACK_SURFACE} channel=${channel} thread=${root}`;
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const lookup = this.findOwnPost(channel, root, () => !expired && generation === this.generation);
+    const deadline = new Promise<"expired">((resolve) => {
+      timer = setTimeout(() => resolve("expired"), OWN_THREAD_LOOKUP_MS);
+    });
+    let found: boolean | undefined | "expired";
+    try {
+      found = await Promise.race([lookup, deadline]);
+    } catch (error) {
+      // The reason is Slack's own error code, or the client's: a closed vocabulary, never the
+      // message text, never the token.
+      const reason = slackTimedOut(error) ? "timeout" : slackFailure(error);
+      const slow = reason === "timeout" || reason === "ratelimited" ||
+        reason === "slack_webapi_rate_limited_error";
+      const pause = slow ? this.pauseOwnerReads(channel, generation) : "";
+      console.warn(`thread_owner_read_failed ${where} reason=${JSON.stringify(reason)}${pause}`);
+      return false;
+    } finally {
+      // Whichever won, nothing reads another page: a lookup nobody waits on would only spend
+      // Slack's quota on an answer nobody reads.
+      expired = true;
+      clearTimeout(timer);
+    }
+    if (found === "expired") {
+      console.warn(
+        `thread_owner_read_failed ${where} reason="timeout" ms=${OWN_THREAD_LOOKUP_MS}` +
+          this.pauseOwnerReads(channel, generation),
+      );
+      return false;
+    }
+    // Stopped before the last page for a reason other than an answer — a moved generation.
+    if (found === undefined || generation !== this.generation) return false;
+    if (found) remember(this.ownThreads, key, THREAD_LIMIT);
+    else remember(this.otherThreads, key, THREAD_LIMIT);
+    return found;
+  }
+
+  /**
+   * Stops ownership lookups in `channel` for {@link OWN_THREAD_PAUSE_MS}, and says so for the
+   * log line — unless the lookup belongs to a run that has ended, which has no say over the
+   * run serving now.
+   */
+  private pauseOwnerReads(channel: string, generation: number): string {
+    if (generation !== this.generation) return "";
+    this.ownerReadsPaused.set(channel, Date.now() + OWN_THREAD_PAUSE_MS);
+    return ` paused_ms=${OWN_THREAD_PAUSE_MS}`;
+  }
+
+  /**
+   * Pages a thread until a post of this agent's turns up.
+   *
+   * `true` at the first page holding one, without reading the rest — and without a later
+   * page's failure discarding it. `false` only once the cursor has run out, which is the one
+   * answer worth keeping as "never posted here". `undefined` when `live` stopped the walk
+   * first, which is no answer at all.
+   */
+  private async findOwnPost(
+    channel: string,
+    root: string,
+    live: () => boolean,
+  ): Promise<boolean | undefined> {
+    let cursor: string | undefined;
+    do {
+      const page = await this.api.replies({ channel, ts: root, oldest: "0", cursor, once: true });
+      const mine = (page.messages ?? []).some(
+        (m) => m.user === this.botUserId || (!!this.botId && m.bot_id === this.botId),
+      );
+      if (mine) return true;
+      cursor = page.nextCursor || undefined;
+      if (cursor && !live()) return undefined;
+    } while (cursor);
+    return false;
   }
 
   /** What the privacy answers resolved at startup amount to. Only valid once `started`. */
@@ -1124,9 +1341,27 @@ export function privacyOf(
  */
 export class WebSlackApi implements SlackApiClient {
   private readonly client: WebClient;
+  /**
+   * The same token on a client of its own, for a read asked for `once`.
+   *
+   * Its own because `WebClient` answers a 429 by pausing its whole request queue until the
+   * `Retry-After` has passed: a rate-limited read on the shared client would hold the name
+   * lookups and `chat.postMessage` behind it even after its caller had stopped waiting. This
+   * one rejects a rate limit at once, tries once, and gives up on a slow answer at
+   * {@link OWN_THREAD_LOOKUP_MS}.
+   */
+  private readonly once: WebClient;
 
-  constructor(botToken: string) {
-    this.client = new WebClient(botToken);
+  /** `fetch` replaces the network, for a test; nothing in production passes it. */
+  constructor(botToken: string, opts: { fetch?: FetchFunction } = {}) {
+    const transport = opts.fetch ? { fetch: opts.fetch } : {};
+    this.client = new WebClient(botToken, transport);
+    this.once = new WebClient(botToken, {
+      ...transport,
+      rejectRateLimitedCalls: true,
+      retryConfig: { retries: 0 },
+      timeout: OWN_THREAD_LOOKUP_MS,
+    });
   }
 
   async authTest(): Promise<{ userId?: string; botId?: string }> {
@@ -1186,8 +1421,9 @@ export class WebSlackApi implements SlackApiClient {
     oldest: string;
     latest?: string;
     cursor?: string;
+    once?: boolean;
   }): Promise<SlackHistoryPage> {
-    const response = await this.client.conversations.replies({
+    const response = await (args.once ? this.once : this.client).conversations.replies({
       channel: args.channel,
       ts: args.ts,
       oldest: args.oldest,
@@ -1326,6 +1562,38 @@ function isPermanentNameFailure(error: unknown): boolean {
 function slackErrorCode(error: unknown): string | undefined {
   const code = (error as { data?: { error?: unknown } } | null)?.data?.error;
   return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * What a failed Web API call may say about itself on a log line: Slack's error code, or the
+ * client's own (`slack_webapi_request_error`, `slack_webapi_rate_limited_error`, …). Both
+ * are closed vocabularies. A message is prose that can carry anything, so it is not used.
+ */
+function slackFailure(error: unknown): string {
+  const client = (error as { code?: unknown } | null)?.code;
+  return slackErrorCode(error) ?? (typeof client === "string" ? client : "unknown");
+}
+
+/**
+ * Whether a Web API call failed by running out of time: the client's own `timeout`, which
+ * it reports as a request error wrapping the `TimeoutError` its `AbortSignal` rejected with.
+ */
+function slackTimedOut(error: unknown): boolean {
+  const failure = error as { code?: unknown; original?: { name?: unknown } } | null;
+  return failure?.code === "slack_webapi_request_error" && failure.original?.name === "TimeoutError";
+}
+
+/**
+ * Whether a message tags somebody that is not this bot — a member, or a user group — and so
+ * is talking to them.
+ *
+ * A user group (`<!subteam^S…>`) counts even though it might include the bot: nothing here
+ * can tell, and a reply aimed at `@sales` is aimed at sales. A tag of the bot itself is a
+ * mention and never reaches this rule.
+ */
+function addressesSomeoneElse(text: string, botUserId: string | undefined): boolean {
+  if (slackMentionedMembers(text).some((id) => id !== botUserId)) return true;
+  return /<!subteam\^[A-Z0-9]+(?:\|[^>]*)?>/.test(text);
 }
 
 /** `already_reacted` — the one `reactions.add` failure that means the call succeeded. */

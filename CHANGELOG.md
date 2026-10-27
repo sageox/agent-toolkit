@@ -29,6 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that does not set it receives each call exactly as the brain sent it, so no existing
   agent changes. `run` lists a stamped server as `stamped with the live turn`.
 
+- **A Slack agent can be woken by an untagged reply in a thread it has posted in.** Set
+  `wakeInOwnThreads: true` on the Slack surface and subscribe the app to `message.channels`
+  (and `message.groups`), and a person replying in a thread the bot started or answered in no
+  longer has to tag it again. A reply in a thread the bot never posted in, one that tags
+  somebody else or a user group, and one from another agent still need a tag. The adapter
+  learns its threads from its own posts and its own messages as they arrive; after a restart,
+  the first untagged reply in an unknown thread costs a `conversations.replies` read, which
+  stops at the first page showing a post of the bot's and gives up after two seconds. Events
+  behind the lookup in that channel can wait until it returns or reaches that deadline. It
+  runs on a Slack client of its own that rejects a rate limit instead of waiting it out, so
+  rate-limit retry delays do not extend the lookup, and
+  after a timeout or a rate limit the channel asks Slack nothing more for 30 seconds. A read that fails or times out means the
+  reply needs a tag, and is logged as `thread_owner_read_failed`. Off by default, so no
+  existing agent changes.
+
 - **`run --rehearse` and `job run <slug> --rehearse` run the real agent with nobody
   listening.** Watching an agent with a private brain take a turn meant deploying it, because
   that brain needs a Buzz relay and the only one was the real one. A rehearsal points every

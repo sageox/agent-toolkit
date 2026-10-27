@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { InboundEvent } from "@sageox/agent-toolkit-core";
 import {
   SlackAdapter,
+  WebSlackApi,
   privacyOf,
   type SlackApiClient,
   type SlackConversationPage,
@@ -49,8 +50,14 @@ class FakeApi implements SlackApiClient {
   histories: SlackHistoryPage[] = [];
   historyCalls: Array<{ channel: string; oldest: string; cursor?: string; limit?: number }> = [];
   threads: SlackHistoryPage[] = [];
-  replyCalls: Array<{ channel: string; ts: string; oldest: string; latest?: string; cursor?: string }> =
-    [];
+  replyCalls: Array<{
+    channel: string;
+    ts: string;
+    oldest: string;
+    latest?: string;
+    cursor?: string;
+    once?: boolean;
+  }> = [];
   posts: Array<{ channel: string; text: string; threadTs?: string }> = [];
   added: Array<{ channel: string; timestamp: string; name: string }> = [];
   removed: Array<{ channel: string; timestamp: string; name: string }> = [];
@@ -90,6 +97,7 @@ class FakeApi implements SlackApiClient {
     oldest: string;
     latest?: string;
     cursor?: string;
+    once?: boolean;
   }) {
     this.replyCalls.push(args);
     return this.threads.shift() ?? {};
@@ -1897,5 +1905,413 @@ describe("SlackAdapter reads the surface it is on", () => {
     // Slack ran out of cursor inside the window, so this is the whole period asked about —
     // the one short answer a caller may report a quiet channel from.
     expect(more).toBe(false);
+  });
+});
+
+describe("SlackAdapter wakeInOwnThreads", () => {
+  /** A plain channel message, as `message.groups` delivers one: no tag, no app_mention. */
+  function reply(ts: string, threadTs: string, extra: Record<string, unknown> = {}) {
+    return {
+      type: "message",
+      channel: "GENG",
+      channel_type: "group",
+      user: "U0RYAN",
+      text: "also met Dana from Acme",
+      ts,
+      thread_ts: threadTs,
+      ...extra,
+    };
+  }
+
+  const ROOT = "1786761000.000100";
+
+  /** Starts an adapter, has it answer a mention at `ROOT`, and returns what it delivered. */
+  async function answered(extra: Partial<ConstructorParameters<typeof SlackAdapter>[0]> = {}) {
+    const harness = adapter({ wakeInOwnThreads: true, ...extra });
+    const got: InboundEvent[] = [];
+    await harness.instance.start((event) => got.push(event));
+    await harness.socket.emit(mention(ROOT));
+    await harness.instance.send(got[0].channel, { text: "saved Dana" }, got[0]);
+    return { ...harness, got };
+  }
+
+  it("wakes on an untagged reply in a thread it answered in, without asking Slack", async () => {
+    const { socket, api, got } = await answered();
+    await socket.emit(reply("1786761000.000300", ROOT));
+
+    expect(got.at(-1)).toMatchObject({ text: "also met Dana from Acme", mentionsMe: true });
+    expect(api.replyCalls).toEqual([]);
+  });
+
+  it("does not wake on a reply in someone else's thread, and asks about that thread once", async () => {
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    api.threads = [
+      {
+        messages: [
+          { type: "message", user: "U0MILK", text: "launch plan", ts: "1786760000.000001" },
+          { type: "message", user: "U0LAU", text: "looks good", ts: "1786760000.000002" },
+        ],
+      },
+    ];
+
+    await socket.emit(reply("1786761000.000300", "1786760000.000001"));
+    await socket.emit(reply("1786761000.000400", "1786760000.000001"));
+
+    expect(got.map((event) => event.mentionsMe)).toEqual([false, false]);
+    expect(api.replyCalls).toEqual([
+      { channel: "GENG", ts: "1786760000.000001", oldest: "0", cursor: undefined, once: true },
+    ]);
+  });
+
+  it("still wakes in a thread it posted in before a restart, by asking Slack once", async () => {
+    // A fresh adapter remembers nothing. Slack still has the thread, bot reply included.
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    api.threads = [
+      {
+        messages: [
+          { type: "message", user: "U0RYAN", text: "<@UBOT> log Dana", ts: ROOT },
+          { type: "message", user: "UBOT", bot_id: "BBOT", text: "saved Dana", ts: "1786761000.000200" },
+        ],
+      },
+    ];
+
+    await socket.emit(reply("1786761000.000300", ROOT));
+    await socket.emit(reply("1786761000.000400", ROOT));
+
+    expect(got.map((event) => event.mentionsMe)).toEqual([true, true]);
+    expect(api.replyCalls).toHaveLength(1);
+  });
+
+  it("wakes under a top-level post of its own, which roots the thread its answers start", async () => {
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    const root = await instance.post(
+      { surface: "slack", id: "GENG", isPublic: false },
+      { text: "who did you meet at the summit?" },
+    );
+
+    await socket.emit(reply("1786761000.000300", root!.nativeId.split(":")[1]));
+
+    expect(got.at(-1)?.mentionsMe).toBe(true);
+    expect(api.replyCalls).toEqual([]);
+  });
+
+  it("learns a thread from its own message arriving on the socket", async () => {
+    // Another process posting as the same bot — a `job run`, say — is still this agent.
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+
+    await socket.emit(reply("1786761000.000200", ROOT, { user: "UBOT", bot_id: "BBOT", text: "nightly digest" }));
+    await socket.emit(reply("1786761000.000300", ROOT));
+
+    expect(got.at(-1)?.mentionsMe).toBe(true);
+    expect(api.replyCalls).toEqual([]);
+  });
+
+  it("does not wake on a reply in its thread that tags somebody else", async () => {
+    const { socket, api, got } = await answered();
+    api.names = { U0MILK: "milkana" };
+    await socket.emit(reply("1786761000.000300", ROOT, { text: "<@U0MILK> can you confirm?" }));
+
+    expect(got.at(-1)).toMatchObject({ text: "@milkana can you confirm?", mentionsMe: false });
+  });
+
+  it("does not wake on another agent's untagged reply, so two agents cannot loop", async () => {
+    const { socket, got } = await answered();
+    await socket.emit(reply("1786761000.000300", ROOT, { user: "U0BEEK", bot_id: "B0BEEK" }));
+
+    expect(got.at(-1)?.mentionsMe).toBe(false);
+  });
+
+  it("answers no when the lookup fails, and asks again next time", async () => {
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    let calls = 0;
+    api.replies = async () => {
+      calls += 1;
+      throw new Error("ratelimited");
+    };
+
+    await socket.emit(reply("1786761000.000300", ROOT));
+    await socket.emit(reply("1786761000.000400", ROOT));
+
+    expect(got.map((event) => event.mentionsMe)).toEqual([false, false]);
+    expect(calls).toBe(2);
+  });
+
+  it("does not wake on a reply in its thread that tags a user group", async () => {
+    // `@sales` may or may not include the bot; either way the reply is aimed at sales.
+    const { socket, api, got } = await answered();
+    await socket.emit(reply("1786761000.000300", ROOT, { text: "<!subteam^S012ABC|@sales> can you confirm?" }));
+
+    expect(got.at(-1)?.mentionsMe).toBe(false);
+    expect(api.replyCalls).toEqual([]);
+  });
+
+  it("drops a duplicate before the lookup, so a retry spends no second read", async () => {
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    let calls = 0;
+    api.replies = async () => {
+      calls += 1;
+      throw Object.assign(new Error("An API error occurred: ratelimited"), { data: { error: "ratelimited" } });
+    };
+
+    // Slack redelivers an envelope it thinks went unanswered; the overlap with a backfill
+    // does the same. The first lookup failed, so no answer was kept to stop the second.
+    await socket.emit(reply("1786761000.000300", ROOT));
+    await socket.emit(reply("1786761000.000300", ROOT));
+
+    expect(got).toHaveLength(1);
+    expect(calls).toBe(1);
+  });
+
+  it("stops at the first page holding a post of its own", async () => {
+    // The answer is in hand; a later page could only cost a call, or fail and lose it.
+    const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+    const got: InboundEvent[] = [];
+    await instance.start((event) => got.push(event));
+    api.threads = [
+      {
+        messages: [{ type: "message", user: "UBOT", bot_id: "BBOT", text: "saved Dana", ts: "1786761000.000200" }],
+        nextCursor: "page-2",
+      },
+    ];
+    const replies = api.replies.bind(api);
+    api.replies = async (args) => {
+      if (args.cursor) throw new Error("the second page was read");
+      return replies(args);
+    };
+
+    await socket.emit(reply("1786761000.000300", ROOT));
+
+    expect(got.at(-1)?.mentionsMe).toBe(true);
+    expect(api.replyCalls).toHaveLength(1);
+  });
+
+  it("gives up on a slow lookup, so the channel's next mention is not held behind it", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+      const got: InboundEvent[] = [];
+      await instance.start((event) => got.push(event));
+      // One page that takes Slack ten seconds, with more behind it.
+      const replies = api.replies.bind(api);
+      api.replies = async (args) => {
+        await new Promise((resolve) => setTimeout(resolve, 10_000));
+        await replies(args);
+        return { messages: [], nextCursor: "page-2" };
+      };
+
+      const untagged = socket.emit(reply("1786761000.000300", ROOT)) as Promise<void>;
+      const tagged = socket.emit(mention("1786761000.000400")) as Promise<void>;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await Promise.all([untagged, tagged]);
+
+      expect(got.map((event) => [event.id.nativeId, event.mentionsMe])).toEqual([
+        ["GENG:1786761000.000300", false],
+        ["GENG:1786761000.000400", true],
+      ]);
+      // The page in flight lands, and nothing asks for the next one.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(api.replyCalls).toHaveLength(1);
+      expect(warn).toHaveBeenCalledWith(
+        'thread_owner_read_failed surface=slack channel=GENG thread=1786761000.000100 reason="timeout" ' +
+          "ms=2000 paused_ms=30000",
+      );
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks nothing more in that channel for a while after a lookup times out", async () => {
+    // Slack is slow for the whole channel, not for one thread: the next unknown thread would
+    // only wait out the same two seconds, with the channel's mentions queued behind it.
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { socket, api, got } = await answered();
+      const replies = api.replies.bind(api);
+      let slow = true;
+      api.replies = async (args) => {
+        const page = await replies(args);
+        if (slow) await new Promise((resolve) => setTimeout(resolve, 10_000));
+        return page;
+      };
+
+      const first = socket.emit(reply("1786761000.000300", "1786760000.000001")) as Promise<void>;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await first;
+      expect(api.replyCalls).toHaveLength(1);
+
+      // Inside the pause: an unknown thread is not asked about, and answers at once.
+      await socket.emit(reply("1786761000.000400", "1786760000.000002"));
+      expect(got.at(-1)).toMatchObject({ id: { nativeId: "GENG:1786761000.000400" }, mentionsMe: false });
+      expect(api.replyCalls).toHaveLength(1);
+      // A thread it already knows is its own still wakes: that answer needed no lookup.
+      await socket.emit(reply("1786761000.000500", ROOT));
+      expect(got.at(-1)?.mentionsMe).toBe(true);
+
+      // After it, Slack is asked again — nothing was recorded as not owned.
+      slow = false;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await socket.emit(reply("1786761000.000600", "1786760000.000002"));
+      expect(api.replyCalls).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauses the channel when the Slack client's own timeout ends the read", async () => {
+    // The client's timeout and the adapter's are the same two seconds, so either can fire
+    // first. When the client's does, the read fails rather than expiring, and must still
+    // count as Slack being slow.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+      await instance.start(() => {});
+      api.replies = async (args) => {
+        api.replyCalls.push(args);
+        throw Object.assign(new Error("A request error occurred: The operation was aborted due to timeout"), {
+          code: "slack_webapi_request_error",
+          original: new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+        });
+      };
+
+      await socket.emit(reply("1786761000.000300", "1786760000.000001"));
+      await socket.emit(reply("1786761000.000400", "1786760000.000002"));
+
+      expect(api.replyCalls).toHaveLength(1);
+      expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+        'thread_owner_read_failed surface=slack channel=GENG thread=1786760000.000001 reason="timeout" ' +
+          "paused_ms=30000",
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not let a lookup from a stopped run pause the run that replaced it", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+      const got: InboundEvent[] = [];
+      await instance.start((event) => got.push(event));
+      const replies = api.replies.bind(api);
+      let slow = true;
+      api.replies = async (args) => {
+        const page = await replies(args);
+        if (slow) await new Promise((resolve) => setTimeout(resolve, 10_000));
+        return page;
+      };
+
+      const stale = socket.emit(reply("1786761000.000300", "1786760000.000001")) as Promise<void>;
+      await vi.advanceTimersByTimeAsync(0);
+      await instance.stop();
+      await instance.start((event) => got.push(event));
+      await vi.advanceTimersByTimeAsync(2_000); // the old run's lookup runs out of time now
+      await stale;
+
+      slow = false;
+      await socket.emit(reply("1786761000.000400", "1786760000.000002"));
+      expect(api.replyCalls).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads ownership on a client that rejects a rate limit instead of pausing the rest", async () => {
+    // WebClient answers a 429 by pausing its whole queue for the Retry-After. On the shared
+    // client, a rate-limited ownership read would hold the next name lookup and the agent's
+    // reply behind it long after the adapter had stopped waiting for the read.
+    const asked: string[] = [];
+    const fetch = async (url: string | URL) => {
+      const method = String(url).split("/").at(-1)!;
+      asked.push(method);
+      if (method === "conversations.replies") {
+        return new Response("", { status: 429, headers: { "retry-after": "30" } });
+      }
+      return Response.json({ ok: true, user: { id: "U0MILK", name: "milkana", profile: {} } });
+    };
+    // The clock is held still: a client that waited out the 30 s Retry-After, or paused its
+    // queue for it, cannot settle while no time passes.
+    vi.useFakeTimers();
+    try {
+      const api = new WebSlackApi("xoxb-test", { fetch: fetch as never });
+      const outcome = (work: Promise<unknown>) =>
+        work.then(
+          (value) => ({ settled: "resolved", value }),
+          (error: unknown) => ({ settled: "rejected", code: (error as { code?: string }).code }),
+        );
+      const read = outcome(api.replies({ channel: "GENG", ts: "1786761000.000100", oldest: "0", once: true }));
+      const lookup = outcome(api.user("U0MILK"));
+      await vi.advanceTimersByTimeAsync(0);
+      const pending = { settled: "pending" };
+
+      expect(await Promise.race([read, pending])).toEqual({
+        settled: "rejected",
+        code: "slack_webapi_rate_limited_error",
+      });
+      expect(await Promise.race([lookup, pending])).toMatchObject({
+        settled: "resolved",
+        value: { name: "milkana" },
+      });
+      expect(asked).toEqual(["conversations.replies", "users.info"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("logs a failed lookup with where it was and Slack's reason, and never the text", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { instance, socket, api } = adapter({ wakeInOwnThreads: true });
+      await instance.start(() => {});
+      api.replies = async () => {
+        throw Object.assign(new Error("An API error occurred: missing_scope xoxb-test"), {
+          code: "slack_webapi_platform_error",
+          data: { error: "missing_scope" },
+        });
+      };
+
+      await socket.emit(reply("1786761000.000300", ROOT));
+
+      const lines = warn.mock.calls.map(([line]) => String(line));
+      expect(lines).toEqual([
+        'thread_owner_read_failed surface=slack channel=GENG thread=1786761000.000100 reason="missing_scope"',
+      ]);
+      expect(lines.join("\n")).not.toMatch(/xoxb|Dana/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("leaves a top-level untagged message alone: only a reply in a thread can wake", async () => {
+    const { socket, api, got } = await answered();
+    await socket.emit({ ...reply("1786761000.000300", ROOT), thread_ts: undefined });
+
+    expect(got.at(-1)?.mentionsMe).toBe(false);
+    expect(api.replyCalls).toEqual([]);
+  });
+
+  it("is off unless asked for: a reply in its own thread still needs a tag", async () => {
+    const { socket, api, got } = await answered({ wakeInOwnThreads: undefined });
+    await socket.emit(reply("1786761000.000300", ROOT));
+
+    expect(got.at(-1)?.mentionsMe).toBe(false);
+    expect(api.replyCalls).toEqual([]);
   });
 });
