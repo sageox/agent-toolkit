@@ -1372,6 +1372,59 @@ describe("SlackAdapter", () => {
     }
   });
 
+  it("replays what it read before Slack refused a thread page, then reads the next thread", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    const refused = "1786761000.000200";
+    const next = "1786761000.000100";
+    // Newest first, so the refused thread is read first.
+    api.histories.push({
+      messages: [
+        mention(refused, { thread_ts: refused, latest_reply: "1786761000.000400" }),
+        mention(next, { thread_ts: next, latest_reply: "1786761000.000300" }),
+      ],
+    });
+    api.replies = async (args) => {
+      api.replyCalls.push(args);
+      if (args.ts === next) return { messages: [mention("1786761000.000300", { thread_ts: next })] };
+      if (!args.cursor) {
+        return { messages: [mention("1786761000.000400", { thread_ts: refused })], nextCursor: "page2" };
+      }
+      throw Object.assign(new Error("An API error occurred: invalid_cursor"), {
+        data: { ok: false, error: "invalid_cursor" },
+      });
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const got: InboundEvent[] = [];
+
+    try {
+      await instance.start((event) => got.push(event));
+
+      expect(got.map((event) => event.id.nativeId)).toEqual([
+        "GENG:1786761000.000100",
+        "GENG:1786761000.000200",
+        "GENG:1786761000.000300",
+        "GENG:1786761000.000400",
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        `backfill_read_failed surface=slack channel=GENG thread=${refused} reason="invalid_cursor"`,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("still fails to start when a backfill read fails any other way", async () => {
+    const { instance, api } = adapter({ since: 1786760000 });
+    // The client has already retried this one; failing keeps the gap for the next start.
+    api.history = async () => {
+      throw Object.assign(new Error("A request error occurred: socket hang up"), {
+        code: "slack_webapi_request_error",
+      });
+    };
+
+    await expect(instance.start(() => {})).rejects.toThrow("socket hang up");
+  });
+
   it("asks for replies only in threads that moved after the cursor", async () => {
     const { instance, api } = adapter({ since: 1786760000 });
     api.histories.push({ messages: [mention("1786761000.000100")] });

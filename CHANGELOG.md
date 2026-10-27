@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A Slack agent now starts when Slack refuses to read one of its configured channels.**
   Starting from a saved cursor, the Slack adapter backfills every configured channel and
-  open DM, and a refused read failed `start()`. An app never invited to one of its channels
-  got `not_in_channel` there and could not start again once it had a cursor. A refused read
-  now costs only that channel's gap: one `backfill_read_failed surface=slack channel=<id>
-  reason="<code>"` warning, and the other channels and DMs are still backfilled. Invite the
-  app to the channel to hear it.
+  open DM, and any failed read failed `start()`. An app never invited to one of its channels
+  (`not_in_channel`, or `channel_not_found` for a private one) could not start again once it
+  had a cursor. A Slack refusal now costs only the read it refused, a channel's gap or one
+  thread's replies, with a `backfill_read_failed` warning naming it, and what was read before
+  it still replays. A network fault or any other error still fails `start()`, so the next
+  start retries the gap. Invite the app to the channel to hear it.
 
 ## [0.11.0] - 2026-10-27
 
