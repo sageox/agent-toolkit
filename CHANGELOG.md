@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-27
+
+Everything below shipped after `v0.11.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.11.1` takes `:latest` and advances `:0.11`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
 - **A Slack agent now starts when Slack refuses to read one of its configured channels.**
   Starting from a saved cursor, the Slack adapter backfills every configured channel and
   open DM, and any failed read failed `start()`. An app never invited to one of its channels
@@ -23,7 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   brain the policy allows none of fails now. A partly allowed brain is a warning that names
   the withheld tools and exits 0, and that includes a tool a newer release adds, which used
   to fail until `memory add` re-synced the policy.
-
 ## [0.11.0] - 2026-10-27
 
 Everything below shipped after `v0.10.0`.
