@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned by digest. An agent keeps running 22.23.2 until it runs an image built from this
   change. `.mise.toml` selects Node 22.23.4 for a source checkout, up from 22.12.0; run
   `mise install` to get it.
+- **An MCP server can be told which message it is answering, and who sent it.** Set
+  `stampTurn: true` on an `mcpServers` entry and every `tools/call` to that server carries
+  the live turn under `params._meta["sageox.ai/turn"]`: the surface, the channel, the
+  message and thread references, and the author's id. It comes from the gateway's live-turn
+  registry, the one the reaction tool and the job door already read, so the brain cannot
+  set it; a value the brain sends under that key is replaced. The value is `null` unless
+  exactly one turn is live and the only brain work running is that turn's own: with none
+  live, two channels mid-turn at once, a scheduled tick running, or a prompt still running
+  after its turn timed out, a call cannot be told apart from another turn's, so it names
+  nobody rather than the wrong person. Off by default. A server
+  that does not set it receives each call exactly as the brain sent it, so no existing
+  agent changes. `run` lists a stamped server as `stamped with the live turn`.
+
 - **A Slack agent can be woken by an untagged reply in a thread it has posted in.** Set
   `wakeInOwnThreads: true` on the Slack surface and subscribe the app to `message.channels`
   (and `message.groups`), and a person replying in a thread the bot started or answered in no
