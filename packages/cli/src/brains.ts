@@ -44,8 +44,13 @@ export function serverNameFor(brain: BrainConfig, index: number): string | undef
   }
 }
 
+/** Tool names a given set of brains needs the policy to admit. */
+export function toolNamesFor(brains: BrainConfig[]): string[] {
+  return [...new Set(brains.flatMap((brain, index) => brainToolNames(brain, index)))];
+}
+
 /**
- * Tool names a given set of brains needs the policy to admit.
+ * One brain's tool names; `index` is its place in the full `brains` list.
  *
  * MCP tools reach the brain namespaced as `mcp__<server>__<tool>`, with non-`[a-zA-Z0-9_-]`
  * in the server name replaced by `_`. A policy listing the bare `team_search` therefore
@@ -53,11 +58,6 @@ export function serverNameFor(brain: BrainConfig, index: number): string | undef
  * rule, and the tool is refused while `doctor` — checking the same bare name — calls it
  * allowlisted. The namespace belongs here so both sides ask the same question.
  */
-export function toolNamesFor(brains: BrainConfig[]): string[] {
-  return [...new Set(brains.flatMap((brain, index) => brainToolNames(brain, index)))];
-}
-
-/** One brain's tool names; `index` is its place in the full `brains` list. */
 export function brainToolNames(brain: BrainConfig, index: number): string[] {
   const server = serverNameFor(brain, index);
   if (!server) return [];

@@ -154,7 +154,9 @@ of failing. That is how an agent set up by an older release picks up a brain too
 since — `doctor` names the missing tool, and re-running the same `memory add` allows it. The
 existing entry itself is never rewritten. A missing tool is a warning, not a failure, unless
 the policy allows none of a brain's tools, so a brain narrowed on purpose (read but not
-write) still deploys.
+write) still passes `doctor`. Re-running `memory add` allows every tool again, so do not run
+it for a brain you narrowed: on the team brain, allowing `team_sessions` or `team_recent`
+also starts ledger sync.
 
 The **team** brain reaches your team's indexed knowledge through `ox`:
 `team_search` over discussions, decisions, docs, plans and assistant-chat sessions. It reads;

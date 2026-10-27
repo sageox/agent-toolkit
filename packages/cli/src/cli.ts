@@ -1083,8 +1083,8 @@ export async function memoryAddCmd(argv: string[]): Promise<void> {
 
   // Re-running `memory add` for a brain that is already there repairs the policy instead
   // of failing. The tools a brain contributes grow between releases, and an agent whose
-  // settings.json predates the growth would otherwise fail `doctor` for a tool no command
-  // could allow.
+  // settings.json predates the growth would otherwise leave `doctor` warning about a tool no
+  // command could allow.
   let fresh = true;
   try {
     yaml = addBrain(yaml, entry);
@@ -2454,7 +2454,7 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
    * Reported, not enforced: a posture that is loose on purpose.
    *
    * Distinct from `problems` because those are configurations that cannot work — an
-   * unresolvable secret, a policy that denies the memory it was given. A warning is a
+   * unresolvable secret, a policy that denies all of a brain's tools. A warning is a
    * deployment that runs exactly as written, by someone who chose it, so refusing to
    * start would be this tool overruling its operator rather than informing them.
    */
@@ -2848,7 +2848,7 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
               return;
             }
             // Partly allowed is a brain narrowed on purpose (read but not write) or one a
-            // later release grew a tool for. Either way the rest works: name, don't refuse.
+            // later release grew a tool for, and the policy cannot say which: name, don't refuse.
             warnings.push(
               `brain ${brain.preset}: the tool policy withholds ${denied.join(", ")} — the ` +
                 "agent can use its other tools; if that is not deliberate, re-run " +
