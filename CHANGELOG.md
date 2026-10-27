@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-27
+
+Everything below shipped after `v0.10.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.11.0` takes `:latest` and `:0.11`. `:0.10` stays
+on 0.10.0. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+A minor release for the new rehearsal commands and opt-in MCP and Slack capabilities.
+MCP turn stamping and Slack wakeups in the agent's own threads are off by default; existing
+agents keep their configured behavior. The image updates Node.js to 22.23.4 and ox to
+0.24.2. Helm chart 0.15.0 and `deploy/docker/compose.yaml` need no change: the chart's
+templates and values and the compose file are as they were in v0.10.0.
+
 - **The agent base image runs Node.js 22.23.4.** It ran 22.23.2, which the
   [October 2026 Node.js security release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)
   patches. On the 22.x line that release fixes seven CVEs, three of them high: an out-of-bounds
