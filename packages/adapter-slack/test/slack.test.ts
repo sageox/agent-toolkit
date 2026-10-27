@@ -1389,8 +1389,9 @@ describe("SlackAdapter", () => {
       if (!args.cursor) {
         return { messages: [mention("1786761000.000400", { thread_ts: refused })], nextCursor: "page2" };
       }
-      throw Object.assign(new Error("An API error occurred: invalid_cursor"), {
-        data: { ok: false, error: "invalid_cursor" },
+      // Deleted while it was being read: the page already read still replays.
+      throw Object.assign(new Error("An API error occurred: thread_not_found"), {
+        data: { ok: false, error: "thread_not_found" },
       });
     };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -1406,23 +1407,24 @@ describe("SlackAdapter", () => {
         "GENG:1786761000.000400",
       ]);
       expect(warn).toHaveBeenCalledWith(
-        `backfill_read_failed surface=slack channel=GENG thread=${refused} reason="invalid_cursor"`,
+        `backfill_read_failed surface=slack channel=GENG thread=${refused} reason="thread_not_found"`,
       );
     } finally {
       warn.mockRestore();
     }
   });
 
-  it("still fails to start when a backfill read fails any other way", async () => {
+  // Failing keeps the gap for the next start; skipping would let the cursor pass it by.
+  it.each([
+    ["a network fault", { code: "slack_webapi_request_error" }],
+    ["a refusal a retry can clear", { data: { ok: false, error: "invalid_cursor" } }],
+  ])("still fails to start when a backfill read fails with %s", async (_, shape) => {
     const { instance, api } = adapter({ since: 1786760000 });
-    // The client has already retried this one; failing keeps the gap for the next start.
     api.history = async () => {
-      throw Object.assign(new Error("A request error occurred: socket hang up"), {
-        code: "slack_webapi_request_error",
-      });
+      throw Object.assign(new Error("backfill read failed"), shape);
     };
 
-    await expect(instance.start(() => {})).rejects.toThrow("socket hang up");
+    await expect(instance.start(() => {})).rejects.toThrow("backfill read failed");
   });
 
   it("asks for replies only in threads that moved after the cursor", async () => {

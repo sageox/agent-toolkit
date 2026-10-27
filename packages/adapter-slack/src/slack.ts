@@ -1176,12 +1176,11 @@ export class SlackAdapter implements SurfaceAdapter {
    */
   private async backfill(oldest: number, session: number): Promise<void> {
     const live = () => session === this.generation;
-    // A Slack refusal (`ok: false`, which the client never retries) costs the read it
-    // refused, not the launch: `start` rethrows, so `not_in_channel` from one channel the
-    // app was never invited to stopped the agent on every restart. A network fault, a bug,
-    // or any failure once this run is stale still throws.
+    // A refusal no restart will change costs the read it refused, not the launch: `start`
+    // rethrows, so `not_in_channel` from one channel the app was never invited to stopped
+    // the agent on every restart. Anything else still throws, so the next start retries.
     const skip = (error: unknown, where: string): void => {
-      if (!live() || slackErrorCode(error) === undefined) throw error;
+      if (!live() || !PERMANENT_READ_FAILURES.has(slackErrorCode(error) ?? "")) throw error;
       console.warn(
         `backfill_read_failed surface=${SLACK_SURFACE} ${where} ` +
           `reason=${JSON.stringify(slackFailure(error))}`,
@@ -1570,6 +1569,19 @@ const PERMANENT_NAME_FAILURES = new Set([
   "not_allowed_token_type",
   "user_not_found",
   "account_inactive",
+]);
+
+/**
+ * `conversations.history` and `conversations.replies` refusals that no restart changes: the
+ * app is not in the conversation, the conversation or thread is gone, or the token may not
+ * read it. Deliberately short, like {@link PERMANENT_NAME_FAILURES}: `invalid_cursor`,
+ * `internal_error` and a network fault fail the backfill, so the next start retries the gap.
+ */
+const PERMANENT_READ_FAILURES = new Set([
+  "not_in_channel",
+  "channel_not_found",
+  "thread_not_found",
+  "missing_scope",
 ]);
 
 function isPermanentNameFailure(error: unknown): boolean {

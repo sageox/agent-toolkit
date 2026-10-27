@@ -11,10 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Starting from a saved cursor, the Slack adapter backfills every configured channel and
   open DM, and any failed read failed `start()`. An app never invited to one of its channels
   (`not_in_channel`, or `channel_not_found` for a private one) could not start again once it
-  had a cursor. A Slack refusal now costs only the read it refused, a channel's gap or one
-  thread's replies, with a `backfill_read_failed` warning naming it, and what was read before
-  it still replays. A network fault or any other error still fails `start()`, so the next
-  start retries the gap. Invite the app to the channel to hear it.
+  had a cursor. A refusal no restart changes (`not_in_channel`, `channel_not_found`,
+  `thread_not_found`, `missing_scope`) now costs only the read it refused, a channel's gap or
+  one thread's replies, with a `backfill_read_failed` warning naming it, and what was read
+  before it still replays. Any other failure while reading channel history or thread
+  replies, `invalid_cursor` or a network fault included, still fails `start()`, so the next
+  start retries that gap. Invite the app to the channel to hear it.
 
 ## [0.11.0] - 2026-10-27
 

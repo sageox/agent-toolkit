@@ -456,10 +456,12 @@ older than the cursor stays missed — that parent is outside the history window
 cannot enumerate the threads that moved in a period — and, without `im:read`, every DM,
 since the adapter then has no list of them until they speak.
 
-A read Slack refuses costs only what it refused, a channel's gap or one thread's replies,
-and is logged as `backfill_read_failed` with Slack's error code: `not_in_channel` for a
-public channel nobody invited the app to, `channel_not_found` for a private one. Any other
-failure still stops the start, so the next one retries the gap.
+A read Slack refuses for good costs only what it refused, a channel's gap or one thread's
+replies, and is logged as `backfill_read_failed` with Slack's error code: `not_in_channel`
+for a public channel nobody invited the app to, `channel_not_found` for a private one,
+`thread_not_found` for a deleted thread, `missing_scope` for one the token may not read. Any
+other failure while reading channel history or thread replies still stops the start, so the
+next one retries that gap.
 
 ### Publish its face on Slack
 
