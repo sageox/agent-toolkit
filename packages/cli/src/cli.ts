@@ -138,7 +138,7 @@ import {
   ensureSettingsFile,
 } from "./edit-config.ts";
 import { flag, hasFlag, optionValue, positional, refuseUnknownOptions, VALUED_OPTIONS } from "./args.ts";
-import { wireBrains, toolNamesFor, DEFAULT_OX_TOKEN_SECRET } from "./brains.ts";
+import { wireBrains, toolNamesFor, brainToolNames, DEFAULT_OX_TOKEN_SECRET } from "./brains.ts";
 import { oxStatus, expiringSoon, oxTeams, type OxTeam } from "./ox.ts";
 import { formatProbe } from "./probe.ts";
 import {
@@ -1083,8 +1083,8 @@ export async function memoryAddCmd(argv: string[]): Promise<void> {
 
   // Re-running `memory add` for a brain that is already there repairs the policy instead
   // of failing. The tools a brain contributes grow between releases, and an agent whose
-  // settings.json predates the growth would otherwise fail `doctor` for a tool no command
-  // could allow.
+  // settings.json predates the growth would otherwise leave `doctor` warning about a tool no
+  // command could allow.
   let fresh = true;
   try {
     yaml = addBrain(yaml, entry);
@@ -2454,7 +2454,7 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
    * Reported, not enforced: a posture that is loose on purpose.
    *
    * Distinct from `problems` because those are configurations that cannot work — an
-   * unresolvable secret, a policy that denies the memory it was given. A warning is a
+   * unresolvable secret, a policy that denies all of a brain's tools. A warning is a
    * deployment that runs exactly as written, by someone who chose it, so refusing to
    * start would be this tool overruling its operator rather than informing them.
    */
@@ -2833,16 +2833,29 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
         }
 
         if (manifest.brains.length) {
-          const denied = toolNamesFor(manifest.brains).filter((t) => !policy.allowsTool(t).ok);
-          if (denied.length) {
-            problems.push(
-              `brains are configured but the tool policy denies ${denied.join(", ")} — ` +
-                "the agent would have memory it cannot use; re-run `sageox-agent memory add " +
-                "<preset>` for that brain to re-sync the policy",
+          let withheld = false;
+          manifest.brains.forEach((brain, index) => {
+            const names = brainToolNames(brain, index);
+            const denied = names.filter((t) => !policy.allowsTool(t).ok);
+            if (!denied.length) return;
+            withheld = true;
+            if (denied.length === names.length) {
+              problems.push(
+                `brain ${brain.preset}: the tool policy denies ${denied.join(", ")} — ` +
+                  "the agent would have memory it cannot use; re-run `sageox-agent memory add " +
+                  "<preset>` for that brain to re-sync the policy",
+              );
+              return;
+            }
+            // Partly allowed is a brain narrowed on purpose (read but not write) or one a
+            // later release grew a tool for, and the policy cannot say which: name, don't refuse.
+            warnings.push(
+              `brain ${brain.preset}: the tool policy withholds ${denied.join(", ")} — the ` +
+                "agent can use its other tools; if that is not deliberate, re-run " +
+                "`sageox-agent memory add <preset>` for that brain to re-sync the policy",
             );
-          } else {
-            ok.push(`brain tools are allowlisted (${manifest.brains.length} brain(s))`);
-          }
+          });
+          if (!withheld) ok.push(`brain tools are allowlisted (${manifest.brains.length} brain(s))`);
         }
         if (requestable.length) {
           if (!policy.allowsTool(JOB_RUN_TOOL).ok) {
