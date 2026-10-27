@@ -1180,20 +1180,30 @@ export class SlackAdapter implements SurfaceAdapter {
     // the middle of that is the same waste as one landing in the middle of a history page.
     for (const channel of [...this.allowedChannels, ...(await this.directChannels(live))]) {
       if (!live()) return;
-      const parents = await this.collect(
-        (cursor) => this.api.history({ channel, oldest: String(oldest), cursor }),
-        live,
-      );
-
-      const missed = [...parents];
-      for (const parent of parents) {
-        if (!live()) return;
-        if (!hasRepliesSince(parent, oldest)) continue;
-        missed.push(
-          ...(await this.collect(
-            (cursor) => this.api.replies({ channel, ts: parent.ts!, oldest: String(oldest), cursor }),
-            live,
-          )),
+      const missed: SlackMessage[] = [];
+      try {
+        const parents = await this.collect(
+          (cursor) => this.api.history({ channel, oldest: String(oldest), cursor }),
+          live,
+        );
+        missed.push(...parents);
+        for (const parent of parents) {
+          if (!live()) return;
+          if (!hasRepliesSince(parent, oldest)) continue;
+          missed.push(
+            ...(await this.collect(
+              (cursor) => this.api.replies({ channel, ts: parent.ts!, oldest: String(oldest), cursor }),
+              live,
+            )),
+          );
+        }
+      } catch (error) {
+        // A refused read costs this channel's gap, not the launch: `start` rethrows, so an
+        // uncaught `not_in_channel` from one channel the app was never invited to would stop
+        // the agent on every restart. Walks that finished before the failure still replay.
+        console.warn(
+          `backfill_read_failed surface=${SLACK_SURFACE} channel=${channel} ` +
+            `reason=${JSON.stringify(slackFailure(error))}`,
         );
       }
 

@@ -454,7 +454,9 @@ events. Because history returns thread parents but not their replies, it also pu
 which DMs are open so it can do the same for those. Two gaps remain: a reply under a parent
 older than the cursor stays missed — that parent is outside the history window, and Slack
 cannot enumerate the threads that moved in a period — and, without `im:read`, every DM,
-since the adapter then has no list of them until they speak.
+since the adapter then has no list of them until they speak. A channel Slack refuses to
+read, usually `not_in_channel` because nobody invited the app, loses its gap too: the
+adapter logs `backfill_read_failed` with Slack's error code and backfills the rest.
 
 ### Publish its face on Slack
 

@@ -1337,6 +1337,41 @@ describe("SlackAdapter", () => {
     expect(got.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000100"]);
   });
 
+  it("starts and backfills its other channels when Slack refuses to read one", async () => {
+    // Listed first, so the backfill has to carry on past it to reach GENG.
+    const { instance, socket, api } = adapter({
+      since: 1786760000,
+      channels: [
+        { id: "CNOTJOINED", reply: "public" },
+        { id: "GENG", reply: "private" },
+      ],
+    });
+    const pages = api.history.bind(api);
+    api.history = async (args) => {
+      if (args.channel !== "CNOTJOINED") return pages(args);
+      api.historyCalls.push(args);
+      throw Object.assign(new Error("An API error occurred: not_in_channel"), {
+        data: { ok: false, error: "not_in_channel" },
+      });
+    };
+    api.histories.push({ messages: [mention("1786761000.000100")] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const got: InboundEvent[] = [];
+
+    try {
+      await instance.start((event) => got.push(event));
+
+      expect(socket.disconnected).toBe(false);
+      expect(api.historyCalls.map((call) => call.channel)).toEqual(["CNOTJOINED", "GENG"]);
+      expect(got.map((event) => event.id.nativeId)).toEqual(["GENG:1786761000.000100"]);
+      expect(warn).toHaveBeenCalledWith(
+        'backfill_read_failed surface=slack channel=CNOTJOINED reason="not_in_channel"',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("asks for replies only in threads that moved after the cursor", async () => {
     const { instance, api } = adapter({ since: 1786760000 });
     api.histories.push({ messages: [mention("1786761000.000100")] });
