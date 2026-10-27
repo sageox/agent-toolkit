@@ -54,19 +54,20 @@ export function serverNameFor(brain: BrainConfig, index: number): string | undef
  * allowlisted. The namespace belongs here so both sides ask the same question.
  */
 export function toolNamesFor(brains: BrainConfig[]): string[] {
-  const names = new Set<string>();
-  brains.forEach((brain, index) => {
-    const server = serverNameFor(brain, index);
-    if (!server) return;
-    const tools =
-      brain.preset === "team"
-        ? TEAM_TOOL_NAMES
-        : brain.preset === "private"
-          ? PRIVATE_BRAIN_TOOL_NAMES
-          : BRAIN_TOOL_NAMES;
-    for (const tool of tools) names.add(`mcp__${normalizeServerName(server)}__${tool}`);
-  });
-  return [...names];
+  return [...new Set(brains.flatMap((brain, index) => brainToolNames(brain, index)))];
+}
+
+/** One brain's tool names; `index` is its place in the full `brains` list. */
+export function brainToolNames(brain: BrainConfig, index: number): string[] {
+  const server = serverNameFor(brain, index);
+  if (!server) return [];
+  const tools =
+    brain.preset === "team"
+      ? TEAM_TOOL_NAMES
+      : brain.preset === "private"
+        ? PRIVATE_BRAIN_TOOL_NAMES
+        : BRAIN_TOOL_NAMES;
+  return tools.map((tool) => `mcp__${normalizeServerName(server)}__${tool}`);
 }
 
 /** Mirrors the agent's own rule: anything outside `[a-zA-Z0-9_-]` becomes `_`. */

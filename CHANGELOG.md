@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`doctor` no longer fails an agent whose tool policy narrows a brain on purpose.** A
+  policy that allowed some of a brain's tools but not all, such as a private brain the agent
+  may read but not write, failed with "the agent would have memory it cannot use". Only a
+  brain the policy allows none of fails now. A partly allowed brain is a warning that names
+  the withheld tools, so a tool a newer release adds is still named for `memory add` to
+  re-sync.
+
 ## [0.11.0] - 2026-10-27
 
 Everything below shipped after `v0.10.0`.
