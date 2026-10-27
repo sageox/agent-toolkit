@@ -409,15 +409,21 @@ async function buildBrain(
           process.stdout.write(
             `  warning: ${server}'s "${tool}" changed shape since it was approved — held back\n`,
           ),
+        // Who a stamped call is from, for the servers that set `stampTurn`: the live turn,
+        // and only while no other brain work is running that could have made the call.
+        answering: egress && (() => egress.callerEvent()),
       })
     : undefined;
 
-  for (const { name, scope } of brokerServers) {
+  for (const { name, scope, stampTurn } of brokerServers) {
     const server = await serveBrokerServer(broker!, name, serveAt(name));
     const bound = Object.entries(scope ?? {})
       .map(([arg, values]) => `${arg} ∈ ${values.join(", ")}`)
       .join("; ");
-    addHosted(name, server, `mcp server "${name}"${bound ? ` (bound to ${bound})` : ""}`);
+    const notes = [bound && `bound to ${bound}`, stampTurn && "stamped with the live turn"]
+      .filter(Boolean)
+      .join("; ");
+    addHosted(name, server, `mcp server "${name}"${notes ? ` (${notes})` : ""}`);
   }
 
   // The chat door onto this agent's own jobs. The brain names a slug; the argv comes from

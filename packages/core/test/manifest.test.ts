@@ -506,6 +506,25 @@ describe("mcpServers scope", () => {
   });
 });
 
+describe("mcpServers stampTurn", () => {
+  const base = "name: x\nbrain: {provider: mock}\nsurfaces: [{kind: console}]\nrespondTo: anyone\n";
+  const server = (extra: string) =>
+    `${base}mcpServers:\n  - name: gtm\n    command: node\n    args: [gtm.js]\n${extra}`;
+
+  it("is off unless written down, so no existing server starts receiving ids", () => {
+    expect(resolveMcpServer(loadManifest(server("")).mcpServers[0]!).stampTurn).toBe(false);
+  });
+
+  it("is on for a server that asks for it", () => {
+    const decl = loadManifest(server("    stampTurn: true")).mcpServers[0]!;
+    expect(resolveMcpServer(decl).stampTurn).toBe(true);
+  });
+
+  it("refuses anything but a boolean, rather than reading a string as yes", () => {
+    expect(() => loadManifest(server('    stampTurn: "yes"'))).toThrow();
+  });
+});
+
 describe("secretRefs and environment names", () => {
   const base = "name: x\nbrain: {provider: mock}\nrespondTo: anyone\n";
   const withServer = (extra: string) =>
