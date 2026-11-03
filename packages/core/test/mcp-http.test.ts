@@ -8,6 +8,38 @@ afterEach(async () => {
 });
 
 describe("gateway MCP tool permissions", () => {
+  it.each(["mcp__docs", "mcp__docs__*", "mcp__docs___read"])(
+    "does not list or execute docs_ tools under %s",
+    async (rule) => {
+      const call = vi.fn(async () => "done");
+      hosted = await serveMcp(mcpToolServer({
+        name: "docs_",
+        tools: () => ["read", "_read", "__read"].map((name) => ({
+          name, inputSchema: { type: "object" },
+        })),
+        call,
+      }), {
+        toolPolicy: { server: "docs_", policy: new ToolPolicy([rule], []) },
+      });
+      const request = async (method: string, name?: string) => {
+        const response = await fetch(hosted!.url, {
+          method: "POST",
+          headers: { authorization: `Bearer ${hosted!.token}`, "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: { name, arguments: {} } }),
+        });
+        return response.json() as Promise<{
+          result?: { tools?: { name: string }[] };
+          error?: { message: string };
+        }>;
+      };
+      expect((await request("tools/list")).result?.tools).toEqual([]);
+      for (const name of ["read", "_read", "__read"]) {
+        expect((await request("tools/call", name)).error?.message).toMatch(/not allowlisted/);
+      }
+      expect(call).not.toHaveBeenCalled();
+    },
+  );
+
   it("lists only allowed tools and refuses direct calls before executing them", async () => {
     const call = vi.fn(async () => "done");
     hosted = await serveMcp(mcpToolServer({

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- MCP tool grants now match the actual server and bare tool separately, preventing a
+  grant for `docs` from authorizing `docs_`. MCP server names ending in `_` are rejected;
+  rename them and update their policy rules. Discovery also rejects duplicate qualified
+  tool identities.
+
 ## [0.11.1] - 2026-10-27
 
 Everything below shipped after `v0.11.0`.
