@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Claude-hosted MCP services now enforce the tool policy on direct HTTP calls.**
+  Every hosted service applies the gateway's allow/deny policy before dispatch, as Codex
+  services already did, so a session's URL and bearer token cannot bypass denied tools.
+
 - **Host-side CLI setup protects `.env` before writing credentials.** Files are created
   with mode `0600` and permissions are enforced on the open file before appending, closing
   the write-then-chmod exposure window. Agent initialization also creates directories at
