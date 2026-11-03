@@ -15,7 +15,7 @@ Everything one agent owns lives in `~/.config/agent-toolkit/agents/<name>/`:
 | `avatar.svg` | its offline starter badge and fallback upload source |
 | `avatar.png` | its generated artwork when image generation was selected |
 | `settings.json` | what its tools may do |
-| `repos.conf` | optional HTTPS repositories to clone; prefix private GitHub repositories with `private ` |
+| `repos.conf` | optional HTTPS repositories to clone; prefix private GitHub repositories with `private `; pin hosted ledgers with a `repo=repo_<id>` suffix |
 | `.env` | credentials, mode 600 |
 | `state.json` | resume cursors |
 | `workspace/` | durable repository checkouts and `ox` code indexes |
@@ -281,7 +281,20 @@ address; it defaults to `127.0.0.1`.
 `team_sessions` and `team_recent` read a repository's ledger from a local checkout that must
 have synced within five minutes. When the policy grants either tool, the gateway syncs the
 ledger of every configured repository whose checked-in `.sageox/config.json` names this
-team. Nothing else is configured: the gateway runs `ox sync --read-only --repo <repo_id>`
+team and matches an operator-configured SageOx repository ID. Pin each approved Git URL in
+the deployment's `repos.conf`:
+
+```text
+https://github.com/acme/service repo=repo_service
+private https://github.com/acme/internal repo=repo_internal
+```
+
+Obtain these IDs from trusted deployment information, not the tracked checkout file. For a
+single-repository scope, the team brain's existing `repo` setting is the fallback for entries
+without a pin; when both are set, both must match. Missing or mismatched pins refuse hosted
+sync and reads. Code indexing and explicit `ledgerSync` remotes do not require these pins.
+
+The gateway runs `ox sync --read-only --repo <repo_id>`
 with the team brain's `token` and the agent's own `workspace/ox-data`, and ox discovers the
 ledger, authenticates to it with that token, and materializes and verifies the checkout.
 Grant neither tool and no repository syncs over the team token; `ledgerSync` repositories

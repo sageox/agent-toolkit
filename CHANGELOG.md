@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Hosted ledger reads now require an operator-configured SageOx repository pin.** Add
+  `repo=repo_<id>` after each Git URL in `repos.conf`, or use the team brain's existing
+  `repo` pin for a single-repository scope. Unpinned or mismatched checkouts cannot start
+  hosted sync or read sessions and recent activity. Set pins from trusted deployment
+  information, not tracked `.sageox/config.json` metadata. Explicit `ledgerSync` remotes
+  and code indexing are unchanged.
+
 ## [0.11.1] - 2026-10-27
 
 Everything below shipped after `v0.11.0`.
