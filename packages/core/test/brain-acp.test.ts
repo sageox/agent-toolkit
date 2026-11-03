@@ -27,7 +27,9 @@ function fakeAgent(
   opts: {
     askPermission?: boolean;
     supportsClose?: boolean;
-    permissionTool?: string;
+    permissionTool?: string | null;
+    permissionTitle?: string;
+    permissionInput?: unknown;
     mcpApproval?: boolean;
   } = {},
 ) {
@@ -67,8 +69,9 @@ function fakeAgent(
           ...(opts.mcpApproval ? { _meta: { is_mcp_tool_approval: true } } : {}),
           toolCall: {
             toolCallId: "t1",
-            title: "a human-readable label that matches no rule",
-            name: opts.permissionTool ?? "mcp__github__delete_repo",
+            title: opts.permissionTitle ?? "a human-readable label that matches no rule",
+            name: opts.permissionTool === null ? undefined : opts.permissionTool ?? "mcp__github__delete_repo",
+            rawInput: opts.permissionInput,
           },
           options: [
             { optionId: "yes", name: "Allow", kind: "allow_once" },
@@ -317,7 +320,9 @@ describe.each(["claude-acp", "codex-acp"] as const)("%s brain", (provider) => {
   });
 
   it("applies the provider's native tool policy to an allowlisted tool", async () => {
-    const f = fakeAgent(["done"], { askPermission: true, permissionTool: "Bash(git status)" });
+    const f = fakeAgent(["done"], {
+      askPermission: true, permissionTool: "Bash", permissionInput: { command: "git status" },
+    });
     const brain = makeBrain({
       target: f.app,
       toolPolicy: loadToolPolicy(
@@ -341,7 +346,9 @@ describe.each(["claude-acp", "codex-acp"] as const)("%s brain", (provider) => {
   });
 
   it("refuses a tool the policy does not allowlist, even with a policy present", async () => {
-    const f = fakeAgent(["done"], { askPermission: true, permissionTool: "Bash(rm -rf /)" });
+    const f = fakeAgent(["done"], {
+      askPermission: true, permissionTool: "Bash", permissionInput: { command: "rm -rf /" },
+    });
     const brain = makeBrain({
       target: f.app,
       toolPolicy: loadToolPolicy(
@@ -409,6 +416,47 @@ describe.each(["claude-acp", "codex-acp"] as const)("%s brain", (provider) => {
 
     expect(f.permissionOutcomes[0]).toEqual({ outcome: "selected", optionId: "no" });
     await brain.stop();
+  });
+});
+
+describe("Claude native permission arguments", () => {
+  it.each([
+    { name: "Read", input: { file_path: "/mnt/secrets-store/slack-token" }, allowed: false },
+    { name: "Read", input: { file_path: "./.env" }, allowed: false },
+    { name: "Read", input: { file_path: "./docs/../.env" }, allowed: false },
+    { name: "Read", input: { file_path: join(process.cwd(), "packages/core/src/tool-policy.ts") }, allowed: false },
+    { name: "Read", input: { file_path: "./README.md" }, allowed: true },
+    { name: "Read", input: undefined, allowed: false },
+    { name: "Read", input: { file_path: 42 }, allowed: false },
+    { name: null, input: { file_path: "./README.md" }, allowed: false },
+    { name: "Read(./README.md)", input: { file_path: "./.env" }, allowed: false },
+  ])("checks rawInput, not a title or serialized name: %j", async ({ name, input, allowed }) => {
+    const f = fakeAgent(["done"], {
+      askPermission: true,
+      permissionTool: name,
+      permissionTitle: "Read",
+      permissionInput: input,
+    });
+    const brain = new AcpBrain({
+      provider: "claude-acp",
+      target: f.app,
+      cwd: join(process.cwd(), "packages/core"),
+      toolPolicy: loadToolPolicy(JSON.stringify({
+        permissions: {
+          defaultMode: "acceptEdits",
+          allow: ["Read", "Read(./README.md)"],
+          deny: ["Read(//mnt/secrets-store/**)", "Read(./.env)", "Read(/src/**)"],
+        },
+      })),
+    });
+    try {
+      await drain(brain, ev("read a file"), () => undefined);
+      expect(f.permissionOutcomes).toEqual([
+        { outcome: "selected", optionId: allowed ? "yes" : "no" },
+      ]);
+    } finally {
+      await brain.stop();
+    }
   });
 });
 
