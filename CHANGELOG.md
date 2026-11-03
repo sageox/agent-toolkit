@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Claude-hosted MCP services now enforce the tool policy on direct HTTP calls.**
+  Every hosted service applies the gateway's allow/deny policy before dispatch, as Codex
+  services already did, so a session's URL and bearer token cannot bypass denied tools.
+
 ## [0.11.1] - 2026-10-27
 
 Everything below shipped after `v0.11.0`.
