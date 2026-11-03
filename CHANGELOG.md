@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Host-side CLI setup protects `.env` before writing credentials.** Files are created
+  with mode `0600` and permissions are enforced on the open file before appending, closing
+  the write-then-chmod exposure window. Agent initialization also creates directories at
+  mode `0700` and enforces that mode when reusing them.
+
 ## [0.11.1] - 2026-10-27
 
 Everything below shipped after `v0.11.0`.
