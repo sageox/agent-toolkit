@@ -22,6 +22,7 @@ import { assembleTurnPrompt } from "./turn.ts";
 import { brainEnv, type AcpProvider } from "./brain-env.ts";
 import { withTimeout } from "./gateway.ts";
 import type { ToolPolicy } from "./tool-policy.ts";
+import { whySilent } from "./silent-reply.ts";
 
 export type { McpServer } from "@agentclientprotocol/sdk";
 
@@ -271,7 +272,19 @@ export class AcpBrain implements Brain {
       let text = await readFinalText(session);
 
       for (let retries = 0; ; retries++) {
-        if (!text.trim()) return;
+        // Silence ends the turn here, before anything is yielded, so the gateway never
+        // counts it as a reply the brain asked to send. Logged only when the text looked
+        // like something — plain emptiness is the ordinary way a tick says nothing.
+        const silent = whySilent(text, { scheduled: ctx.scheduled });
+        if (silent) {
+          if (silent !== "empty") {
+            console.info(
+              `${ctx.scheduled ? "tick_reply_dropped" : "reply_dropped"} surface=${event.surface} ` +
+                `channel=${event.channel.id} reason=${silent}`,
+            );
+          }
+          return;
+        }
         // Where the reply lands is the adapter's call — upstream keeps threads flat — so
         // the brain returns text and says nothing about threading.
         const feedback = yield { type: "reply", msg: { text } };

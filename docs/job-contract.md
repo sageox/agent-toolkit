@@ -520,7 +520,16 @@ top-level post at all — the console surface is one — which is why `doctor` a
 check both before a deploy rather than leaving `run` to refuse at startup. A reply left under the post
 reaches the agent exactly as any other message does, by mentioning it — the tick changes
 nothing about what wakes a turn. An empty reply posts nothing: silence is the message here
-as everywhere else.
+as everywhere else. Empty means the reply has nothing visible in it once whitespace, HTML
+comments (`<!-- … -->`) and invisible code points (zero-width characters, the BOM, the soft
+hyphen) are removed — a model told to say nothing tends to invent a token for it, and that
+token is not a post. On a tick, a bare placeholder is silence too: `no reply`, `nothing`,
+`nothing to say`, `nothing to post`, `none`, `n/a`, `ok` or `done`, in any case and with
+any surrounding brackets or punctuation. A dropped reply is logged as `tick_reply_dropped`
+with its reason, the run's gate reads exit code `0` (the turn finished with nothing to say),
+and a reply that says anything more than that — `Approved`, or a sentence that merely
+contains one of those words — posts as written. The placeholder list applies to scheduled
+turns only; a person who asked a question and got `ok` back is owed that `ok`.
 
 `announce` keeps its meaning, with the turn standing in for the gate: `unproven` (the
 default) posts the host's own line only when the turn never spoke — a timeout, a brain

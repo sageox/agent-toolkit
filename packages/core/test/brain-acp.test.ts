@@ -494,3 +494,39 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   expect(home).toBeDefined();
   expect(existsSync(home!)).toBe(false);
 });
+
+describe("AcpBrain treats a blank-looking reply as silence", () => {
+  async function steps(text: string, ctx: { scheduled?: boolean }): Promise<string[]> {
+    const f = fakeAgent([text]);
+    const brain = new AcpBrain({ provider: "claude-acp", target: f.app });
+    const yielded: string[] = [];
+    const turn = brain.runTurn(ev("tick"), { agentName: "tester", ...ctx });
+    for (let next = await turn.next(); !next.done; next = await turn.next()) {
+      yielded.push(next.value.msg.text);
+    }
+    await brain.stop();
+    return yielded;
+  }
+
+  it.each([
+    ["an HTML comment", "<!-- nothing new since the last tick -->"],
+    ["a zero-width run", "\u200B\u200B\u200D"],
+    ["a BOM", "\uFEFF"],
+    ["whitespace", "  \n\t"],
+  ])("yields nothing for %s on any turn", async (_what, text) => {
+    expect(await steps(text, {})).toEqual([]);
+    expect(await steps(text, { scheduled: true })).toEqual([]);
+  });
+
+  it.each(["(no reply)", "No reply.", "OK"])("yields nothing for the placeholder %j on a scheduled turn", async (text) => {
+    expect(await steps(text, { scheduled: true })).toEqual([]);
+  });
+
+  it("still yields a real one-word reply on a scheduled turn", async () => {
+    expect(await steps("Approved", { scheduled: true })).toEqual(["Approved"]);
+  });
+
+  it("does not drop a chat turn's OK", async () => {
+    expect(await steps("OK", {})).toEqual(["OK"]);
+  });
+});

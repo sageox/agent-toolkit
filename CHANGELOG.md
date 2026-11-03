@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A scheduled tick that has nothing to say no longer posts a blank or placeholder line.**
+  A reply is empty once whitespace, HTML comments and invisible code points (zero-width
+  characters, the BOM) are removed; on a tick, a bare placeholder such as `(no reply)`,
+  `OK` or `none` is silence as well. Both the brain and the gateway's tick path apply the
+  one definition (`isSilentReply`), the drop is logged as `tick_reply_dropped` with its
+  reason, and the run's gate reads exit code 0. Chat turns keep their `OK`: the placeholder
+  list is the tick's alone. Previously only a reply that was empty after `trim()` was
+  silence, so a model told to reply with nothing posted `(no reply)` or an HTML comment to
+  its channel every tick.
+
 - **Claude-hosted MCP services now enforce the tool policy on direct HTTP calls.**
   Every hosted service applies the gateway's allow/deny policy before dispatch, as Codex
   services already did, so a session's URL and bearer token cannot bypass denied tools.

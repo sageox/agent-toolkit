@@ -9,6 +9,7 @@ import { TurnPolicy } from "./policy.ts";
 import { ChannelQueue } from "./queue.ts";
 import { TurnClock } from "./turn-clock.ts";
 import { takeStranded, turnListening } from "./tool-audit.ts";
+import { whySilent } from "./silent-reply.ts";
 
 export interface GatewayOpts {
   manifest: AgentManifest;
@@ -515,7 +516,7 @@ export class Gateway {
     };
     // Registered before the bound below, so a turn that settles runs this first and the
     // `finally` sees it done.
-    const driving = this.drive(turn, e, send, tally);
+    const driving = this.drive(turn, e, send, tally, tick.scheduled);
     void driving.then(settled, settled);
     try {
       return await withTimeout(driving, timeoutMs, `turn timed out after ${timeoutMs}ms`);
@@ -619,6 +620,7 @@ export class Gateway {
     e: InboundEvent,
     send: Send,
     tally: TurnTally,
+    scheduled = false,
   ): Promise<TurnTally> {
     // The guard is a feedback loop: a refused step is handed back to the brain as the
     // result of its own yield, so it can adapt without the turn ending. The loop is
@@ -631,6 +633,19 @@ export class Gateway {
 
       const step = next.value;
       if (step.type !== "reply") continue;
+      // A reply that says nothing is the turn finishing with nothing to say, not an ask:
+      // it is neither counted nor sent, and the brain is told nothing, as for a sent reply,
+      // so it does not try to repair a silence into a post. Checked here as well as in
+      // `AcpBrain` because this is the one door every brain's reply goes through, and a
+      // tick's post lands at top level with no one to answer, where a blank line is noise.
+      const silent = whySilent(step.msg.text, { scheduled });
+      if (silent) {
+        console.info(
+          `${scheduled ? "tick_reply_dropped" : "reply_dropped"} surface=${e.surface} ` +
+            `channel=${e.channel.id} reason=${silent}`,
+        );
+        continue;
+      }
       tally.asked++;
 
       const verdict = await send(step.msg);

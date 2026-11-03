@@ -1020,6 +1020,60 @@ describe("Gateway.tick", () => {
     expect(f.posts[0].channel.id).toBe("C01");
   });
 
+  /** A brain that answers every turn with the same text, as a model told to say nothing does. */
+  const says = (text: string): Brain => ({
+    async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+      yield { type: "reply", msg: { text } };
+    },
+  });
+
+  it.each([
+    ["an HTML comment", "<!-- nothing to report -->", "invisible"],
+    ["a zero-width run", "\u200B\u200C\u200D", "invisible"],
+    ["a BOM", "\uFEFF", "empty"],
+    ["whitespace", " \n ", "empty"],
+    ["(no reply)", "(no reply)", "placeholder"],
+    ["No reply.", "No reply.", "placeholder"],
+    ["OK", "OK", "placeholder"],
+  ])("records %s as a turn with nothing to say, and posts nothing", async (_what, text, reason) => {
+    const f = postingAdapter([HIVE]);
+    const gw = new Gateway({ manifest: ticking(), adapters: [f.adapter], brain: says(text) });
+    await gw.start();
+    const lines: string[] = [];
+    const info = vi.spyOn(console, "info").mockImplementation((l) => void lines.push(String(l)));
+    try {
+      // `asked: 0`: the drop is not a refused ask, so `exitCodeFor` reads it as 0, not 1.
+      expect(await gw.tick(tickEv("screen"), { surface: "slack", channel: "C01" })).toEqual({ asked: 0, sent: 0 });
+    } finally {
+      info.mockRestore();
+    }
+    expect(f.posts).toHaveLength(0);
+    expect(lines.filter((l) => l.startsWith("tick_reply_dropped"))).toEqual([
+      `tick_reply_dropped surface=slack channel=C01 reason=${reason}`,
+    ]);
+  });
+
+  it("still posts a real one-word reply", async () => {
+    const f = postingAdapter([HIVE]);
+    const gw = new Gateway({ manifest: ticking(), adapters: [f.adapter], brain: says("Approved") });
+    await gw.start();
+    expect(await gw.tick(tickEv("screen"), { surface: "slack", channel: "C01" })).toEqual({ asked: 1, sent: 1 });
+    expect(f.posts.map((p) => p.msg.text)).toEqual(["Approved"]);
+  });
+
+  it("does not drop a chat turn's OK — the placeholder list is the tick's alone", async () => {
+    const f = fakeAdapter();
+    const gw = new Gateway({
+      manifest: loadManifest("name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: console}]"),
+      adapters: [f.adapter],
+      brain: says("OK"),
+    });
+    await gw.start();
+    f.inject(ev("is the build green?"));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(f.sent.map((m) => m.msg.text)).toEqual(["OK"]);
+  });
+
   it("stops at the kill switch and at the rate cap, and never starts a turn", async () => {
     const f = postingAdapter([HIVE]);
     const gw = new Gateway({

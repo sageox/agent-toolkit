@@ -32,6 +32,7 @@ export * from "./job-channel.ts";
 export * from "./job-host.ts";
 export * from "./job-server.ts";
 export * from "./scheduled-turn.ts";
+export * from "./silent-reply.ts";
 
 export { ExternalJobs, ExternalRequestSchema, workerResult, publishJobOutput } from "./external-jobs.ts";
 export { type FinalJobOutput } from "./job-output.ts";
