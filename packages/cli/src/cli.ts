@@ -273,7 +273,7 @@ function readManifest(path: string): AgentManifest {
  * Returns a closer because the gateway now *hosts* some brains rather than letting the
  * agent spawn them — those hold listening sockets that must come down with the process.
  */
-async function buildBrain(
+export async function buildBrain(
   manifest: AgentManifest,
   agentDir: string,
   secretsDir?: string,
@@ -302,12 +302,12 @@ async function buildBrain(
     return { brain: new MockBrain(), closeHosted: nothingToClose, postMessage: false, react: false };
   }
 
-  // Every server hosted below listens on the same address.
+  // Every hosted server enforces policy at the HTTP boundary, regardless of ACP provider.
   const isCodex = manifest.brain.provider === "codex-acp";
   const toolPolicy = policy ?? new ToolPolicy([], []);
   const serveAt = (server: string) => ({
     host: process.env.BRAIN_MCP_HOST,
-    ...(isCodex ? { toolPolicy: { server, policy: toolPolicy } } : {}),
+    toolPolicy: { server, policy: toolPolicy },
   });
 
   // Re-invoking this CLI needs the loader flags it was started with: under tsx the
