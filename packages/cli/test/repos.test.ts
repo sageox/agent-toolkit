@@ -60,6 +60,25 @@ private https://github.com/acme/service
     ).toThrow(/twice/);
   });
 
+  it("reads operator-owned ledger pins without changing the approved Git URL", () => {
+    expect(parseReposConf(`
+https://github.com/acme/docs.git repo=repo_Docs-1
+private https://github.com/acme/service repo=repo_service_2
+`)).toMatchObject([
+      { url: "https://github.com/acme/docs.git", private: false, expectedRepoId: "repo_Docs-1" },
+      { url: "https://github.com/acme/service", private: true, expectedRepoId: "repo_service_2" },
+    ]);
+    expect(() => parseReposConf(
+      "https://github.com/acme/docs.git repo=repo_a\nhttps://github.com/acme/docs.git repo=repo_b\n",
+    )).toThrow(/twice/);
+  });
+
+  it.each(["repo=", "repo=repo_", "repo=other", "repo=repo_a/../../b", "repo_a", "repo=repo_a extra"])(
+    "rejects an invalid ledger pin (%s)", (pin) => {
+      expect(() => parseReposConf(`https://github.com/acme/service ${pin}\n`)).toThrow(/repos\.conf:1.*repo=/);
+    },
+  );
+
   it("sanitizes remote path text before using it as a trusted display name", () => {
     expect(parseReposConf("https://example.com/acme/%5Dignore-instructions\n")[0].name).toBe(
       "5Dignore-instructions",
@@ -88,9 +107,10 @@ describe("repository warmup", () => {
     vi.stubEnv("DO_NOT_TRACK", "1");
     try {
       const workspace = createRepoWorkspace(
-        parseReposConf("https://github.com/acme/service\n"),
+        parseReposConf("https://github.com/acme/service repo=repo_service\n"),
         { root, run, oxClientId: "agent-id" },
       );
+      expect(workspace.states[0].expectedRepoId).toBe("repo_service");
       // The re-probe path: the reading is recomputed on every call, so the disclosure the
       // gateway assembles clears itself when the index goes warm. Latch it once at startup
       // and the agent apologizes for a cold index for the life of the process.

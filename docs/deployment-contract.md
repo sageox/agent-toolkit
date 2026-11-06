@@ -269,7 +269,10 @@ team token, work updates reach back at most 11 hours, because ox's read sync kee
 for the hour of its last sync and the 11 before it; the reply's `work_updates_since` says
 where they start.
 All use the existing `repos.conf` allowlist. The repository must retain its declared Git
-origin and match the team brain's SageOx team/repo binding. A read needs the repository's
+origin and match the team brain's SageOx team/repo binding. Hosted sync and reads also require
+the tracked SageOx ID to match the operator-owned `repo=repo_<id>` pin in `repos.conf`, falling
+back to the team brain's `repo` pin when no entry-specific pin is set. An unpinned checkout
+cannot select a hosted ledger using its tracked metadata. A read needs the repository's
 last sync to have succeeded with a remote observation (`last_successful_sync`) less than
 five minutes old, and SageOx to confirm that the credential mounted at that moment may read
 that exact repository; a team search is not that confirmation, because a repository can
@@ -280,7 +283,7 @@ refusals; status never forwards credential paths, identity details, or raw diagn
 
 **The gateway owns ledger sync.** When the policy grants `team_sessions` or `team_recent`,
 it runs `ox sync --read-only --repo <repo_id> --timeout 30m --json` for each configured
-repository bound to its team, with the team brain's token and
+repository bound to its team and an operator-owned repository pin, with the team brain's token and
 `XDG_DATA_HOME=workspace/ox-data`, at startup and a minute after each attempt ends, doubling
 that wait up to 30 minutes while attempts keep failing with the same class other than
 `denied`. ox owns
