@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- MCP tool grants now match the actual server and bare tool separately, preventing a
+  grant for `docs` from authorizing `docs_`. MCP server names ending in `_` are rejected;
+  rename them and update their policy rules. Discovery also rejects duplicate qualified
+  tool identities.
+
 - **Claude-hosted MCP services now enforce the tool policy on direct HTTP calls.**
   Every hosted service applies the gateway's allow/deny policy before dispatch, as Codex
   services already did, so a session's URL and bearer token cannot bypass denied tools.

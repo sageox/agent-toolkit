@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { InboundEvent } from "../src/events.ts";
 import { McpBroker, TURN_META_KEY, type McpTransport } from "../src/mcp-broker.ts";
-import { loadToolPolicy, qualifyTool } from "../src/tool-policy.ts";
+import { loadToolPolicy, qualifyTool, ToolPolicy } from "../src/tool-policy.ts";
 import { loadManifest } from "../src/manifest.ts";
 import { SurfaceEgress } from "../src/surface-egress.ts";
 import { Gateway } from "../src/gateway.ts";
@@ -110,6 +110,32 @@ describe("McpBroker policy chokepoint", () => {
       /not allowlisted/i,
     );
   });
+
+  it.each(["mcp__docs", "mcp__docs__*", "mcp__docs___read"])(
+    "does not relay a docs_ call under %s, even without manifest validation",
+    async (rule) => {
+      const f = fakeServer();
+      const b = new McpBroker({
+        servers: ["docs", "docs_"].map((name) => ({
+          name, command: "x", args: [], secrets: {}, scope: { repo: ["acme/docs"] },
+        })),
+        policy: new ToolPolicy([rule], []),
+        transport: f.transport,
+      });
+      const docs = await b.connect("docs");
+      const other = await b.connect("docs_");
+      const args = { repo: "acme/docs" };
+      for (const name of ["read", "_read", "__read"]) {
+        await expect(b.message(other, "tools/call", { name, arguments: args }))
+          .rejects.toThrow(/not allowlisted/);
+      }
+      expect(f.received).toHaveLength(0);
+      await expect(b.message(docs, "tools/call", { name: "_read", arguments: args }))
+        .resolves.toMatchObject({ ok: true });
+      expect(f.received).toHaveLength(1);
+      await b.stop();
+    },
+  );
 
   it("passes non-tool methods straight through", async () => {
     const f = fakeServer();
@@ -398,6 +424,36 @@ describe("McpBroker live-turn stamp", () => {
 });
 
 describe("McpBroker schema pinning (trust on first use)", () => {
+  it.each([
+    [{ server: "docs", tool: "_read" }, { server: "docs_", tool: "read" }],
+    [{ server: "docs_", tool: "read" }, { server: "docs", tool: "_read" }],
+  ])("rejects colliding qualified identities discovered on %j and %j", async (first, second) => {
+    const f = fakeServer([{ name: first.tool }]);
+    const b = new McpBroker({
+      servers: [first, second].map(({ server: name }) => ({
+        name, command: "x", args: [], secrets: {},
+      })),
+      policy,
+      transport: f.transport,
+    });
+    const one = await b.connect(first.server);
+    const two = await b.connect(second.server);
+    await expect(b.message(one, "tools/list")).resolves.toEqual({ tools: [{ name: first.tool }] });
+    // Seeing the same identity again is not a collision.
+    await expect(b.message(one, "tools/list")).resolves.toEqual({ tools: [{ name: first.tool }] });
+    f.setTools([{ name: second.tool }]);
+    await expect(b.message(two, "tools/list")).rejects.toThrow(/ambiguous MCP tool identity/);
+    await b.stop();
+  });
+
+  it("rejects duplicate identities in one tool list", async () => {
+    const f = fakeServer([{ name: "read_file" }, { name: "read_file" }]);
+    const b = broker(f);
+    const id = await b.connect("github");
+    await expect(b.message(id, "tools/list")).rejects.toThrow(/ambiguous MCP tool identity/);
+    await b.stop();
+  });
+
   it("passes tools through unchanged on first sight", async () => {
     const f = fakeServer([{ name: "mcp__github__read_file", inputSchema: { path: "string" } }]);
     const b = broker(f);
