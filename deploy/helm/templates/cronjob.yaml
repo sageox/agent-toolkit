@@ -144,8 +144,12 @@ whole of what the second mount buys.
                 - --job-secrets
                 - {{ include "agent.jobSecretsMountPath" $context }}
                 {{- end }}
-              {{- if or $job.worker $agent.workEvents }}
+              {{- if or $job.worker $agent.workEvents (include "agent.jobHasHome" $context) }}
               env:
+                {{- if include "agent.jobHasHome" $context }}
+                - name: HOME
+                  value: {{ include "agent.jobHomePath" $context }}
+                {{- end }}
                 {{- if $agent.workEvents }}
                 - name: AGENT_WORK_EVENTS
                   value: "1"
@@ -169,8 +173,17 @@ whole of what the second mount buys.
                   drop: ["ALL"]
               volumeMounts:
                 {{- include "agent.agentVolumeMounts" $context | nindent 16 }}
+                {{- if include "agent.jobHasHome" $context }}
+                - name: job-home
+                  mountPath: {{ include "agent.jobHomePath" $context }}
+                {{- end }}
           volumes:
             {{- include "agent.podVolumes" $context | nindent 12 }}
+            {{- if include "agent.jobHasHome" $context }}
+            - name: job-home
+              persistentVolumeClaim:
+                claimName: {{ include "agent.jobHomeClaimName" $context }}
+            {{- end }}
 {{ end }}
 {{- end }}
 {{- end }}

@@ -224,6 +224,22 @@
             "jobCodeIndex": {
               "type": "boolean",
               "description": "Mount workspace/ox-data read-only into this agent's CronJob Pods. Implies the checkout mount and required same-node affinity even when jobCheckouts is false. Default false. Applies only to scheduled local command jobs, not external workers or prompt jobs. Requires ox 0.15.0 or newer, included in the current runtime image. The body must set XDG_DATA_HOME to the mounted directory, run code commands from a checkout, and check index readiness; see the job body contract."
+            },
+            "jobHome": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["size", "jobs"],
+              "description": "A persistent HOME for the scheduled local command jobs named in jobs: a ReadWriteOncePod claim kept on uninstall, mounted at /home/agent with HOME set to it. Holds what a job keeps between runs, such as a coding harness's transcripts and ox's Ledger clones and upload queue. The named jobs take turns on the claim; see the chart README for the stuck-Terminating unstick step.",
+              "properties": {
+                "size": { "type": "string", "minLength": 1 },
+                "storageClass": { "type": "string", "minLength": 1, "description": "Defaults to gp3." },
+                "jobs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" }
+                }
+              }
             }
           }
         },

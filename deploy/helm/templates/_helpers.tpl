@@ -294,6 +294,32 @@ the day a second schedule appears somewhere else.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Whether this job's Pod mounts the agent's persistent job home: a scheduled local command job
+whose slug `persistence.jobHome.jobs` names. Empty output is false to an `if`.
+*/}}
+{{- define "agent.jobHasHome" -}}
+{{- if and .job (not .job.worker) .agent.persistence.jobHome -}}
+{{- if has .job.slug .agent.persistence.jobHome.jobs -}}yes{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+A constant, like the secrets mount: it is the image's HOME for the agent user, so a job
+finds its home where the image already puts it, and `HOME` is set to it explicitly for an
+image that says otherwise.
+*/}}
+{{- define "agent.jobHomePath" -}}/home/agent{{- end -}}
+
+{{- define "agent.jobHomeClaimName" -}}
+{{- $base := include "agent.agentFullname" . -}}
+{{- if gt (len $base) 58 -}}
+{{- printf "%s-%s-home" ($base | trunc 44 | trimSuffix "-") (sha256sum $base | trunc 8) -}}
+{{- else -}}
+{{- printf "%s-home" $base -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "agent.claimName" -}}
 {{- if .agent.persistence.existingClaim -}}
 {{- .agent.persistence.existingClaim -}}

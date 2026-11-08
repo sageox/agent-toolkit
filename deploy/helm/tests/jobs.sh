@@ -623,4 +623,44 @@ rendered=$(helm template agents "$chart" --values "$values" \
   --show-only templates/dispatcher.yaml)
 present '\"resources\":{\"limits\":{\"memory\":\"128Mi\"},\"requests\":{\"cpu\":\"1\"}}'
 
+# A persistent job home: the claim and the mount for the lane that names it, and nothing for
+# any other lane. Counted, because the failure is a second lane silently sharing the claim
+# and waiting behind it, or the init container holding it too.
+home=(--set 'agents.harry.persistence.jobHome.size=20Gi'
+      --set 'agents.harry.persistence.jobHome.jobs[0]=shift')
+# A schedule on harry's on-request job gives it a CronJob of its own, so this agent has a
+# second scheduled lane the home must stay out of.
+render "${home[@]}" --set 'agents.harry.jobs[1].trigger.schedules[0]=0 5 * * *'
+present 'name: agents-harry-inbox'
+counted 2 'name: job-home'
+counted 1 'mountPath: /home/agent'
+counted 1 'claimName: agents-harry-home'
+counted 1 'name: HOME'
+rendered=$(helm template agents "$chart" --values "$values" "${home[@]}" --show-only templates/pvc.yaml)
+counted 1 'name: agents-harry-home'
+counted 1 'ReadWriteOncePod'
+present 'storageClassName: "gp3"'
+present 'storage: 20Gi'
+counted 3 'helm.sh/resource-policy: keep'
+rendered=$(helm template agents "$chart" --values "$values" "${home[@]}" \
+  --set 'agents.harry.persistence.jobHome.storageClass=fast' --show-only templates/pvc.yaml)
+present 'storageClassName: "fast"'
+# Off by default: no claim and no mount anywhere.
+render
+absent 'job-home'
+absent 'name: HOME'
+rendered=$(helm template agents "$chart" --values "$values" --show-only templates/pvc.yaml)
+absent '-home'
+# A slug that no Pod of this chart runs would mount the home nowhere.
+for slug in shfit inbox daily-digest; do
+  refuses "a job home for $slug" "persistence.jobHome.jobs names $slug" \
+    --set 'agents.harry.persistence.jobHome.size=20Gi' \
+    --set "agents.harry.persistence.jobHome.jobs[0]=$slug"
+done
+refuses 'a job home for a worker job' 'persistence.jobHome.jobs names shift' "${home[@]}" \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'
+refuses 'a job home with no size' "missing property 'size'" \
+  --set 'agents.harry.persistence.jobHome.jobs[0]=shift'
+
 printf 'jobs.sh: ok\n'

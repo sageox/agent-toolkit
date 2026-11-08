@@ -20,6 +20,24 @@ A bundle that names neither a volume nor a stager has no source at all: nothing 
 run lost under `backoffLimit: 0`. Refused here rather than left to the schema, which can say
 the shape is legal but not that the pair is empty.
 */}}
+{{/*
+A `persistence.jobHome.jobs` slug that names no scheduled local command job mounts the home
+nowhere, and reads as though a lane kept its state when every run starts empty. A worker's
+Pod is the dispatcher's, and a prompt job runs in the gateway, so neither can mount it.
+*/}}
+{{- with ($agent.persistence).jobHome -}}
+{{- range $slug := .jobs -}}
+{{- $found := false -}}
+{{- range $job := $agent.jobs -}}
+{{- if and (eq $job.slug $slug) (not $job.worker) (not (hasKey $job "prompt")) $job.trigger.schedules -}}
+{{- $found = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $found -}}
+{{- fail (printf "%s: persistence.jobHome.jobs names %s, which is not a scheduled local command job of this agent, so nothing would mount the home" $name $slug) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if and (not $agent.bundle.volume) (not $agent.bundle.stageImage) -}}
 {{- fail (printf "%s: bundle needs a volume or a stageImage — one of them has to put the bundle at /config" $name) -}}
 {{- end -}}

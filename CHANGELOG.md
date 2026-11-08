@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A scheduled job can keep its home between runs.** `persistence.jobHome` (`size`, optional
+  `storageClass` defaulting to `gp3`, and the `jobs` it applies to) renders a
+  `ReadWriteOncePod` claim per agent, kept on uninstall, and mounts it at `/home/agent` with
+  `HOME` set to it, for the named lanes only. Session transcripts, ox's Ledger clones and its
+  upload queue then survive the Pod. The chart refuses a slug that no scheduled local command
+  job carries. The chart README covers releasing the claim from a Pod stuck `Terminating`.
+
 ## [0.11.2] - 2026-11-08
 
 Everything below shipped after `v0.11.1`.

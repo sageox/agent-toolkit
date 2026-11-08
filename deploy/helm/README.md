@@ -499,6 +499,48 @@ or search must fail the body; do not convert it into an empty result or run `ox 
 to repair it. The agent remains the only index writer. A successful check is not a lock:
 the agent can update the store during the run, so handle a later search failure too.
 
+### A job that keeps its home between runs
+
+A job Pod's home is part of the container, so anything a body writes under `HOME` is gone
+when the Pod ends. That includes a coding harness's session transcripts and ox's Ledger
+clones and upload queue. `persistence.jobHome` gives the lanes it names a home that
+persists:
+
+```yaml
+agents:
+  bunyan:
+    persistence:
+      jobHome:
+        size: 20Gi
+        storageClass: gp3   # the default
+        jobs: [shift]
+```
+
+The chart renders one more claim per agent, `<release>-<agent>-home`. It is `ReadWriteOncePod`
+and carries `helm.sh/resource-policy: keep`, so uninstalling the release does not delete it.
+Each named job mounts the claim at `/home/agent` and gets `HOME=/home/agent`. Other jobs,
+the init container and the Deployment Pod do not mount it. Only scheduled local command
+jobs can be named; the chart refuses a slug that names a worker job, a prompt job, a job
+with no schedule, or no job at all.
+
+`ReadWriteOncePod` means one Pod at a time, across every node. Two named lanes that overlap
+take turns, and the later one waits in `Init` until the earlier one exits. Name one lane per
+agent unless their schedules cannot overlap.
+
+**Unsticking a held claim.** A Pod stuck in `Terminating`, usually on a node that stopped
+responding, keeps the claim. Every later run then waits in `Init:0/1` behind it, logs
+nothing, and is killed at its deadline. `kubectl describe pod` on the waiting Pod names the
+holder. Then release the claim:
+
+```sh
+kubectl -n <namespace> get pods -l agent-toolkit/job=<slug>    # the old one shows Terminating
+kubectl -n <namespace> delete pod <stuck-pod> --grace-period=0 --force
+```
+
+Force-delete only once the node is really gone or rebooted. A force-deleted Pod whose node
+is still running keeps its processes, and they keep writing to the volume while the next run
+mounts it. If the node is reachable, rebooting it releases the volume safely.
+
 ### A job that reads the Kubernetes API
 
 No Pod this chart renders mounts a ServiceAccount token by default, and the projected token
