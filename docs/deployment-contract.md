@@ -328,7 +328,7 @@ Re-run `./bin/sageox-agent memory add team` to add new tool grants to an existin
 
 | Case | Coverage / remaining work |
 |---|---|
-| Pinned ox contract | The base image pins ox 0.25.0, and its compatibility test checks `--version`, the guarded readers' refusal, and the read-sync receipt. The gateway refuses to sync with ox older than 0.17.0. |
+| Pinned ox contract | The base image pins ox 0.25.0, and its compatibility test checks `--version`, the guarded readers' refusal, the read-sync receipt, and that ox accepts `disposable_machine`. The gateway refuses to sync with ox older than 0.17.0. |
 | Team-token-only setup | Tested with a fake ox: sync needs only the team token, the configured repositories, and the isolated data home. Verified live: from an empty data home, a 427-session ledger synced with only the team token and a configured repository, and both readers answered from it. |
 | Per-read authorization | Tested: an exact-repository check before each read; an unlinked repository, a revoked token, a mount replaced during the read, a mount that never settles, and a replacement after handoff. |
 | Freshness and failure classes | Tested: fresh, old, missing, invalid, and future sync times; `denied`, `unavailable`, `missing_ledger`, `missing_hydration`, `incomplete_history`, `incomplete_coverage`, `dirty`, `interrupted`, and unknown classes. A resumable first sync reports `initializing` in `team_status` and `Warming` capability health. |
