@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-11-08
+
+Everything below shipped after `v0.11.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.11.2` takes `:latest` and advances `:0.11`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
 - **The agent base image ships `ox` 0.25.0.** `OX_VERSION` and both architecture checksums in
   `deploy/docker/Dockerfile` move up from 0.24.2. It is the first release with
   `ox session wait` and the `disposable_machine` setting, which an agent whose pod keeps
