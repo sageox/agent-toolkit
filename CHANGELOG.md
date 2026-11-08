@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The agent base image ships `ox` 0.25.0.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.24.2. It is the first release with
+  `ox session wait` and the `disposable_machine` setting, which an agent whose pod keeps
+  only its home directory needs to publish its sessions before the pod goes away. The
+  image's offline compatibility test now also sets `disposable_machine`, so an image with an
+  older ox fails its build.
+  ox's [0.25.0 release notes](https://github.com/sageox/ox/releases/tag/v0.25.0) list what
+  else changed.
+
 - **Claude-hosted MCP services now enforce the tool policy on direct HTTP calls.**
   Every hosted service applies the gateway's allow/deny policy before dispatch, as Codex
   services already did, so a session's URL and bearer token cannot bypass denied tools.
