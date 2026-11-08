@@ -40,7 +40,7 @@ FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30
 RUN test "$(node --version)" = "v22.23.4"
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends age ca-certificates curl git tini \
+ && apt-get install -y --no-install-recommends age ca-certificates curl git procps tini \
  && rm -rf /var/lib/apt/lists/*
 
 # The gateway runs ox itself — the credential stays on this side of the brain boundary.
@@ -57,18 +57,28 @@ RUN set -eu; \
     archive="ox_${OX_VERSION}_linux_${arch}.tar.gz"; \
     curl -fsSL "https://github.com/sageox/ox/releases/download/v${OX_VERSION}/${archive}" -o "/tmp/${archive}"; \
     echo "${checksum}  /tmp/${archive}" | sha256sum -c -; \
-    tar -xzf "/tmp/${archive}" -C /usr/local/bin ox; \
+    tar -xzf "/tmp/${archive}" -C /usr/local/bin --wildcards ox 'ox-adapter-*'; \
     rm "/tmp/${archive}"; \
     ox version
 
-# The brains. Installed as real binaries so the gateway does not reach for npx at runtime,
-# which would mean a network fetch on the first turn.
+# The brains, and the Claude Code CLI for jobs that run it as a coding harness. Installed as
+# real binaries so nothing reaches for npx at runtime, which would mean a network fetch on
+# the first turn. ox's daemon also runs `claude` to summarize a recorded session before it
+# uploads it, so a job that records sessions needs it on PATH.
+#
+# This runs as root before the agent user exists, so npm's cache lands in /root. Installing
+# after `ENV HOME=/home/agent` would leave a root-owned ~/.npm, and every later npx call by
+# the agent user would fail with EACCES. Cleaning the cache keeps its ~400 MB out of the layer.
 ARG CLAUDE_AGENT_ACP_VERSION=0.84.0
 ARG CODEX_ACP_VERSION=1.11.0
+ARG CLAUDE_CODE_VERSION=2.1.284
 RUN npm install -g "@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}" \
       "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude-agent-acp --version \
- && codex-acp --version
+ && codex-acp --version \
+ && test "$(claude --version)" = "${CLAUDE_CODE_VERSION} (Claude Code)" \
+ && npm cache clean --force
 
 WORKDIR /app
 

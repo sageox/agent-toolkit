@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The agent base image can record Claude Code sessions with ox.** It now ships the
+  `ox-adapter-*` binaries from the ox release tarball next to `ox`, `procps` for `ps`, and
+  `@anthropic-ai/claude-code` 2.1.284 as a `claude` binary. ox finds the agent with `ps`,
+  reads the session through the adapter, and its daemon runs `claude` to summarize a session
+  before uploading it, so a job missing any of them records nothing. A job can now call
+  `claude` directly instead of fetching it with `npx` on every run. The image's offline
+  compatibility test checks all three, and that the agent user's `~/.npm` is not root-owned.
+
 ## [0.11.2] - 2026-11-08
 
 Everything below shipped after `v0.11.1`.
