@@ -170,7 +170,8 @@ try {
   // The reason this image pins ox 0.25.0+: a job whose pod keeps only its home directory
   // marks the machine disposable. An older ox rejects the key, so this fails on it.
   run("ox", ["config", "set", "disposable_machine", "on"]);
-  assert.match(run("ox", ["config", "get", "disposable_machine"]).stdout, /\bon\b|\btrue\b/);
+  const disposable = JSON.parse(run("ox", ["config", "get", "disposable_machine", "--json"]).stdout);
+  assert.deepEqual([disposable.value, disposable.source], ["on", "user"]);
   console.log("ox compatibility passed: status, team list, session list, glance, hosted ledger reads and sync, code insights and search, disposable_machine");
 } finally {
   run("chmod", ["-R", "u+w", root]);
