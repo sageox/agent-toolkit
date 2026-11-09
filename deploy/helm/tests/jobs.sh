@@ -647,6 +647,8 @@ present 'mountPath: "/home/agent/.local/share/sageox"'
 present 'subPath: ".local/share/sageox"'
 absent 'mountPath: /home/agent'
 counted 1 'name: HOME'
+# Claude Code's auto memory lives in .claude/projects and is read as instructions.
+counted 1 'name: CLAUDE_CODE_DISABLE_AUTO_MEMORY'
 rendered=$(pod_part "$shift_doc" initContainers containers)
 # The home's own init container, which only creates the directories: its name and its mount.
 counted 2 'name: job-home'
@@ -658,6 +660,11 @@ counted 1 'claimName: agents-harry-home'
 rendered=$inbox_doc
 absent 'job-home'
 absent 'name: HOME'
+absent 'CLAUDE_CODE_DISABLE_AUTO_MEMORY'
+# Keeping only ox's data leaves Claude Code's memory as it was.
+render "${home[@]}" --set 'agents.harry.persistence.jobHome.paths[0]=.cache/x'
+counted 1 'name: HOME'
+absent 'CLAUDE_CODE_DISABLE_AUTO_MEMORY'
 rendered=$all
 counted 1 'claimName: agents-harry-home'
 rendered=$(helm template agents "$chart" --values "$values" "${home[@]}" --show-only templates/pvc.yaml)

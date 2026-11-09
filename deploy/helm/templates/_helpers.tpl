@@ -331,6 +331,16 @@ Creates each `paths` directory on the claim before the job container starts. The
 would otherwise create a missing `subPath` directory itself, owned by root, and `fsGroup`
 with `OnRootMismatch` never revisits it, so the agent user could not write there.
 */}}
+{{/*
+Claude Code keeps auto memory under ~/.claude/projects/<project>/memory and loads it as
+instructions in later sessions, so a kept .claude path turns it off for the lane.
+*/}}
+{{- define "agent.jobHomeKeepsClaude" -}}
+{{- range $path := .agent.persistence.jobHome.paths -}}
+{{- if hasPrefix ".claude/" $path -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "agent.jobHomeInit" -}}
 - name: job-home
   image: {{ required "imageRef is required" .root.Values.imageRef | quote }}

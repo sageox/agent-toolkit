@@ -152,6 +152,10 @@ whole of what the second mount buys.
                 {{- if include "agent.jobHasHome" $context }}
                 - name: HOME
                   value: {{ include "agent.jobHomePath" $context }}
+                {{- if include "agent.jobHomeKeepsClaude" $context }}
+                - name: CLAUDE_CODE_DISABLE_AUTO_MEMORY
+                  value: "1"
+                {{- end }}
                 {{- end }}
                 {{- if $agent.workEvents }}
                 - name: AGENT_WORK_EVENTS

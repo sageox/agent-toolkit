@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only those directories, for the named lanes only. Session transcripts, ox's Ledger clones
   and its upload queue then survive the Pod, while config such as `~/.gitconfig`, a harness's
   settings and `~/.config` starts clean every run; the chart refuses a path that would keep
-  them. It also refuses a slug that no scheduled local command job carries, a shared volume
+  them, and turns off Claude Code's auto memory, which lives in `.claude/projects`, for a
+  lane that keeps a `.claude/` path. It also refuses a slug that no scheduled local command job carries, a shared volume
   that reuses the home's name or mounts, and a home claim name another agent already uses.
   The chart README covers releasing the claim from a Pod stuck `Terminating`.
 

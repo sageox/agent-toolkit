@@ -532,7 +532,9 @@ it read, such as an issue or a pull request, could otherwise leave config or ins
 that every later run trusts: `~/.gitconfig`, shell rc files, a harness's settings, hooks or
 `CLAUDE.md`, and `~/.config`, where ox keeps its login. The chart refuses a path that is,
 holds or sits inside one of those. A path you list is still something earlier runs wrote,
-so list data, not config. An agent whose home claim name would equal another agent's claim,
+so list data, not config. Claude Code keeps its auto memory, which it loads as instructions,
+inside `.claude/projects`, so a lane that keeps any `.claude/` path runs with
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. Its session transcripts still persist. An agent whose home claim name would equal another agent's claim,
 for example agents `foo` and `foo-home`, is refused; rename one or set `fullnameOverride`.
 
 `ReadWriteOncePod` means one Pod at a time, across every node. Two named lanes that overlap
