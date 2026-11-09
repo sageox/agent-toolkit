@@ -435,6 +435,30 @@ describe("bounding", () => {
     expect(seen.GITHUB_TOKEN).toBe("github_pat_the_job_was_granted");
   });
 
+  it("carries the host's CLAUDE_CODE_DISABLE_AUTO_MEMORY to the body, over run.env", async () => {
+    const envelope = join(workDir, "envelope");
+    const declared = body(
+      `fs.writeFileSync(${JSON.stringify(envelope)},JSON.stringify(process.env));${PROVES}`,
+    );
+    const job = { ...declared, run: { ...declared.run, env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "0" } } };
+    await new JobHost({
+      workDir,
+      env: { ...process.env, MARKER: marker, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
+      secretOpts: { dir: secretsDir },
+    }).tick(job);
+    let seen = JSON.parse(readFileSync(envelope, "utf8")) as Record<string, string>;
+    expect(seen.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe("1");
+
+    // Unset on the host, the body's own configuration stands.
+    await new JobHost({
+      workDir,
+      env: { ...process.env, MARKER: marker, CLAUDE_CODE_DISABLE_AUTO_MEMORY: undefined },
+      secretOpts: { dir: secretsDir },
+    }).tick(job);
+    seen = JSON.parse(readFileSync(envelope, "utf8")) as Record<string, string>;
+    expect(seen.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe("0");
+  });
+
   it("resolves a jobSecrets ref out of the directory only this process was given", async () => {
     const envelope = join(workDir, "envelope");
     const jobSecretsDir = join(workDir, "job-secrets");

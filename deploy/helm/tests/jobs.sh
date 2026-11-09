@@ -724,6 +724,12 @@ helm template agents "$chart" --values "$values" "${home[@]}" \
 refuses 'a job home claim that another agent mounts' \
   "harry: its job home claim agents-harry-home is also a claim ida mounts" "${home[@]}" \
   --set 'agents.ida.persistence.existingClaim=agents-harry-home'
+# A shared volume on the job home's claim would let the Deployment hold it, and every run wait.
+refuses 'a shared volume on a job home claim' \
+  "harry: its job home claim agents-harry-home is also the claim of ida's shared volume shared" \
+  "${home[@]}" --set 'agents.ida.sharedVolumes[0].name=shared' \
+  --set 'agents.ida.sharedVolumes[0].claimName=agents-harry-home' \
+  --set 'agents.ida.sharedVolumes[0].mountPath=/shared'
 # Agents foo and foo-home: foo's home claim would be foo-home's own claim.
 refuses 'a job home claim that is another agent'"'"'s claim' \
   "harry: its job home claim agents-harry-home is also ida's claim" "${home[@]}" \

@@ -274,13 +274,16 @@ install, and a job could mount the other agent's state as its home. Checked acro
 {{- else -}}
 {{- $_ := set $claims (include "agent.claimName" $context) (printf "%s's claim" $name) -}}
 {{- end -}}
+{{- range $volume := $agent.sharedVolumes -}}
+{{- $_ := set $claims $volume.claimName (printf "the claim of %s's shared volume %s" $name $volume.name) -}}
+{{- end -}}
 {{- end -}}
 {{- range $name, $agent := .Values.agents -}}
 {{- if ($agent.persistence).jobHome -}}
 {{- $context := dict "root" $ "name" $name "agent" $agent -}}
 {{- $claim := include "agent.jobHomeClaimName" $context -}}
 {{- if hasKey $claims $claim -}}
-{{- fail (printf "%s: its job home claim %s is also %s; rename one of the agents or set its fullnameOverride" $name $claim (get $claims $claim)) -}}
+{{- fail (printf "%s: its job home claim %s is also %s; change that claim reference, rename an agent or set its fullnameOverride" $name $claim (get $claims $claim)) -}}
 {{- end -}}
 {{- $_ := set $claims $claim (printf "%s's job home claim" $name) -}}
 {{- end -}}

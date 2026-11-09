@@ -1324,10 +1324,16 @@ export class JobHost {
       if (!value) throw new Error(`job ${job.slug}: secretRef ${ref} did not resolve`);
       secrets[envVar] = value;
     }
+    const hostEnv = this.opts.env ?? process.env;
     const env: NodeJS.ProcessEnv = {
-      ...passthroughEnv(this.opts.env ?? process.env, job.run.passthrough),
+      ...passthroughEnv(hostEnv, job.run.passthrough),
       ...job.run.env,
       ...secrets,
+      // The chart sets this where the lane keeps ~/.claude between runs, so Claude Code
+      // does not load memory an earlier run wrote there. Above `run.env`, which cannot undo it.
+      ...(hostEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+        ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: hostEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY }
+        : {}),
       JOB_SLUG: job.slug,
       JOB_RUN_ID: base.runId,
       JOB_TRIGGER: base.trigger,
