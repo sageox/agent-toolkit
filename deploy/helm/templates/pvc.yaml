@@ -22,4 +22,33 @@ spec:
     requests:
       storage: {{ $agent.persistence.size | default "10Gi" }}
 {{ end }}
+{{- with $agent.persistence.jobHome }}
+{{- $context := dict "root" $ "name" $name "agent" $agent -}}
+{{/*
+The home of the scheduled jobs that `jobs` names, kept between runs: a coding harness's
+session transcripts, ox's Ledger clones and its upload queue. `ReadWriteOncePod` rather
+than the agent claim's `ReadWriteOnce`: two Pods writing one home at once would corrupt
+both, and the access mode makes the second wait instead. That wait has one failure mode a
+render cannot see, which the README's unstick step covers: a Pod stuck Terminating keeps the
+claim, and every later run waits in `Init` behind it.
+*/}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "agent.jobHomeClaimName" $context }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "agent.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $name | quote }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOncePod
+  storageClassName: {{ .storageClass | default "gp3" | quote }}
+  resources:
+    requests:
+      storage: {{ .size }}
+{{ end }}
 {{ end }}

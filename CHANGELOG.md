@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before uploading it, so a job missing any of them records nothing. A job can now call
   `claude` directly instead of fetching it with `npx` on every run. The image's offline
   compatibility test checks all three, and that the agent user's `~/.npm` is not root-owned.
+- **A scheduled job can keep data in its home between runs.** `persistence.jobHome` (`size`,
+  optional `storageClass` defaulting to `gp3`, the `jobs` it applies to and the `paths` under
+  HOME to keep) renders a `ReadWriteOncePod` claim per agent, kept on uninstall, and mounts
+  only those directories, for the named lanes only. Session transcripts, ox's Ledger clones
+  and its upload queue then survive the Pod, while config such as `~/.gitconfig`, a harness's
+  settings and `~/.config` starts clean every run; the chart refuses a path that would keep
+  them, and turns off Claude Code's auto memory, which lives in `.claude/projects`, for a
+  lane that keeps a `.claude/` path. The job host carries that setting from its own environment to the job body, ahead of the body's `run.env`. It also refuses a slug that no scheduled local command job carries, a shared volume
+  that reuses the home's name or mounts, and a home claim name another agent already uses.
+  The chart README covers releasing the claim from a Pod stuck `Terminating`.
 
 ## [0.11.2] - 2026-11-08
 

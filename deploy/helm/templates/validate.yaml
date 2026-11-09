@@ -20,6 +20,60 @@ A bundle that names neither a volume nor a stager has no source at all: nothing 
 run lost under `backoffLimit: 0`. Refused here rather than left to the schema, which can say
 the shape is legal but not that the pair is empty.
 */}}
+{{/*
+A `persistence.jobHome.jobs` slug that names no scheduled local command job mounts the home
+nowhere, and reads as though a lane kept its state when every run starts empty. A worker's
+Pod is the dispatcher's, and a prompt job runs in the gateway, so neither can mount it.
+*/}}
+{{- with ($agent.persistence).jobHome -}}
+{{- range $slug := .jobs -}}
+{{- $found := false -}}
+{{- range $job := $agent.jobs -}}
+{{- if and (eq $job.slug $slug) (not $job.worker) (not (hasKey $job "prompt")) $job.trigger.schedules -}}
+{{- $found = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $found -}}
+{{- fail (printf "%s: persistence.jobHome.jobs names %s, which is not a scheduled local command job of this agent, so nothing would mount the home" $name $slug) -}}
+{{- end -}}
+{{- end -}}
+{{/*
+Every `paths` entry is input that earlier runs could write. One that is, holds or sits inside
+a location a tool reads as config or instructions would let a body steered by untrusted text
+plant those for every later run of every named lane. Two entries where one holds the other
+would mount the same files twice.
+*/}}
+{{- $trusted := list ".config" ".gitconfig" ".git-credentials" ".ssh" ".gnupg" ".bashrc" ".bash_profile" ".profile" ".zshrc" ".zshenv" ".npmrc" ".netrc" ".claude.json" ".claude/settings.json" ".claude/settings.local.json" ".claude/CLAUDE.md" ".claude/hooks" ".claude/commands" ".claude/agents" ".claude/skills" ".claude/plugins" -}}
+{{- range $path := .paths -}}
+{{- range $part := splitList "/" $path -}}
+{{- if or (eq $part ".") (eq $part "..") -}}
+{{- fail (printf "%s: persistence.jobHome.paths has %s; a path is relative to HOME and has no . or .. part" $name $path) -}}
+{{- end -}}
+{{- end -}}
+{{- range $config := $trusted -}}
+{{- if or (eq $path $config) (hasPrefix (printf "%s/" $path) $config) (hasPrefix (printf "%s/" $config) $path) -}}
+{{- fail (printf "%s: persistence.jobHome.paths has %s, which would keep %s between runs. Tools read it as config or instructions, so an earlier run could plant them for every later one. Persist only data directories, such as .claude/projects or .local/share/sageox" $name $path $config) -}}
+{{- end -}}
+{{- end -}}
+{{- range $other := $agent.persistence.jobHome.paths -}}
+{{- if and (ne $path $other) (hasPrefix (printf "%s/" $path) $other) -}}
+{{- fail (printf "%s: persistence.jobHome.paths has %s inside %s; list only one of them" $name $other $path) -}}
+{{- end -}}
+{{- end -}}
+{{- $mount := printf "/home/agent/%s" $path -}}
+{{- range $volume := $agent.sharedVolumes -}}
+{{- $shared := $volume.mountPath | trimSuffix "/" -}}
+{{- if or (eq $shared $mount) (hasPrefix (printf "%s/" $shared) $mount) (hasPrefix (printf "%s/" $mount) $shared) -}}
+{{- fail (printf "%s: sharedVolumes[%s] mounts at %s, which overlaps the job home's %s" $name $volume.name $volume.mountPath $mount) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $volume := $agent.sharedVolumes -}}
+{{- if eq $volume.name "job-home" -}}
+{{- fail (printf "%s: sharedVolumes has a volume named job-home, the name the chart gives the job home; rename it" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if and (not $agent.bundle.volume) (not $agent.bundle.stageImage) -}}
 {{- fail (printf "%s: bundle needs a volume or a stageImage — one of them has to put the bundle at /config" $name) -}}
 {{- end -}}
@@ -205,5 +259,32 @@ SecretProviderClass, and renders a single object rather than two.
 {{- end -}}
 {{- $_ := set $jobNames $scheduled (printf "%s/%s" $name $job.slug) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+{{/*
+A job home's claim is `<agent claim>-home`, which can be another agent's own claim name: agents
+`foo` and `foo-home` would both render `<release>-foo-home`. Two claims of one name cannot both
+install, and a job could mount the other agent's state as its home. Checked across agents.
+*/}}
+{{- $claims := dict -}}
+{{- range $name, $agent := .Values.agents -}}
+{{- $context := dict "root" $ "name" $name "agent" $agent -}}
+{{- if $agent.persistence.existingClaim -}}
+{{- $_ := set $claims $agent.persistence.existingClaim (printf "a claim %s mounts" $name) -}}
+{{- else -}}
+{{- $_ := set $claims (include "agent.claimName" $context) (printf "%s's claim" $name) -}}
+{{- end -}}
+{{- range $volume := $agent.sharedVolumes -}}
+{{- $_ := set $claims $volume.claimName (printf "the claim of %s's shared volume %s" $name $volume.name) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $agent := .Values.agents -}}
+{{- if ($agent.persistence).jobHome -}}
+{{- $context := dict "root" $ "name" $name "agent" $agent -}}
+{{- $claim := include "agent.jobHomeClaimName" $context -}}
+{{- if hasKey $claims $claim -}}
+{{- fail (printf "%s: its job home claim %s is also %s; change that claim reference, rename an agent or set its fullnameOverride" $name $claim (get $claims $claim)) -}}
+{{- end -}}
+{{- $_ := set $claims $claim (printf "%s's job home claim" $name) -}}
 {{- end -}}
 {{- end -}}
