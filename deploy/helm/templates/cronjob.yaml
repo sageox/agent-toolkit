@@ -116,6 +116,9 @@ spec:
           # lose its run on a fresh install — and with no retry, lost is lost.
           initContainers:
             {{- include "agent.stageConfig" $context | nindent 12 }}
+            {{- if include "agent.jobHasHome" $context }}
+            {{- include "agent.jobHomeInit" $context | nindent 12 }}
+            {{- end }}
           containers:
             - name: job
               image: {{ required "imageRef is required" $.Values.imageRef | quote }}
@@ -174,8 +177,7 @@ whole of what the second mount buys.
               volumeMounts:
                 {{- include "agent.agentVolumeMounts" $context | nindent 16 }}
                 {{- if include "agent.jobHasHome" $context }}
-                - name: job-home
-                  mountPath: {{ include "agent.jobHomePath" $context }}
+                {{- include "agent.jobHomeMounts" $context | nindent 16 }}
                 {{- end }}
           volumes:
             {{- include "agent.podVolumes" $context | nindent 12 }}

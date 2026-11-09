@@ -311,6 +311,47 @@ image that says otherwise.
 */}}
 {{- define "agent.jobHomePath" -}}/home/agent{{- end -}}
 
+{{/*
+One mount per `persistence.jobHome.paths` entry, each narrowed to its own `subPath`, so only
+the data directories a job keeps persist. The rest of HOME stays the container's: shell rc
+files, `~/.gitconfig`, a harness's settings and hooks, and `~/.config` start clean every
+run, because a body steered by untrusted text could otherwise plant them for every later run.
+*/}}
+{{- define "agent.jobHomeMounts" -}}
+{{- $home := include "agent.jobHomePath" . -}}
+{{- range $path := .agent.persistence.jobHome.paths }}
+- name: job-home
+  mountPath: {{ printf "%s/%s" $home $path | quote }}
+  subPath: {{ $path | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Creates each `paths` directory on the claim before the job container starts. The kubelet
+would otherwise create a missing `subPath` directory itself, owned by root, and `fsGroup`
+with `OnRootMismatch` never revisits it, so the agent user could not write there.
+*/}}
+{{- define "agent.jobHomeInit" -}}
+- name: job-home
+  image: {{ required "imageRef is required" .root.Values.imageRef | quote }}
+  command: ["mkdir", "-p", "--"]
+  args:
+    {{- range $path := .agent.persistence.jobHome.paths }}
+    - {{ $path | quote }}
+    {{- end }}
+  workingDir: /job-home
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  volumeMounts:
+    - name: job-home
+      mountPath: /job-home
+{{- end -}}
+
 {{- define "agent.jobHomeClaimName" -}}
 {{- $base := include "agent.agentFullname" . -}}
 {{- if gt (len $base) 58 -}}

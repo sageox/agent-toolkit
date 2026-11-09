@@ -514,14 +514,26 @@ agents:
         size: 20Gi
         storageClass: gp3   # the default
         jobs: [shift]
+        paths:              # under HOME; only these persist
+          - .claude/projects        # Claude Code's session transcripts
+          - .local/share/sageox     # ox's Ledger clones and upload queue
 ```
 
 The chart renders one more claim per agent, `<release>-<agent>-home`. It is `ReadWriteOncePod`
 and carries `helm.sh/resource-policy: keep`, so uninstalling the release does not delete it.
-Each named job mounts the claim at `/home/agent` and gets `HOME=/home/agent`. Other jobs,
-the init container and the Deployment Pod do not mount it. Only scheduled local command
-jobs can be named; the chart refuses a slug that names a worker job, a prompt job, a job
-with no schedule, or no job at all.
+Each named job gets `HOME=/home/agent` and mounts one directory of the claim per `paths`
+entry, at `/home/agent/<path>`. A small init container creates those directories first, as
+the agent user. Other jobs and the Deployment Pod do not mount the claim. Only scheduled
+local command jobs can be named; the chart refuses a slug that names a worker job, a prompt
+job, a job with no schedule, or no job at all.
+
+**Only data persists.** The rest of HOME starts clean every run. A job body steered by text
+it read, such as an issue or a pull request, could otherwise leave config or instructions
+that every later run trusts: `~/.gitconfig`, shell rc files, a harness's settings, hooks or
+`CLAUDE.md`, and `~/.config`, where ox keeps its login. The chart refuses a path that is,
+holds or sits inside one of those. A path you list is still something earlier runs wrote,
+so list data, not config. An agent whose home claim name would equal another agent's claim,
+for example agents `foo` and `foo-home`, is refused; rename one or set `fullnameOverride`.
 
 `ReadWriteOncePod` means one Pod at a time, across every node. Two named lanes that overlap
 take turns, and the later one waits in `Init` until the earlier one exits. Name one lane per

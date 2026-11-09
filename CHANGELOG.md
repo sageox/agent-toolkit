@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **A scheduled job can keep its home between runs.** `persistence.jobHome` (`size`, optional
-  `storageClass` defaulting to `gp3`, and the `jobs` it applies to) renders a
-  `ReadWriteOncePod` claim per agent, kept on uninstall, and mounts it at `/home/agent` with
-  `HOME` set to it, for the named lanes only. Session transcripts, ox's Ledger clones and its
-  upload queue then survive the Pod. The chart refuses a slug that no scheduled local command
-  job carries. The chart README covers releasing the claim from a Pod stuck `Terminating`.
+- **A scheduled job can keep data in its home between runs.** `persistence.jobHome` (`size`,
+  optional `storageClass` defaulting to `gp3`, the `jobs` it applies to and the `paths` under
+  HOME to keep) renders a `ReadWriteOncePod` claim per agent, kept on uninstall, and mounts
+  only those directories, for the named lanes only. Session transcripts, ox's Ledger clones
+  and its upload queue then survive the Pod, while config such as `~/.gitconfig`, a harness's
+  settings and `~/.config` starts clean every run; the chart refuses a path that would keep
+  them. It also refuses a slug that no scheduled local command job carries, a shared volume
+  that reuses the home's name or mounts, and a home claim name another agent already uses.
+  The chart README covers releasing the claim from a Pod stuck `Terminating`.
 
 ## [0.11.2] - 2026-11-08
 
