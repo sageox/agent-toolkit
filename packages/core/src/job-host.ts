@@ -1325,14 +1325,16 @@ export class JobHost {
       secrets[envVar] = value;
     }
     const hostEnv = this.opts.env ?? process.env;
+    const noAutoMemory = hostEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY;
     const env: NodeJS.ProcessEnv = {
       ...passthroughEnv(hostEnv, job.run.passthrough),
       ...job.run.env,
       ...secrets,
       // The chart sets this where the lane keeps ~/.claude between runs, so Claude Code
-      // does not load memory an earlier run wrote there. Above `run.env`, which cannot undo it.
-      ...(hostEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY
-        ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: hostEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY }
+      // does not load memory an earlier run wrote there. Above `run.env`, which cannot undo it;
+      // only a host that turns memory off overrides, so a job's own opt-out always stands.
+      ...(noAutoMemory && !["0", "false"].includes(noAutoMemory.toLowerCase())
+        ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: noAutoMemory }
         : {}),
       JOB_SLUG: job.slug,
       JOB_RUN_ID: base.runId,

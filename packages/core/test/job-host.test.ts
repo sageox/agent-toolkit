@@ -457,6 +457,16 @@ describe("bounding", () => {
     }).tick(job);
     seen = JSON.parse(readFileSync(envelope, "utf8")) as Record<string, string>;
     expect(seen.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe("0");
+
+    // A host that leaves memory on never undoes a job that turned it off.
+    const optedOut = { ...declared, run: { ...declared.run, env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" } } };
+    await new JobHost({
+      workDir,
+      env: { ...process.env, MARKER: marker, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "0" },
+      secretOpts: { dir: secretsDir },
+    }).tick(optedOut);
+    seen = JSON.parse(readFileSync(envelope, "utf8")) as Record<string, string>;
+    expect(seen.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe("1");
   });
 
   it("resolves a jobSecrets ref out of the directory only this process was given", async () => {
