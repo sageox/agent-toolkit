@@ -649,6 +649,8 @@ absent 'mountPath: /home/agent'
 counted 1 'name: HOME'
 # Claude Code's auto memory lives in .claude/projects and is read as instructions.
 counted 1 'name: CLAUDE_CODE_DISABLE_AUTO_MEMORY'
+grep -A1 -F 'name: CLAUDE_CODE_DISABLE_AUTO_MEMORY' <<<"$rendered" | grep -qF 'value: "1"' \
+  || fail 'expected CLAUDE_CODE_DISABLE_AUTO_MEMORY to be "1"'
 rendered=$(pod_part "$shift_doc" initContainers containers)
 # The home's own init container, which only creates the directories: its name and its mount.
 counted 2 'name: job-home'
