@@ -710,6 +710,13 @@ for mount in /home/agent /home/agent/.claude/projects /home/agent/.local/share/s
     --set 'agents.harry.sharedVolumes[0].name=shared' \
     --set "agents.harry.sharedVolumes[0].mountPath=$mount"
 done
+# Agents may share one claim through existingClaim; only the home claims are checked.
+helm template agents "$chart" --values "$values" "${home[@]}" \
+  --set agents.harry.persistence.existingClaim=agents-ida >/dev/null \
+  || fail 'expected a shared existingClaim to render'
+refuses 'a job home claim that another agent mounts' \
+  "harry: its job home claim agents-harry-home is also a claim ida mounts" "${home[@]}" \
+  --set 'agents.ida.persistence.existingClaim=agents-harry-home'
 # Agents foo and foo-home: foo's home claim would be foo-home's own claim.
 refuses 'a job home claim that is another agent'"'"'s claim' \
   "harry: its job home claim agents-harry-home is also ida's claim" "${home[@]}" \

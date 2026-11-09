@@ -269,13 +269,10 @@ install, and a job could mount the other agent's state as its home. Checked acro
 {{- $claims := dict -}}
 {{- range $name, $agent := .Values.agents -}}
 {{- $context := dict "root" $ "name" $name "agent" $agent -}}
-{{- $claim := include "agent.claimName" $context -}}
-{{- if hasKey $claims $claim -}}
-{{- if not $agent.persistence.existingClaim -}}
-{{- fail (printf "%s: its claim %s is also %s" $name $claim (get $claims $claim)) -}}
-{{- end -}}
+{{- if $agent.persistence.existingClaim -}}
+{{- $_ := set $claims $agent.persistence.existingClaim (printf "a claim %s mounts" $name) -}}
 {{- else -}}
-{{- $_ := set $claims $claim (printf "%s's claim" $name) -}}
+{{- $_ := set $claims (include "agent.claimName" $context) (printf "%s's claim" $name) -}}
 {{- end -}}
 {{- end -}}
 {{- range $name, $agent := .Values.agents -}}
