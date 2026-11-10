@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-10
+
+Everything below shipped after `v0.11.2`.
+
+On publication, `ghcr.io/sageox/agent-base:0.12.0` takes `:latest` and `:0.12`. `:0.11` stays
+on 0.11.2. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+A minor release for the opt-in persistent job home, with the tools ox needs to record Claude
+Code sessions added to the image. A chart that does not set `persistence.jobHome` renders as
+it did on 0.11.2.
+
 - **The agent base image can record Claude Code sessions with ox.** It now ships the
   `ox-adapter-*` binaries from the ox release tarball next to `ox`, `procps` for `ps`, and
   `@anthropic-ai/claude-code` 2.1.284 as a `claude` binary. ox finds the agent with `ps`,
@@ -21,8 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and its upload queue then survive the Pod, while config such as `~/.gitconfig`, a harness's
   settings and `~/.config` starts clean every run; the chart refuses a path that would keep
   them, and turns off Claude Code's auto memory, which lives in `.claude/projects`, for a
-  lane that keeps a `.claude/` path. The job host carries that setting from its own environment to the job body, ahead of the body's `run.env`. It also refuses a slug that no scheduled local command job carries, a shared volume
-  that reuses the home's name or mounts, and a home claim name another agent already uses.
+  lane that keeps a `.claude/` path. The job host carries that setting from its own
+  environment to the job body, ahead of the body's `run.env`. The chart also refuses a slug
+  that no scheduled local command job carries, a shared volume that reuses the home's name,
+  mounts or claim, and a home claim name another agent already uses.
   The chart README covers releasing the claim from a Pod stuck `Terminating`.
 
 ## [0.11.2] - 2026-11-08
