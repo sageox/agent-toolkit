@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { tokenMatches, originAllowed, type HostedMcp } from "../src/mcp-http.ts";
-import { serveTeamBrain, oxEnv, oxCwd, type TeamOx, type TeamSearch } from "../src/team-server.ts";
+import { serveTeamBrain, oxClientId, oxEnv, oxCwd, type TeamOx, type TeamSearch } from "../src/team-server.ts";
 import { devNull, homedir } from "node:os";
 
 let hosted: HostedMcp | undefined;
@@ -156,6 +156,24 @@ describe("ox credential handling", () => {
     });
     expect(base.XDG_CONFIG_HOME).toBe("/config");
     expect(base.XDG_DATA_HOME).toBe("/data");
+  });
+
+  it("leaves ox's usage telemetry on unless the operator turned it off", () => {
+    expect(oxEnv({ token: () => "oxt_agent" }, { PATH: "/usr/bin" }).DO_NOT_TRACK).toBeUndefined();
+    expect(oxEnv({ token: () => "oxt_agent" }, { DO_NOT_TRACK: "1" }).DO_NOT_TRACK).toBe("1");
+  });
+
+  it("gives ox the agent's telemetry ID, never one it inherited", () => {
+    const inherited = { SAGEOX_CLIENT_ID: "someone-elses" };
+    expect(oxEnv({ token: () => "oxt_agent", clientId: "agent-id" }, inherited).SAGEOX_CLIENT_ID).toBe("agent-id");
+    expect(oxEnv({ token: () => "oxt_agent" }, inherited).SAGEOX_CLIENT_ID).toBeUndefined();
+  });
+
+  it("derives the telemetry ID from team and agent name alone", () => {
+    // Pinned: a changed derivation re-counts every deployed agent as a new install.
+    expect(oxClientId("team_x", "harry")).toBe("b683e77d-2c81-80e6-b6d6-0c3079e38931");
+    expect(oxClientId("team_y", "harry")).not.toBe(oxClientId("team_x", "harry"));
+    expect(oxClientId("team_x", "ida")).not.toBe(oxClientId("team_x", "harry"));
   });
 
   it("passes a token supplied out-of-band, for containers with no interactive login", () => {

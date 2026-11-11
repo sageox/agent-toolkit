@@ -13,10 +13,10 @@ import {
 } from "../src/engram.ts";
 import { resolveBuzzSigner } from "../src/identity.ts";
 import { privateBrainHandler, PRIVATE_BRAIN_TOOLS } from "../src/private-brain.ts";
-import { FakeRelay } from "./fake-relay.ts";
+import { LocalRelay } from "../src/local-relay.ts";
 
 const stores: EngramStore[] = [];
-const relays: FakeRelay[] = [];
+const relays: LocalRelay[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 async function setup(relayOpts: { withholdEose?: boolean } = {}) {
-  const relay = await FakeRelay.start({ requireAuth: true, ...relayOpts });
+  const relay = await LocalRelay.start({ requireAuth: true, ...relayOpts });
   relays.push(relay);
   const secret = generateSecretKey();
   const signer = await resolveBuzzSigner("TEST_NSEC", {

@@ -7,14 +7,243 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+- **A Buzz agent deployed with `BUZZ_AUTH_TAG` now proves its owner when it signs in (#140).**
+  The runtime signed in through nostr-tools and never read the variable, so an agent given a
+  NIP-OA owner tag still showed "owner unavailable" in Buzz; only the `buzz` CLI sent it.
+  `adapter-buzz` now adds the tag to every NIP-42 AUTH event, as Buzz's Rust harness does, and
+  the relay records the owner. An unset, empty or malformed tag is ignored and the agent signs
+  in unattested, as before. The relay keeps the first owner it records for an agent and refuses
+  a sign-in whose tag names a different one, so check an agent's current owner before giving it
+  a tag.
 
-- NIP-OA owner attestation now works for chart/env-deployed agents. The TS
-  runtime authenticates via nostr-tools directly and never read `BUZZ_AUTH_TAG`,
-  so an agent given the tag still rendered "owner unavailable" — only the `buzz`
-  CLI honored it, which the agent does not use for its connection. `adapter-buzz`
-  now appends the `["auth", …]` tag to its NIP-42 AUTH event, matching the Rust
-  harness's `send_auth_response`. Empty/malformed tags are ignored, not fatal.
+## [0.12.0] - 2026-11-10
+
+Everything below shipped after `v0.11.2`.
+
+On publication, `ghcr.io/sageox/agent-base:0.12.0` takes `:latest` and `:0.12`. `:0.11` stays
+on 0.11.2. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+A minor release for the opt-in persistent job home, with the tools ox needs to record Claude
+Code sessions added to the image. A chart that does not set `persistence.jobHome` renders as
+it did on 0.11.2.
+
+- **The agent base image can record Claude Code sessions with ox.** It now ships the
+  `ox-adapter-*` binaries from the ox release tarball next to `ox`, `procps` for `ps`, and
+  `@anthropic-ai/claude-code` 2.1.284 as a `claude` binary. ox finds the agent with `ps`,
+  reads the session through the adapter, and its daemon runs `claude` to summarize a session
+  before uploading it, so a job missing any of them records nothing. A job can now call
+  `claude` directly instead of fetching it with `npx` on every run. The image's offline
+  compatibility test checks all three, and that the agent user's `~/.npm` is not root-owned.
+- **A scheduled job can keep data in its home between runs.** `persistence.jobHome` (`size`,
+  optional `storageClass` defaulting to `gp3`, the `jobs` it applies to and the `paths` under
+  HOME to keep) renders a `ReadWriteOncePod` claim per agent, kept on uninstall, and mounts
+  only those directories, for the named lanes only. Session transcripts, ox's Ledger clones
+  and its upload queue then survive the Pod, while config such as `~/.gitconfig`, a harness's
+  settings and `~/.config` starts clean every run; the chart refuses a path that would keep
+  them, and turns off Claude Code's auto memory, which lives in `.claude/projects`, for a
+  lane that keeps a `.claude/` path. The job host carries that setting from its own
+  environment to the job body, ahead of the body's `run.env`. The chart also refuses a slug
+  that no scheduled local command job carries, a shared volume that reuses the home's name,
+  mounts or claim, and a home claim name another agent already uses.
+  The chart README covers releasing the claim from a Pod stuck `Terminating`.
+
+## [0.11.2] - 2026-11-08
+
+Everything below shipped after `v0.11.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.11.2` takes `:latest` and advances `:0.11`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
+- **The agent base image ships `ox` 0.25.0.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.24.2. It is the first release with
+  `ox session wait` and the `disposable_machine` setting, which an agent whose pod keeps
+  only its home directory needs to publish its sessions before the pod goes away. The
+  image's offline compatibility test now also sets `disposable_machine`, so an image with an
+  older ox fails its build.
+  ox's [0.25.0 release notes](https://github.com/sageox/ox/releases/tag/v0.25.0) list what
+  else changed.
+
+- **Claude-hosted MCP services now enforce the tool policy on direct HTTP calls.**
+  Every hosted service applies the gateway's allow/deny policy before dispatch, as Codex
+  services already did, so a session's URL and bearer token cannot bypass denied tools.
+
+- **Host-side CLI setup protects `.env` before writing credentials.** Files are created
+  with mode `0600` and permissions are enforced on the open file before appending, closing
+  the write-then-chmod exposure window. Agent initialization also creates directories at
+  mode `0700` and enforces that mode when reusing them.
+
+## [0.11.1] - 2026-10-27
+
+Everything below shipped after `v0.11.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.11.1` takes `:latest` and advances `:0.11`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
+- **A Slack agent now starts when Slack refuses to read one of its configured channels.**
+  Starting from a saved cursor, the Slack adapter backfills every configured channel and
+  open DM, and any failed read failed `start()`. An app never invited to one of its channels
+  (`not_in_channel`, or `channel_not_found` for a private one) could not start again once it
+  had a cursor. A refusal no restart changes (`not_in_channel`, `channel_not_found`,
+  `thread_not_found`, `missing_scope`) now costs only the read it refused, a channel's gap or
+  one thread's replies, with a `backfill_read_failed` warning naming it, and what was read
+  before it still replays. Any other failure while reading channel history or thread
+  replies, `invalid_cursor` or a network fault included, still fails `start()`, so the next
+  start retries that gap. Invite the app to the channel to hear it.
+- **`doctor` no longer fails an agent whose tool policy narrows a brain on purpose.** A
+  policy that allowed some of a brain's tools but not all, such as a private brain the agent
+  may read but not write, failed with "the agent would have memory it cannot use". Only a
+  brain the policy allows none of fails now. A partly allowed brain is a warning that names
+  the withheld tools and exits 0, and that includes a tool a newer release adds, which used
+  to fail until `memory add` re-synced the policy.
+## [0.11.0] - 2026-10-27
+
+Everything below shipped after `v0.10.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.11.0` takes `:latest` and `:0.11`. `:0.10` stays
+on 0.10.0. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+A minor release for the new rehearsal commands and opt-in MCP and Slack capabilities.
+MCP turn stamping and Slack wakeups in the agent's own threads are off by default; existing
+agents keep their configured behavior. The image updates Node.js to 22.23.4 and ox to
+0.24.2. Helm chart 0.15.0 and `deploy/docker/compose.yaml` need no change: the chart's
+templates and values and the compose file are as they were in v0.10.0.
+
+- **The agent base image runs Node.js 22.23.4.** It ran 22.23.2, which the
+  [October 2026 Node.js security release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)
+  patches. On the 22.x line that release fixes seven CVEs, three of them high: an out-of-bounds
+  write in the Brotli decoder that can run code (CVE-2026-111497), a TLS certificate hostname
+  bypass (CVE-2026-106069), and `dns.resolve` truncating a name that contains a NUL character
+  (CVE-2026-105482). Both stages of `deploy/docker/Dockerfile` move to `node:22.23.4-slim`,
+  pinned by digest. An agent keeps running 22.23.2 until it runs an image built from this
+  change. `.mise.toml` selects Node 22.23.4 for a source checkout, up from 22.12.0; run
+  `mise install` to get it.
+- **An MCP server can be told which message it is answering, and who sent it.** Set
+  `stampTurn: true` on an `mcpServers` entry and every `tools/call` to that server carries
+  the live turn under `params._meta["sageox.ai/turn"]`: the surface, the channel, the
+  message and thread references, and the author's id. It comes from the gateway's live-turn
+  registry, the one the reaction tool and the job door already read, so the brain cannot
+  set it; a value the brain sends under that key is replaced. The value is `null` unless
+  exactly one turn is live and the only brain work running is that turn's own: with none
+  live, two channels mid-turn at once, a scheduled tick running, or a prompt still running
+  after its turn timed out, a call cannot be told apart from another turn's, so it names
+  nobody rather than the wrong person. Off by default. A server
+  that does not set it receives each call exactly as the brain sent it, so no existing
+  agent changes. `run` lists a stamped server as `stamped with the live turn`.
+
+- **A Slack agent can be woken by an untagged reply in a thread it has posted in.** Set
+  `wakeInOwnThreads: true` on the Slack surface and subscribe the app to `message.channels`
+  (and `message.groups`), and a person replying in a thread the bot started or answered in no
+  longer has to tag it again. A reply in a thread the bot never posted in, one that tags
+  somebody else or a user group, and one from another agent still need a tag. The adapter
+  learns its threads from its own posts and its own messages as they arrive; after a restart,
+  the first untagged reply in an unknown thread costs a `conversations.replies` read, which
+  stops at the first page showing a post of the bot's and gives up after two seconds. Events
+  behind the lookup in that channel can wait until it returns or reaches that deadline. It
+  runs on a Slack client of its own that rejects a rate limit instead of waiting it out, so
+  rate-limit retry delays do not extend the lookup, and
+  after a timeout or a rate limit the channel asks Slack nothing more for 30 seconds. A read that fails or times out means the
+  reply needs a tag, and is logged as `thread_owner_read_failed`. Off by default, so no
+  existing agent changes.
+
+- **`run --rehearse` and `job run <slug> --rehearse` run the real agent with nobody
+  listening.** Watching an agent with a private brain take a turn meant deploying it, because
+  that brain needs a Buzz relay and the only one was the real one. A rehearsal points every
+  Buzz surface at a relay inside the process and signs as a throwaway key, so replies, status
+  posts, memory and the directory record reach nobody. It first empties its own environment
+  down to `PATH`, `LANG`, `LC_ALL`, `TZ` and `TMPDIR`, and moves `HOME` to a directory of its
+  own: a secret comes from `--secrets` or the agent's `.env`, never from your shell, and the
+  Claude brain does not read your `~/.claude`. A declared secret it was not given no longer
+  stops the launch: it is listed at the start, a job body runs without it, and an MCP server
+  that needs it fails its calls. A job body is told `JOB_REHEARSAL=1`, so one that publishes on
+  its own credential can skip that step. Kill switches are armed on the stand-in relay, vault
+  memory moves to a fresh directory, and the resume cursor is neither read nor written. Under
+  `run`, each line on stdin is a message from you, as the agent's owner, in its first Buzz
+  channel; replies print, and the command exits once the input ends and the turns it started
+  finish. Its directory, `HOME` included, is removed when it exits. What has no stand-in is
+  refused rather than reached: a Slack surface, Buzz surfaces on more than one relay, and a job
+  that runs on an external worker, whose dispatcher a rehearsal is never given. Every command
+  but `run` and `job run` refuses `--rehearse` rather than acting on the real agent.
+
+- **The agent base image ships `ox` 0.24.2.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.23.0. The ox calls the toolkit makes — `status`,
+  `team list`, `query`, `session list`, `glance`, `sync --read-only`, `index code`,
+  `code status`, `code search` and `code insights` — take the same flags, exit with the same
+  codes and return the same fields on 0.24.2, so nothing that reads them changes. A code index
+  that 0.23.0 built is updated in place by the first warmup after the upgrade, and until then
+  a job that reads it through `persistence.jobCodeIndex` still passes the readiness check in
+  the chart's README.
+
+  A job body that runs ox itself gets 0.24.2 too. The calls the job contract and the chart's
+  README show a job making — `ox query`, `ox code status`, `ox code search` and
+  `ox agent prime --agent claude-code` — exit as they did on 0.23.0, and the first three
+  return the same fields. ox's
+  [0.24.2 release notes](https://github.com/sageox/ox/releases/tag/v0.24.2) list what else
+  changed.
+
+## [0.10.0] - 2026-10-17
+
+Everything below shipped after `v0.9.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.10.0` takes `:latest` and `:0.10`. `:0.9` stays
+on 0.9.0. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+A minor rather than a patch because an agent that moves from 0.9.0 without changing its
+configuration still behaves differently: a job body that runs ox itself gets ox 0.23.0's exit
+codes and output shapes, and a digest's items may run to 1000 characters. A digest that sets
+none of the new layout fields posts as before. Helm chart 0.15.0 and
+`deploy/docker/compose.yaml` need no change: the chart's templates and values and the compose
+file are as they were in v0.9.0.
+
+- **A digest job now lays out its own post.** The host posted every digest as
+  `• text — authors`, so changing how one agent's digest read meant changing the toolkit. A
+  `source` now takes `title`, `line` and `quiet`, written in the job's own words: the host fills
+  in only `{text}` and the facts it checked — `{authors}` of the messages a line cites, and the
+  authors a whole read gave no line. `byAuthor: true` holds the answer to one line per author,
+  which a job's words alone cannot: one that asked for an item per pull request posted a flat
+  list of them. With `quiet` set, an answer that gives no line to an author who posted a link is
+  refused rather than posted with that author called quiet. A field the host does not fill is
+  refused at load. `line` defaults to `• {text} — {authors}`, so a job that sets none of these
+  posts as before. An item may hold 1000 characters instead of 500, and an answer 200 items
+  instead of 50, so a full read can give every author a line.
+
+- **The agent base image ships `ox` 0.23.0.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.20.0. The ox calls the toolkit makes — `status`,
+  `team list`, `query`, `session list`, `glance`, `sync --read-only`, `index code`,
+  `code status`, `code search` and `code insights` — take the same flags and return the same
+  fields on 0.23.0, so nothing that reads them changes. A code index that 0.20.0 built is
+  updated in place by the first warmup after the upgrade.
+
+  When a team-token ledger sync's 30-minute attempt ends while ox is checking the checkout's
+  history, ox now reports `interrupted` instead of `incomplete_history` (sageox/ox#1071). A
+  first sync stopped there now shows in `team_status` as initializing, like one stopped
+  mid-transfer, and a refresh stopped there as a failed sync. Both showed as a checkout missing
+  part of its history.
+
+  A job body that runs ox itself gets 0.23.0 too. An unknown subcommand of a group with no
+  action of its own, such as `ox code foo` or `ox plan foo`, now exits 1 where it printed the
+  group's help and exited 0; `ox init` exits non-zero when ox is not signed in; and
+  `ox plan feedback show --json` prints an object whose `items` field holds what was the whole
+  array. Under a team token with no AI coworker attached, `ox murmur` refuses.
+
+## [0.9.0] - 2026-10-08
+
+Everything below shipped after `v0.8.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.9.0` takes `:latest` and `:0.9`. `:0.8` stays
+on 0.8.0. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+A minor rather than a patch because an agent that moves from 0.8.0 without changing its
+configuration still behaves differently. A Claude brain with no `brain.model` moves from
+Opus 5 to Opus 5.5. A built-in tool its tool policy allows by bare name, such as `Read`, is
+approved when Claude Code asks, where 0.8.0 refused it. The image's ox sends usage data to
+PostHog unless the gateway's environment sets `DO_NOT_TRACK=1`, which the chart has no
+setting for. A turn for a message posted in a thread carries the thread, including what
+people outside `respondTo` wrote there. A command line with an option no command reads
+exits 1 instead of running. Helm chart 0.15.0 and `deploy/docker/compose.yaml` need no
+change: they pass only options the CLI reads, and they keep the image's entrypoint, so the
+gateway runs under `tini`.
 
 - **A failed ledger sync names its failure in the gateway log, and a failure that repeats is
   retried less often (#128).** When a team-token ledger's sync failed, `team_status` said the
@@ -102,6 +331,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decided as before. A built-in tool the policy allows by its bare name, such as `Read`, is now
   approved when Claude Code asks the gateway about it, where before its title matched no rule
   and it was refused.
+
+- **The agent base image ships `ox` 0.20.0 and runs the gateway under `tini`, and each agent's
+  ox calls report usage under one ID.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.17.0. The ox calls the toolkit makes — `status`,
+  `team list`, `query`, `session list`, `glance`, `sync --read-only`, `index code`,
+  `code status`, `code search` and `code insights` — take the same flags and return the same
+  fields on 0.20.0, so nothing that reads them changes. A job body that runs ox itself gets
+  0.20.0 too: `ox doctor` now exits non-zero when a check fails, even with `--json`, and
+  `--config` now names the user preferences file and stops the command when that file is
+  missing or malformed.
+
+  Since 0.19.0, ox sends usage data to PostHog by default, and the toolkit leaves it on. ox
+  sends it from a process it detaches after a command. The image's PID 1 was Node, which
+  never reaps such a process, so each ox call behind a code search, a code insights lookup or
+  a repository warmup would have left a zombie until the container restarted. The entrypoint
+  now starts the gateway under `tini`, which reaps them, as it does for a job body's own ox
+  calls; a deployment that replaces the entrypoint needs an init that does the same.
+
+  Every ox call the toolkit makes for an agent with a team brain now carries one ID,
+  `SAGEOX_CLIENT_ID`, hashed from the team and the agent's name, so ox reports that agent's
+  usage under the same ID across restarts, pods and token rotation. Two deployments of one
+  name on one team share it. Without it, the team brain's calls would send nothing: ox sends
+  only under an install ID it can keep, it keeps that ID under its config directory, and the
+  gateway points that directory at the null device. The code-index calls would get a new ID
+  in every new container. ox 0.20.0 still reports nothing for hosted ledger reads or read
+  sync (sageox/ox#1089). Setting `DO_NOT_TRACK=1` in the gateway's environment turns
+  telemetry off, because the gateway now passes it to every ox call it makes. The chart has
+  no setting for it yet.
+
+  Since 0.18.0, ox syncs a ledger path that holds only its own cache, which 0.17.0 refused as
+  `interrupted` (sageox/ox#1045). A path that is not a checkout and holds anything else fails
+  as `path_occupied`, which no retry clears until the path is emptied. `team_status` reports it
+  as a failed sync, and the gateway log names the class.
 
 ## [0.8.0] - 2026-09-22
 

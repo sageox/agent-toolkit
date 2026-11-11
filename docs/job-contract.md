@@ -21,6 +21,7 @@ with their own runtime image, durable status and cancellation, see [external job
 | `JOB_HARNESS_TIMEOUT_MS` · `JOB_MAX_ITERATIONS` · `JOB_MAX_ATTEMPTS` · `JOB_MAX_SPEND_USD` · `JOB_MODEL` | The declared bounds the runtime cannot enforce for you. It can hold a job to a clock without knowing what it does; it cannot count an iteration or a dollar. |
 | `JOB_PARAM_<NAME>` | One per parameter this run was given, uppercased. Already validated against the declaration — see below. Absent when the run was given none. |
 | `JOB_CHANNEL_URL` · `JOB_CHANNEL_TOKEN` | Where this run talks to its report channel, for a job declaring `report.probe`. Absent for every other job. |
+| `JOB_REHEARSAL` | `1` when the run was started with `--rehearse`: its posts go to a relay inside the host's process, and every secret the operator did not give it is unset. A body that publishes on a credential of its own can skip that step on this instead of failing at it. Empty otherwise, and never taken from `run.env`. |
 
 **And nothing else you did not ask for.** A job body's environment is declared, not
 inherited: it starts from `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ` and `TMPDIR`, and grows
@@ -600,13 +601,40 @@ there would keep `post_message` and could publish an answer that never passed th
 { "items": [ { "text": "merged the release fix (https://example.test/pull/110)", "refs": [3, 5] } ] }
 ```
 
-One to 50 items, each `text` one line of at most 500 characters, each `refs` naming at least
-one message this read returned — so there is no line for an author who posted nothing — and
-every link in a line present in a message that line cites. Anything else is not a digest, and
-the refusal goes back to the turn as a guard refusal does, to be repaired inside its own clock
-and retry count. The host renders what passes: one line per item, credited to the authors it
-cites, and after a partial read a last line saying the digest covers only the most recent
-messages. The words are the job's; the shape and the credits are the host's.
+One to 200 items — as many as a read holds messages — each `text` one line of at most 1000
+characters, each `refs` naming at least one message this read returned — so there is no line
+for an author who posted nothing — and every link in a line present in a message that line
+cites. Anything else is not a digest, and the refusal goes back to the turn as a guard refusal
+does, to be repaired inside its own clock and retry count.
+
+**The layout is the job's; what the layout states about the read is the host's.** The host
+posts `title` if the job sets one, then `line` once per item, filling `{text}` with the
+item's words and `{authors}` with the authors of the messages it cites — never with names
+from the answer, so a line cannot credit someone it does not cite. After a whole read with
+`quiet` set, it adds `quiet` with `{authors}` as every author in the read given no line.
+After a partial read it adds its own last line instead, saying the digest covers only the
+most recent messages, because the unread ones could change who was quiet. `line` defaults to
+`• {text} — {authors}`. Two rules hold a layout to its shape whatever the job's words say:
+
+| Field | What the host refuses |
+|---|---|
+| `byAuthor: true` | an item citing two authors, and a second item for one author. `{author}` is the one author. |
+| `quiet` | an answer giving no line to an author whose messages carry a link, which the quiet line would otherwise name. |
+
+A field a layout names that the host does not fill — `{auther}`, `{author}` without
+`byAuthor` — is refused at load, rather than posting as nothing at the first tick.
+
+```yaml
+    source:
+      surface: buzz
+      channel: hive
+      withinHours: 24
+      empty: "Fleet digest: nothing reported in the last 24h."
+      byAuthor: true
+      title: "**Fleet digest — last 24h**"
+      line: "• **{author}** — {text}"
+      quiet: "• **Quiet** — {authors}"
+```
 
 **One post, and never a late one.** The first digest the guard admits is the only one, a reply
 that arrives after the run was recorded is refused, and a post that failed is recorded as

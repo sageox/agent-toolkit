@@ -14,7 +14,7 @@ const VALUED = [
 ] as const;
 const SWITCHES = [
   "add-as-bot", "allow-public", "generate-avatar", "non-interactive", "output", "private",
-  "replace-avatar", "starter-avatar",
+  "rehearse", "replace-avatar", "starter-avatar",
 ] as const;
 
 type Valued = (typeof VALUED)[number];

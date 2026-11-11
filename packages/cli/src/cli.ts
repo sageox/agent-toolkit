@@ -27,6 +27,7 @@ import {
   serveVaultBrain,
   Vault,
   makeOxTeam,
+  oxClientId,
   serveTeamBrain,
   type HostedMcp,
   type TeamBrain,
@@ -137,7 +138,7 @@ import {
   ensureSettingsFile,
 } from "./edit-config.ts";
 import { flag, hasFlag, optionValue, positional, refuseUnknownOptions, VALUED_OPTIONS } from "./args.ts";
-import { wireBrains, toolNamesFor, DEFAULT_OX_TOKEN_SECRET } from "./brains.ts";
+import { wireBrains, toolNamesFor, brainToolNames, DEFAULT_OX_TOKEN_SECRET } from "./brains.ts";
 import { oxStatus, expiringSoon, oxTeams, type OxTeam } from "./ox.ts";
 import { formatProbe } from "./probe.ts";
 import {
@@ -161,6 +162,7 @@ import {
   type RepoWorkspace,
 } from "./repos.ts";
 import { agentPaths, agentsHome, bundlePaths, listAgents, selectAgentName } from "./home.ts";
+import { leaveTheShell, Rehearsal } from "./rehearse.ts";
 
 type SelectedAgent = ReturnType<typeof agentPaths> & { name: string };
 
@@ -271,7 +273,7 @@ function readManifest(path: string): AgentManifest {
  * Returns a closer because the gateway now *hosts* some brains rather than letting the
  * agent spawn them — those hold listening sockets that must come down with the process.
  */
-async function buildBrain(
+export async function buildBrain(
   manifest: AgentManifest,
   agentDir: string,
   secretsDir?: string,
@@ -280,6 +282,7 @@ async function buildBrain(
   policy?: ToolPolicy,
   switchSource?: SwitchSource,
   turnClock?: TurnClock,
+  rehearsal = false,
 ): Promise<{
   brain: Brain;
   closeHosted: () => Promise<void>;
@@ -299,12 +302,12 @@ async function buildBrain(
     return { brain: new MockBrain(), closeHosted: nothingToClose, postMessage: false, react: false };
   }
 
-  // Every server hosted below listens on the same address.
+  // Every hosted server enforces policy at the HTTP boundary, regardless of ACP provider.
   const isCodex = manifest.brain.provider === "codex-acp";
   const toolPolicy = policy ?? new ToolPolicy([], []);
   const serveAt = (server: string) => ({
     host: process.env.BRAIN_MCP_HOST,
-    ...(isCodex ? { toolPolicy: { server, policy: toolPolicy } } : {}),
+    toolPolicy: { server, policy: toolPolicy },
   });
 
   // Re-invoking this CLI needs the loader flags it was started with: under tsx the
@@ -406,15 +409,21 @@ async function buildBrain(
           process.stdout.write(
             `  warning: ${server}'s "${tool}" changed shape since it was approved — held back\n`,
           ),
+        // Who a stamped call is from, for the servers that set `stampTurn`: the live turn,
+        // and only while no other brain work is running that could have made the call.
+        answering: egress && (() => egress.callerEvent()),
       })
     : undefined;
 
-  for (const { name, scope } of brokerServers) {
+  for (const { name, scope, stampTurn } of brokerServers) {
     const server = await serveBrokerServer(broker!, name, serveAt(name));
     const bound = Object.entries(scope ?? {})
       .map(([arg, values]) => `${arg} ∈ ${values.join(", ")}`)
       .join("; ");
-    addHosted(name, server, `mcp server "${name}"${bound ? ` (bound to ${bound})` : ""}`);
+    const notes = [bound && `bound to ${bound}`, stampTurn && "stamped with the live turn"]
+      .filter(Boolean)
+      .join("; ");
+    addHosted(name, server, `mcp server "${name}"${notes ? ` (${notes})` : ""}`);
   }
 
   // The chat door onto this agent's own jobs. The brain names a slug; the argv comes from
@@ -431,10 +440,13 @@ async function buildBrain(
     // handed back to the caller, because a detached run outlives the turn that started it
     // and something has to settle it when this process is told to stop.
     jobs = new JobHost({
-      external: externalJobs(),
+      // A rehearsal has no stand-in for the dispatcher, so its worker jobs are refused by
+      // the host rather than started where it cannot reach them.
+      external: rehearsal ? undefined : externalJobs(),
       ...jobWorkEvents(manifest.name),
       switchSource,
       secretOpts: { dir: secretsDir },
+      rehearsal,
       // A job started from chat announces itself exactly as a scheduled one does. The
       // gateway already holds the adapters and the guarded path through them, so this
       // needs none of the connecting `job run` has to do for itself — and without it a
@@ -511,6 +523,7 @@ async function buildBrain(
       teamBrain = makeOxTeam({
         team: cfg.team,
         repo: cfg.repo,
+        clientId: oxClientId(cfg.team, manifest.name),
         repositories: codeWorkspace?.states.map(({ dirName, path, url }) => ({ name: dirName, path, url })),
         dataHome: codeWorkspace ? join(agentDir, "workspace", "ox-data") : undefined,
         ledgerSync: cfg.ledgerSync?.map(({ token, ...remote }) => ({
@@ -1070,8 +1083,8 @@ export async function memoryAddCmd(argv: string[]): Promise<void> {
 
   // Re-running `memory add` for a brain that is already there repairs the policy instead
   // of failing. The tools a brain contributes grow between releases, and an agent whose
-  // settings.json predates the growth would otherwise fail `doctor` for a tool no command
-  // could allow.
+  // settings.json predates the growth would otherwise leave `doctor` warning about a tool no
+  // command could allow.
   let fresh = true;
   try {
     yaml = addBrain(yaml, entry);
@@ -1349,11 +1362,14 @@ async function probeCmd(argv: string[]): Promise<void> {
 /** Run an agent, warm its read capabilities in the background, and coordinate shutdown. */
 async function runCmd(argv: string[]): Promise<void> {
   const agent = await agentFrom(argv);
+  // Before the agent's `.env` loads, so that and `--secrets` are all a rehearsal holds.
+  const rehearsalDir = hasFlag(argv, "rehearse") ? leaveTheShell() : undefined;
   loadDotEnv(agent.env);
   const secretsDir = secretsDirFrom(argv); // before the chdir below
   const statePath = agent.state;
 
   const manifest = readManifest(agent.config);
+  const rehearsal = rehearsalDir ? await Rehearsal.start(manifest, rehearsalDir) : undefined;
   process.chdir(agent.dir);
 
   // Resolve the spend credential before starting any background network work. A failed
@@ -1367,18 +1383,27 @@ async function runCmd(argv: string[]): Promise<void> {
   // fails where it is first used — and the ones on background paths become a status line
   // rather than a failed launch.
   const declared = declaredSecrets(manifest, repos);
-  for (const secret of requireDeclaredSecrets(declared, { dir: secretsDir })) {
-    process.stdout.write(
-      `  note: ${secret.where}: ${secret.name} does not resolve — ${secret.degraded}\n`,
-    );
+  if (rehearsal) {
+    rehearsal.withheld(declared.map((secret) => secret.name), { dir: secretsDir });
+  } else {
+    for (const secret of requireDeclaredSecrets(declared, { dir: secretsDir })) {
+      process.stdout.write(
+        `  note: ${secret.where}: ${secret.name} does not resolve — ${secret.degraded}\n`,
+      );
+    }
   }
 
   const policy = manifest.brain.provider !== "mock" && manifest.tools
     ? loadToolPolicy(readFileSync(resolve(agent.dir, manifest.tools), "utf8"))
     : undefined;
+  const teamBrain = manifest.brains.find((b) => b.preset === "team");
   const codeWorkspace =
     repos.length && manifest.brain.provider !== "mock"
-      ? createRepoWorkspace(repos, { root: join(agent.dir, "workspace"), secretsDir })
+      ? createRepoWorkspace(repos, {
+          root: join(agent.dir, "workspace"),
+          secretsDir,
+          oxClientId: teamBrain?.preset === "team" ? oxClientId(teamBrain.team, manifest.name) : undefined,
+        })
       : undefined;
 
   // The startup verdict, and the only thing in this process allowed to refuse a launch.
@@ -1418,7 +1443,11 @@ async function runCmd(argv: string[]): Promise<void> {
     });
   }
 
-  const state = loadState(statePath);
+  // The cursor is a position on the real relay, so a rehearsal neither reads nor writes it.
+  // It starts from 0 rather than the adapter's fresh-start lookback: the stand-in holds
+  // nothing older than this rehearsal, and a line read before the adapter subscribed has to
+  // be replayed however long startup took.
+  const state = rehearsal ? { since: { buzz: 0 } } : loadState(statePath);
   const adapters = await buildAdapters(manifest, { secretsDir, since: state.since });
   const egress = new SurfaceEgress({ manifest, adapters });
   // Written by the gateway below, read by the job tool built above it: a job is waited for
@@ -1436,6 +1465,7 @@ async function runCmd(argv: string[]): Promise<void> {
     policy,
     switchSource,
     turnClock,
+    rehearsal !== undefined,
   );
 
   // One lookup, so a credential that was already dead at deploy time is not first noticed
@@ -1490,6 +1520,7 @@ async function runCmd(argv: string[]): Promise<void> {
   // Persist the resume cursor periodically and on exit, so a restart does not reopen a
   // deaf window over the messages that arrived while the process was down.
   const persist = () => {
+    if (rehearsal) return;
     for (const a of adapters) {
       const cursor = a.cursor?.();
       if (cursor !== undefined) state.since[a.kind] = cursor;
@@ -1534,6 +1565,10 @@ async function runCmd(argv: string[]): Promise<void> {
   // reading the record, so it should agree with this config before anybody can send one.
   await reconcileDirectories(manifest, secretsDir);
 
+  // Unless a console surface is already reading stdin.
+  if (rehearsal && !manifest.surfaces.some((s) => s.kind === "console")) {
+    rehearsal.chat(adapters, () => void gw.drain().then(shutdown));
+  }
   await gw.start();
   await starting; // report a brain that never came up, now that we are listening
   // After the surfaces are up: a tick whose turn landed before them would post through an
@@ -1542,7 +1577,7 @@ async function runCmd(argv: string[]): Promise<void> {
   const surfaces = manifest.surfaces.map((s) => s.kind).join(", ");
   const model = manifest.brain.model ? ` model=${manifest.brain.model}` : "";
   process.stdout.write(
-    `sageox-agent "${manifest.name}" is live — brain=${manifest.brain.provider}${model} surfaces=[${surfaces}] respondTo=${manifest.respondTo}\n`,
+    `sageox-agent "${manifest.name}" is ${rehearsal ? "rehearsing" : "live"} — brain=${manifest.brain.provider}${model} surfaces=[${surfaces}] respondTo=${manifest.respondTo}\n`,
   );
 }
 
@@ -1962,6 +1997,8 @@ async function jobCmd(argv: string[]): Promise<void> {
   }
 
   const agent = await agentFromFlag(argv);
+  // Before the agent's `.env` loads, so that and `--secrets` are all a rehearsal holds.
+  const rehearsalDir = hasFlag(argv, "rehearse") ? leaveTheShell() : undefined;
   loadDotEnv(agent.env);
   const secretsDir = secretsDirFrom(argv); // before the chdir below
   const manifest = readManifest(agent.config);
@@ -2001,6 +2038,13 @@ async function jobCmd(argv: string[]): Promise<void> {
   // connection and a chdir that a throw would leave behind.
   const params = jobParamFlags(argv, job, trigger);
 
+  const rehearsal = rehearsalDir ? await Rehearsal.start(manifest, rehearsalDir) : undefined;
+  if (rehearsal && job.run) {
+    rehearsal.withheld(Object.values({ ...job.run.secrets, ...job.run.jobSecrets }), {
+      dir: jobSecretDirs(argv, secretsDir),
+    });
+  }
+
   const switchSource = await jobSwitchSource(manifest, secretsDir);
   if (job.killSwitch && !switchSource) {
     process.stdout.write(
@@ -2022,12 +2066,14 @@ async function jobCmd(argv: string[]): Promise<void> {
   process.chdir(agent.dir);
 
   const host = new JobHost({
-    external: externalJobs(),
+    // See buildBrain: no dispatcher has a stand-in.
+    external: rehearsal ? undefined : externalJobs(),
     requestId: process.env.AGENT_JOB_REQUEST_ID ? `${process.env.AGENT_JOB_REQUEST_ID}:${slug}` : undefined,
     ...jobWorkEvents(manifest.name),
     switchSource,
     ...reporter?.channel,
     secretOpts: { dir: jobSecretDirs(argv, secretsDir) },
+    rehearsal: rehearsal !== undefined,
   });
   let run: JobRun;
   try {
@@ -2040,6 +2086,7 @@ async function jobCmd(argv: string[]): Promise<void> {
   } finally {
     // Or the open socket keeps this process alive long past the run it was opened for.
     await reporter?.stop().catch(() => {});
+    await rehearsal?.stop().catch(() => {});
   }
 
   // Headline, then the gates beneath it — the shape a job's status post takes, and the
@@ -2407,7 +2454,7 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
    * Reported, not enforced: a posture that is loose on purpose.
    *
    * Distinct from `problems` because those are configurations that cannot work — an
-   * unresolvable secret, a policy that denies the memory it was given. A warning is a
+   * unresolvable secret, a policy that denies all of a brain's tools. A warning is a
    * deployment that runs exactly as written, by someone who chose it, so refusing to
    * start would be this tool overruling its operator rather than informing them.
    */
@@ -2549,7 +2596,10 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
     const teamBrain = manifest.brains.find((b) => b.preset === "team");
     if (teamBrain?.preset === "team") {
       const tokenRef = teamBrain.token ?? DEFAULT_OX_TOKEN_SECRET;
-      const ox = await oxStatus({ token: () => resolveSecret(tokenRef, { dir: secretsDir }) });
+      const ox = await oxStatus({
+        token: () => resolveSecret(tokenRef, { dir: secretsDir }),
+        clientId: oxClientId(teamBrain.team, manifest.name),
+      });
       if (!ox.installed) {
         problems.push("a team brain is configured but the `ox` CLI is not installed — it cannot search");
       } else if (!ox.authenticated) {
@@ -2783,16 +2833,29 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
         }
 
         if (manifest.brains.length) {
-          const denied = toolNamesFor(manifest.brains).filter((t) => !policy.allowsTool(t).ok);
-          if (denied.length) {
-            problems.push(
-              `brains are configured but the tool policy denies ${denied.join(", ")} — ` +
-                "the agent would have memory it cannot use; re-run `sageox-agent memory add " +
-                "<preset>` for that brain to re-sync the policy",
+          let withheld = false;
+          manifest.brains.forEach((brain, index) => {
+            const names = brainToolNames(brain, index);
+            const denied = names.filter((t) => !policy.allowsTool(t).ok);
+            if (!denied.length) return;
+            withheld = true;
+            if (denied.length === names.length) {
+              problems.push(
+                `brain ${brain.preset}: the tool policy denies ${denied.join(", ")} — ` +
+                  "the agent would have memory it cannot use; re-run `sageox-agent memory add " +
+                  "<preset>` for that brain to re-sync the policy",
+              );
+              return;
+            }
+            // Partly allowed is a brain narrowed on purpose (read but not write) or one a
+            // later release grew a tool for, and the policy cannot say which: name, don't refuse.
+            warnings.push(
+              `brain ${brain.preset}: the tool policy withholds ${denied.join(", ")} — the ` +
+                "agent can use its other tools; if that is not deliberate, re-run " +
+                "`sageox-agent memory add <preset>` for that brain to re-sync the policy",
             );
-          } else {
-            ok.push(`brain tools are allowlisted (${manifest.brains.length} brain(s))`);
-          }
+          });
+          if (!withheld) ok.push(`brain tools are allowlisted (${manifest.brains.length} brain(s))`);
         }
         if (requestable.length) {
           if (!policy.allowsTool(JOB_RUN_TOOL).ok) {
@@ -3030,6 +3093,12 @@ running it:
                                run one declared job once and exit — what a CronJob execs.
                                The trigger is stamped from this flag; a run started here is
                                \`system\`, so it does not bypass a parked job
+  run | job run <slug> --rehearse
+                               the same run with nobody listening: Buzz is a relay inside
+                               this process, no credential comes from your shell's
+                               environment, and a secret you did not give it is left unset.
+                               With \`run\`, each line you type is a message to it from its
+                               owner
   job status | cancel <slug> --run-id <id>
                                retrieve a durable external result or cancel its worker
                                status --output includes the declared JSON answer (operator access)
@@ -3099,6 +3168,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       // help prints whatever else is on the line, and only `mcp add` hands `--args` on, to the
       // program `--command` names.
       if (cmd !== "help") refuseUnknownOptions(argv, cmd === "mcp" && hasFlag(argv, "command"));
+      // Every other command would run as if it were absent — `job arm x --rehearse` arms the
+      // real switch.
+      const rehearsable = cmd === "help" || cmd === "run" || (cmd === "job" && argv[0] === "run");
+      if (hasFlag(argv, "rehearse") && !rehearsable) {
+        throw new Error("--rehearse applies to `run` and `job run` only");
+      }
       await handler(argv);
     } catch (error: unknown) {
       process.stderr.write(`${errorText(error)}\n`);

@@ -582,7 +582,7 @@ export class ScheduledTurns {
       {
         instructions: digestBrief(prompt.body, source, history),
         accept: (text) => {
-          const checked = acceptDigest(text, history);
+          const checked = acceptDigest(text, history, source);
           if (checked.ok) accepted++;
           else refused = checked.reason;
           return checked;

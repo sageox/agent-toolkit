@@ -14,8 +14,13 @@ interface OpenSub extends ReqRecord {
 /**
  * An in-process Nostr relay that speaks enough NIP-01 + NIP-42 to exercise the adapter
  * against real protocol framing: REQ/EVENT/EOSE/CLOSE, AUTH challenge, and OK.
+ *
+ * The tests run the adapter against it, and `--rehearse` points an agent's Buzz surfaces at
+ * one, so a rehearsal's posts reach nobody. The fault options are for the tests; a rehearsal
+ * sets none of them. It stores whatever it is sent and keeps no membership, so a rehearsal
+ * that works is no evidence about what a real relay will refuse.
  */
-export class FakeRelay {
+export class LocalRelay {
   private wss: WebSocketServer;
   private sockets = new Set<WebSocket>();
   /** Every REQ the adapter sent — the `since` cursor assertions read this. */
@@ -45,6 +50,7 @@ export class FakeRelay {
       rejectAuthReason?: string;
       slowDirectoryMs?: number;
       refuseDirectory?: boolean;
+      onPublish?: (event: Event) => void;
     },
   ) {
     this.wss = wss;
@@ -69,12 +75,16 @@ export class FakeRelay {
       slowDirectoryMs?: number;
       /** Close a directory REQ unanswered — a relay whose conventions do not include one. */
       refuseDirectory?: boolean;
+      /** Called with each event a client publishes, after it is stored. */
+      onPublish?: (event: Event) => void;
     } = {},
-  ): Promise<FakeRelay> {
-    const wss = new WebSocketServer({ port: 0 });
+  ): Promise<LocalRelay> {
+    // Loopback only: bound to every interface, anyone on the network could post to a
+    // rehearsing agent, and one with `respondTo: anyone` would answer them.
+    const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await new Promise<void>((resolve) => wss.once("listening", resolve));
     const { port } = wss.address() as { port: number };
-    const relay = new FakeRelay(wss, `ws://127.0.0.1:${port}`, {
+    const relay = new LocalRelay(wss, `ws://127.0.0.1:${port}`, {
       requireAuth: opts.requireAuth ?? false,
       notice: opts.notice,
       withholdEose: opts.withholdEose,
@@ -82,6 +92,7 @@ export class FakeRelay {
       rejectAuthReason: opts.rejectAuthReason,
       slowDirectoryMs: opts.slowDirectoryMs,
       refuseDirectory: opts.refuseDirectory,
+      onPublish: opts.onPublish,
     });
     relay.backlog.push(...(opts.backlog ?? []));
     return relay;
@@ -174,6 +185,7 @@ export class FakeRelay {
         }
         this.backlog.push(event);
         ws.send(JSON.stringify(["OK", event.id, verifyEvent(event), ""]));
+        this.opts.onPublish?.(event);
         return;
       }
 

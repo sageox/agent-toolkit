@@ -4,16 +4,20 @@
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.25.0",
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit && pnpm -r exec tsc --noEmit"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.5",
     "@types/ws": "^8.18.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.1",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5",
     "ws": "^8.21.3"
   }
 }

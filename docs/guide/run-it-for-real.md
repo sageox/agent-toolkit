@@ -128,6 +128,36 @@ The runtime accepts any bundle path directly:
 
 That is the complete runtime contract deployment adapters target.
 
+### Rehearse it first
+
+`--rehearse` runs the same bundle with nobody listening:
+
+```bash
+./bin/sageox-agent run --bundle /path/to/agent --rehearse --secrets ./rehearsal-secrets
+./bin/sageox-agent job run <slug> --bundle /path/to/agent --rehearse --secrets ./rehearsal-secrets
+./bin/sageox-agent run --bundle /path/to/agent --rehearse < questions.txt
+```
+
+Every Buzz surface is pointed at a relay inside the process and signs as a throwaway key, so
+nothing the agent posts there reaches anyone. No credential comes from your shell's
+environment: put the model key, and any read token you want it to have, in the `--secrets`
+directory or the agent's `.env`. A declared secret you leave out is listed at the start; a
+job body runs without it, and an MCP server that needs it fails its calls. Under `run`, each
+line you type is a message from you, as its owner, in its first Buzz channel, and with input
+from a file the command exits once the input ends and the turns it started finish. A job
+body is told `JOB_REHEARSAL=1` ([the job contract](../job-contract.md)). What has no
+stand-in is refused: a Slack surface, Buzz surfaces on more than one relay, and a job that
+runs on an external worker. The rehearsal's directory, `HOME` included, is removed when it
+exits.
+
+A secret you do give it is used for real. Run from source, a job body runs as you, so your
+logins outside `HOME`, such as SSH keys, may still be within its reach; the image has none:
+
+```bash
+docker run --rm -i -v /path/to/agent:/bundle:ro -v "$PWD/rehearsal-secrets:/mnt/secrets-store:ro" \
+  ghcr.io/sageox/agent-base:<version> run --bundle /bundle --rehearse
+```
+
 ## Step 9c — or deploy several bundles in one Helm release
 
 The chart consumes Secrets and PVCs created by your own Kubernetes tooling, and mounts each
