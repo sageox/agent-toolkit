@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-11
+
+Everything below shipped after `v0.12.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.12.1` takes `:latest` and advances `:0.12`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
 - **A Buzz agent deployed with `BUZZ_AUTH_TAG` now sends its NIP-OA owner attestation when it
   signs in (#140).** The runtime signed in through nostr-tools and never read the variable, so
   only the `buzz` CLI sent the tag and agents showed "owner unavailable" in Buzz. `adapter-buzz`
