@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A Buzz agent deployed with `BUZZ_AUTH_TAG` now sends its NIP-OA owner attestation when it
+  signs in (#140).** The runtime signed in through nostr-tools and never read the variable, so
+  only the `buzz` CLI sent the tag and agents showed "owner unavailable" in Buzz. `adapter-buzz`
+  now adds it to every NIP-42 AUTH event, as Buzz's Rust harness does. An open relay records the
+  tag's owner; a relay that requires membership records it only for an agent it admits through
+  its owner's membership, not for a direct member. The runtime checks only the tag's shape and
+  sends nothing when that fails, leaving the signature and conditions to the relay. Where the
+  relay records an owner it keeps the first one and refuses a sign-in whose tag names another,
+  so check an agent's current owner before giving it a tag.
+
 ## [0.12.0] - 2026-11-10
 
 Everything below shipped after `v0.11.2`.
