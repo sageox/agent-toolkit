@@ -126,6 +126,29 @@ bundle.
 {{- end }}
 {{- end -}}
 
+{{/*
+Whether this agent's scheduled local jobs mount any part of its claim. One definition,
+because the volume and the required same-node affinity must agree: a job Pod that mounts
+the ReadWriteOnce claim without the affinity waits behind a `Multi-Attach` event forever.
+*/}}
+{{- define "agent.sharesClaimWithJobs" -}}
+{{- if or .persistence.jobCheckouts .persistence.jobCodeIndex .persistence.jobStateDirs }}true{{- end }}
+{{- end -}}
+
+{{/*
+Refuses a `persistence.jobStateDirs` entry naming the agent's own home. `/agents/<name>`
+holds the bundle (a prompt job's steering), `state.json` and the local memory vault; a
+writable mount of it would hand all three to a job body. The schema already limits each
+entry to one path segment, so the home is the only private directory an entry could name.
+*/}}
+{{- define "agent.assertJobStateDirs" -}}
+{{- range $dir := .agent.persistence.jobStateDirs }}
+{{- if eq $dir $.name }}
+{{- fail (printf "agents.%s.persistence.jobStateDirs names %s, the agent's own home: it holds the bundle, state.json and the memory vault, none of which a job body may write. Keep shared state in a sibling directory such as .%s-state." $.name $dir $.name) }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
 {{- define "agent.agentVolumeMounts" -}}
 - name: agent-data
   mountPath: /agents
@@ -140,6 +163,16 @@ bundle.
   mountPath: /agents/{{ .name }}/workspace/ox-data
   subPath: {{ .name }}/workspace/ox-data
   readOnly: true
+{{- end }}
+{{- /* Writable, unlike the two above: these directories hold state the body and the agent
+both keep (a work queue, a cache), so the body is a writer by design and must serialize its
+own writes against the agent's. Siblings of the agent's home, never inside it. */}}
+{{- if and .job (not .job.worker) }}
+{{- range $dir := .agent.persistence.jobStateDirs }}
+- name: checkouts
+  mountPath: /agents/{{ $dir }}
+  subPath: {{ $dir }}
+{{- end }}
 {{- end }}
 {{- range $volume := .agent.sharedVolumes }}
 - name: {{ $volume.name }}
@@ -232,7 +265,7 @@ No volume at all is the case where the bundle rides inside `bundle.stageImage` i
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}
 {{- end }}
-{{- if and .job (not .job.worker) (or .agent.persistence.jobCheckouts .agent.persistence.jobCodeIndex) }}
+{{- if and .job (not .job.worker) (include "agent.sharesClaimWithJobs" .agent) }}
 - name: checkouts
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}

@@ -279,6 +279,40 @@ absent "workspace/ox-data"
 absent "podAffinity"
 present "claimName: agents-harry"
 
+# Shared state directories: siblings of the agent's home on the same claim, WRITABLE, with
+# the same required affinity — a body that drains a queue the agent's chat tools fill has
+# to write it. Mounted alone, without checkouts or the index.
+render --set 'agents.harry.persistence.jobStateDirs[0]=.queue-state'
+present "mountPath: /agents/.queue-state"
+present "subPath: .queue-state"
+absent "workspace/repos"
+counted 2 "name: checkouts"
+matched 1 "claimName: agents-harry$"
+counted 2 "emptyDir: {}"
+counted 1 "podAffinity:"
+present "requiredDuringSchedulingIgnoredDuringExecution:"
+present "operator: DoesNotExist"
+if grep -A2 -F "mountPath: /agents/.queue-state" <<<"$rendered" | grep -qF "readOnly"; then
+  fail "a job state directory must be writable"
+fi
+# Beside the checkouts it shares the one claim reference rather than adding a second.
+render --set 'agents.harry.persistence.jobStateDirs[0]=.queue-state' \
+  --set agents.harry.persistence.jobCheckouts=true
+counted 3 "name: checkouts"
+matched 1 "claimName: agents-harry$"
+rendered=$(helm template agents "$chart" --values "$values" \
+  --set 'agents.harry.persistence.jobStateDirs[0]=.queue-state' --show-only templates/deployment.yaml)
+absent ".queue-state"
+absent "podAffinity"
+# The agent's home holds the bundle, state.json and the vault; anything with a slash or a
+# dot-dot could reach into it. Each is refused where the mount is made.
+refuses "a state dir naming the agent's own home" "the agent's own home" \
+  --set 'agents.harry.persistence.jobStateDirs[0]=harry'
+for bad in .. . 'harry/workspace' '../etc' ''; do
+  refuses "state dir '$bad'" "jobStateDirs" \
+    --set-string "agents.harry.persistence.jobStateDirs[0]=$bad"
+done
+
 # Every scheduled Pod stages its own bundle, into the `emptyDir` above. One that waited on
 # the Deployment to have gone first would lose its run on a fresh install, and nothing
 # retries it.

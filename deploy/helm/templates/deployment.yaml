@@ -1,6 +1,7 @@
 {{- range $name, $agent := .Values.agents }}
 {{- $context := dict "root" $ "name" $name "agent" $agent -}}
 {{- include "agent.assertSharedVolumes" $context }}
+{{- include "agent.assertJobStateDirs" $context }}
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -225,6 +225,16 @@
               "type": "boolean",
               "description": "Mount workspace/ox-data read-only into this agent's CronJob Pods. Implies the checkout mount and required same-node affinity even when jobCheckouts is false. Default false. Applies only to scheduled local command jobs, not external workers or prompt jobs. Requires ox 0.15.0 or newer, included in the current runtime image. The body must set XDG_DATA_HOME to the mounted directory, run code commands from a checkout, and check index readiness; see the job body contract."
             },
+            "jobStateDirs": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^([A-Za-z0-9_][A-Za-z0-9._-]*|\\.[A-Za-z0-9_-][A-Za-z0-9._-]*)$"
+              },
+              "description": "Directories at the root of this agent's claim, each one path segment (e.g. .screening-state), mounted READ-WRITE at /agents/<dir> into its scheduled local command jobs (`run` without `worker`), with the same required same-node affinity as jobCheckouts. For durable state a scheduled body and the agent both keep, such as a work queue a chat tool fills and a clock drains; the body must serialize its writes against the agent's. Never the agent's own home (/agents/<name>), which the chart refuses. Absent, nothing is shared."
+            },
             "jobHome": {
               "type": "object",
               "additionalProperties": false,
