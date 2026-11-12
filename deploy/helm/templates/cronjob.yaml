@@ -147,7 +147,7 @@ whole of what the second mount buys.
                 - --job-secrets
                 - {{ include "agent.jobSecretsMountPath" $context }}
                 {{- end }}
-              {{- if or $job.worker $agent.workEvents (include "agent.jobHasHome" $context) }}
+              {{- if or $job.worker $agent.workEvents (include "agent.jobHasHome" $context) $agent.authTag }}
               env:
                 {{- if include "agent.jobHasHome" $context }}
                 - name: HOME
@@ -156,6 +156,10 @@ whole of what the second mount buys.
                 - name: CLAUDE_CODE_DISABLE_AUTO_MEMORY
                   value: "1"
                 {{- end }}
+                {{- end }}
+                {{- if $agent.authTag }}
+                - name: BUZZ_AUTH_TAG
+                  value: {{ include "agent.authTag" $agent.authTag | quote }}
                 {{- end }}
                 {{- if $agent.workEvents }}
                 - name: AGENT_WORK_EVENTS

@@ -400,3 +400,11 @@ instructions in later sessions, so a kept .claude path turns it off for the lane
       name: {{ .agent.dispatcher.tokenSecret | quote }}
       key: token
 {{- end -}}
+
+{{- /*
+The NIP-OA owner attestation as the JSON BUZZ_AUTH_TAG carries: a string tag passes through as
+given, a list is serialized. The schema has already checked either one's shape.
+*/}}
+{{- define "agent.authTag" -}}
+{{- if kindIs "string" . -}}{{ . }}{{- else -}}{{ toJson . }}{{- end -}}
+{{- end -}}

@@ -42,4 +42,7 @@ networkPolicy:
 # resources. See docs/external-jobs.md; worker images remain in agent.yaml.
 # Optional agents.<name>.workEvents=true enables structured job lifecycle logs on the
 # Deployment and CronJobs with toolkit 0.4.1 or newer. Omitted or false keeps ordinary logs.
+# Optional agents.<name>.authTag is the agent's public NIP-OA owner attestation, a YAML list
+# [auth, <owner hex>, <conditions>, <sig hex>] or its JSON string, set as BUZZ_AUTH_TAG on the
+# Deployment and CronJobs. Omitted leaves the agent "owner unavailable".
 agents: {}

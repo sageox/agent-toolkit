@@ -159,6 +159,26 @@
         "terminationGracePeriodSeconds", "resources", "sharedVolumes"
       ],
       "properties": {
+        "authTag": {
+          "description": "NIP-OA owner attestation tag [\"auth\", <owner pubkey hex>, <conditions>, <sig hex>], public, injected as JSON in BUZZ_AUTH_TAG into the agent Deployment and scheduled job hosts, binding the agent to its owner. Give it as a YAML list or as the JSON string a minted tag prints as. Minted with the owner secret; the tag itself is not a secret. Omit to leave the agent 'owner unavailable'.",
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^\\s*\\[\\s*\"auth\"\\s*,\\s*\"[0-9a-f]{64}\"\\s*,\\s*\"([^\"\\\\]|\\\\.)*\"\\s*,\\s*\"[0-9a-f]{128}\"\\s*\\]\\s*$"
+            },
+            {
+              "type": "array",
+              "prefixItems": [
+                { "const": "auth" },
+                { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                { "type": "string" },
+                { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+              ],
+              "minItems": 4,
+              "maxItems": 4
+            }
+          ]
+        },
         "workEvents": {
           "type": "boolean",
           "description": "Opt in to structured job lifecycle events on the agent Deployment and scheduled job hosts. Omitted or false preserves ordinary logging. Requires toolkit 0.4.1 or newer."

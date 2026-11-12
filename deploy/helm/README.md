@@ -63,6 +63,23 @@ agent:
     harry: { ... }
 ```
 
+## Owner attestation
+
+Set `agents.<name>.authTag` to the agent's NIP-OA owner attestation to bind it to its
+owner, so Buzz shows "managed by \<owner\>" instead of "owner unavailable". The chart
+sets it as `BUZZ_AUTH_TAG` on that agent's Deployment and CronJob hosts. Give it as a
+YAML list or as the JSON string a minted tag prints as; the schema refuses anything
+that is not the `["auth", <owner pubkey hex>, <conditions>, <sig hex>]` tuple. The tag
+is public: it is minted with the owner's secret, which never enters the pod. A relay
+that records owners keeps the first one, so check an agent's current owner before
+giving it a tag.
+
+```yaml
+agents:
+  harry:
+    authTag: ["auth", "<owner pubkey hex>", "<conditions>", "<sig hex>"]
+```
+
 ## Structured job logs
 
 With toolkit **0.4.1 or newer**, set `agents.<name>.workEvents: true` to enable

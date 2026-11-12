@@ -97,6 +97,7 @@ jobs:
           deploy/helm/tests/consume.sh
           deploy/helm/tests/bundle.sh
           deploy/helm/tests/networkpolicy.sh
+          deploy/helm/tests/authtag.sh
 
       - name: Validate Terraform deployment
         run: |
