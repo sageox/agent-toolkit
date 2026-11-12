@@ -280,9 +280,12 @@ absent "podAffinity"
 present "claimName: agents-harry"
 
 # Shared state directories: siblings of the agent's home on the same claim, WRITABLE, with
-# the same required affinity — a body that drains a queue the agent's chat tools fill has
-# to write it. Mounted alone, without checkouts or the index.
-render --set 'agents.harry.persistence.jobStateDirs[0]=.queue-state'
+# the same required affinity, for the named jobs only — a body that drains a queue the
+# agent's chat tools fill has to write it, and a job that does not drain it must neither
+# get write access nor lose ticks when the agent Pod is away.
+state=(--set 'agents.harry.persistence.jobStateDirs.jobs[0]=shift'
+  --set 'agents.harry.persistence.jobStateDirs.dirs[0]=.queue-state')
+render "${state[@]}"
 present "mountPath: /agents/.queue-state"
 present "subPath: .queue-state"
 absent "workspace/repos"
@@ -295,23 +298,37 @@ present "operator: DoesNotExist"
 if grep -A2 -F "mountPath: /agents/.queue-state" <<<"$rendered" | grep -qF "readOnly"; then
   fail "a job state directory must be writable"
 fi
+# Scoped: a second scheduled job of the same agent that is not named gets nothing.
+render "${state[@]}" --set 'agents.harry.jobs[0].trigger.schedules[1]=30 2 * * *'
+counted 2 "mountPath: /agents/.queue-state"
+render "${state[@]}" --set 'agents.harry.persistence.jobStateDirs.jobs[0]=shift' \
+  --set 'agents.harry.jobs[1].trigger.schedules[0]=0 3 * * *'
+counted 1 "mountPath: /agents/.queue-state"
+counted 1 "podAffinity:"
 # Beside the checkouts it shares the one claim reference rather than adding a second.
-render --set 'agents.harry.persistence.jobStateDirs[0]=.queue-state' \
-  --set agents.harry.persistence.jobCheckouts=true
+render "${state[@]}" --set agents.harry.persistence.jobCheckouts=true
 counted 3 "name: checkouts"
 matched 1 "claimName: agents-harry$"
-rendered=$(helm template agents "$chart" --values "$values" \
-  --set 'agents.harry.persistence.jobStateDirs[0]=.queue-state' --show-only templates/deployment.yaml)
+rendered=$(helm template agents "$chart" --values "$values" "${state[@]}" \
+  --show-only templates/deployment.yaml)
 absent ".queue-state"
 absent "podAffinity"
 # The agent's home holds the bundle, state.json and the vault; anything with a slash or a
 # dot-dot could reach into it. Each is refused where the mount is made.
 refuses "a state dir naming the agent's own home" "the agent's own home" \
-  --set 'agents.harry.persistence.jobStateDirs[0]=harry'
+  "${state[@]}" --set 'agents.harry.persistence.jobStateDirs.dirs[0]=harry'
 for bad in .. . 'harry/workspace' '../etc' ''; do
   refuses "state dir '$bad'" "jobStateDirs" \
-    --set-string "agents.harry.persistence.jobStateDirs[0]=$bad"
+    "${state[@]}" --set-string "agents.harry.persistence.jobStateDirs.dirs[0]=$bad"
 done
+# A job that would never be mounted is refused, not silently skipped: a typo, an
+# on-request job (it runs in the gateway, which has the claim anyway), a prompt job.
+for job in shfit inbox daily-digest; do
+  refuses "state for job '$job'" "not a scheduled local command job" \
+    "${state[@]}" --set "agents.harry.persistence.jobStateDirs.jobs[0]=$job"
+done
+refuses "state dirs with no jobs" "jobStateDirs" \
+  --set 'agents.harry.persistence.jobStateDirs.dirs[0]=.queue-state'
 
 # Every scheduled Pod stages its own bundle, into the `emptyDir` above. One that waited on
 # the Deployment to have gone first would lose its run on a fresh install, and nothing
