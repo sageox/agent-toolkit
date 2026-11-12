@@ -148,8 +148,10 @@ Refuses a `persistence.jobStateDirs` that cannot mean what it says.
 
 A dir naming the agent's own home: `/agents/<name>` holds the bundle (a prompt job's
 steering), `state.json` and the local memory vault, and a writable mount of it would hand
-all three to a job body. The schema already limits each dir to one path segment, so the
-home is the only private directory one could name.
+all three to a job body. The schema already demands a `-state` suffix, which keeps out
+instruction locations (`.claude`, `CLAUDE.md`) and YAML scalars (`null`, `true`, `123`);
+this catches an agent, on this release, whose name itself ends in `-state` — two agents can
+share one `existingClaim`, so any agent's home counts, not only this one's.
 
 A job that is not a scheduled local command job of this agent: the mount would silently
 never happen (a typo, a prompt job, a worker), and a body that reads its queue from an
@@ -159,8 +161,8 @@ empty directory passes green forever.
 {{- $state := .agent.persistence.jobStateDirs -}}
 {{- if $state }}
 {{- range $dir := $state.dirs }}
-{{- if eq $dir $.name }}
-{{- fail (printf "agents.%s.persistence.jobStateDirs.dirs names %s, the agent's own home: it holds the bundle, state.json and the memory vault, none of which a job body may write. Keep shared state in a sibling directory such as .%s-state." $.name $dir $.name) }}
+{{- if hasKey $.root.Values.agents $dir }}
+{{- fail (printf "agents.%s.persistence.jobStateDirs.dirs names %s, an agent's home: it holds the bundle, state.json and the memory vault, none of which a job body may write. Keep shared state in a sibling directory such as .%s-state." $.name $dir $.name) }}
 {{- end }}
 {{- end }}
 {{- range $slug := $state.jobs }}
@@ -196,8 +198,10 @@ own writes against the agent's. Siblings of the agent's home, never inside it. *
 {{- if and .job (not .job.worker) (include "agent.jobSharesState" .) }}
 {{- range $dir := .agent.persistence.jobStateDirs.dirs }}
 - name: checkouts
-  mountPath: /agents/{{ $dir }}
-  subPath: {{ $dir }}
+  mountPath: {{ printf "/agents/%s" $dir | quote }}
+  {{- /* Quoted: an unquoted scalar is YAML-typed, and an empty or null subPath mounts the
+  volume ROOT — the whole claim, the agent's home included, read-write. */}}
+  subPath: {{ $dir | quote }}
 {{- end }}
 {{- end }}
 {{- range $volume := .agent.sharedVolumes }}
