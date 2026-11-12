@@ -58,8 +58,16 @@ jobs:
           tar xzf "$RUNNER_TEMP/age.tar.gz" -C "$RUNNER_TEMP"
           sudo install "$RUNNER_TEMP/age/age" "$RUNNER_TEMP/age/age-keygen" /usr/local/bin/
 
+      # Passing tests' console output, per-test lines and the output of child processes the tests
+      # spawn were most of a green log. The wrapper prints the Vitest totals when green and
+      # everything when red; --silent=passed-only and the dot reporter keep the red log to the
+      # failures. Called through `pnpm exec` because `pnpm test --silent` would be taken as pnpm's
+      # own flag. Re-run jobs with "Enable debug logging" (RUNNER_DEBUG=1) to see everything.
       - name: Run tests
-        run: pnpm test
+        env:
+          VITEST_SILENT: ${{ runner.debug == '1' && 'false' || 'passed-only' }}
+          VITEST_REPORTER: ${{ runner.debug == '1' && 'default' || 'dot' }}
+        run: scripts/ci/run-quiet.sh 'vitest' pnpm exec vitest run --silent="$VITEST_SILENT" --reporter="$VITEST_REPORTER"
 
       - name: Run typecheck
         run: pnpm typecheck
@@ -121,17 +129,20 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      # A plain `docker buildx build` rather than build-push-action: the action's log is mostly the
+      # BuildKit step trace and a 600-line metadata dump, with no option to quiet either. The
+      # wrapper prints one line when it builds and the full trace when it does not.
+      #
+      # Both platforms are kept in step with release.yml deliberately. The Dockerfile pins `ox` by
+      # a per-architecture checksum, so an amd64-only build would stay green through exactly the
+      # edit most likely to break a release: a version bump that updates one checksum and forgets
+      # the other. Nothing downstream needs the image, only the proof that it builds, and a
+      # multi-platform result cannot be loaded into the local daemon anyway (type=cacheonly).
       - name: Build every architecture the release publishes
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          # Kept in step with release.yml deliberately. The Dockerfile pins `ox` by a
-          # per-architecture checksum, so an amd64-only build would stay green through
-          # exactly the edit most likely to break a release — a version bump that updates
-          # one checksum and forgets the other.
-          platforms: linux/amd64,linux/arm64
-          # Nothing downstream needs the image, only the proof that it builds. A
-          # multi-platform result cannot be loaded into the local daemon anyway.
-          push: false
-          outputs: type=cacheonly
+        run: |
+          scripts/ci/run-quiet.sh 'docker buildx build' \
+            docker buildx build --progress=plain \
+              --file deploy/docker/Dockerfile \
+              --platform linux/amd64,linux/arm64 \
+              --output type=cacheonly \
+              .
