@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Chart: `persistence.jobStateDirs` (`jobs`, `dirs`) mounts named directories at the root
+  of an agent's claim read-write into the named scheduled local command jobs, with the
+  same required same-node affinity as `jobCheckouts`. Other jobs are untouched. A clock can drain state the agent's chat tools
+  fill, such as a work queue, with no model turn and no `ReadWriteMany` storage. The
+  agent's own home is refused.
+
 ## [0.12.1] - 2026-11-11
 
 Everything below shipped after `v0.12.0`.

@@ -219,6 +219,7 @@ Read-only index support requires ox 0.15.0 or newer, now pinned in the runtime i
 External worker jobs stay isolated; scheduled prompt jobs use the gateway's code tools.
 The body must configure `XDG_DATA_HOME` and check readiness as described in
 [the job body contract](job-contract.md#searching-a-shared-code-index).
+`persistence.jobStateDirs` shares named sibling directories of the agent's home read-write with the jobs it names, with the same affinity.
 A body that shares other durable state with the agent gets a `sharedVolumes` claim whose
 access mode says so.
 

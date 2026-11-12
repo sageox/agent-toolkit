@@ -126,6 +126,57 @@ bundle.
 {{- end }}
 {{- end -}}
 
+{{/*
+Whether this job's Pod mounts any part of the agent's claim. One definition, because the
+volume and the required same-node affinity must agree: a job Pod that mounts the
+ReadWriteOnce claim without the affinity waits behind a `Multi-Attach` event forever.
+Checkouts and the index are per agent; state directories are per named job, so a job that
+does not need the agent's state neither gets write access to it nor loses ticks when the
+agent Pod is away. Takes (dict "agent" $agent "job" $job).
+*/}}
+{{- define "agent.sharesClaimWithJobs" -}}
+{{- $p := .agent.persistence -}}
+{{- if or $p.jobCheckouts $p.jobCodeIndex (include "agent.jobSharesState" .) }}true{{- end }}
+{{- end -}}
+
+{{- define "agent.jobSharesState" -}}
+{{- if has .job.slug (dig "jobStateDirs" "jobs" list .agent.persistence) }}true{{- end }}
+{{- end -}}
+
+{{/*
+Refuses a `persistence.jobStateDirs` that cannot mean what it says.
+
+A dir naming the agent's own home: `/agents/<name>` holds the bundle (a prompt job's
+steering), `state.json` and the local memory vault, and a writable mount of it would hand
+all three to a job body. The schema already demands a `-state` suffix, which keeps out
+instruction locations (`.claude`, `CLAUDE.md`) and YAML scalars (`null`, `true`, `123`);
+this catches an agent, on this release, whose name itself ends in `-state` — two agents can
+share one `existingClaim`, so any agent's home counts, not only this one's.
+
+A job that is not a scheduled local command job of this agent: the mount would silently
+never happen (a typo, a prompt job, a worker), and a body that reads its queue from an
+empty directory passes green forever.
+*/}}
+{{- define "agent.assertJobStateDirs" -}}
+{{- $state := .agent.persistence.jobStateDirs -}}
+{{- if $state }}
+{{- range $dir := $state.dirs }}
+{{- if hasKey $.root.Values.agents $dir }}
+{{- fail (printf "agents.%s.persistence.jobStateDirs.dirs names %s, an agent's home: it holds the bundle, state.json and the memory vault, none of which a job body may write. Keep shared state in a sibling directory such as .%s-state." $.name $dir $.name) }}
+{{- end }}
+{{- end }}
+{{- range $slug := $state.jobs }}
+{{- $ok := false }}
+{{- range $job := $.agent.jobs }}
+{{- if and (eq $job.slug $slug) (not $job.prompt) (not $job.worker) $job.trigger.schedules }}{{ $ok = true }}{{ end }}
+{{- end }}
+{{- if not $ok }}
+{{- fail (printf "agents.%s.persistence.jobStateDirs.jobs names %s, which is not a scheduled local command job of this agent (declared in jobs[] with a schedule, no prompt, no worker). Nothing would be mounted for it." $.name $slug) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
 {{- define "agent.agentVolumeMounts" -}}
 - name: agent-data
   mountPath: /agents
@@ -140,6 +191,18 @@ bundle.
   mountPath: /agents/{{ .name }}/workspace/ox-data
   subPath: {{ .name }}/workspace/ox-data
   readOnly: true
+{{- end }}
+{{- /* Writable, unlike the two above: these directories hold state the body and the agent
+both keep (a work queue, a cache), so the body is a writer by design and must serialize its
+own writes against the agent's. Siblings of the agent's home, never inside it. */}}
+{{- if and .job (not .job.worker) (include "agent.jobSharesState" .) }}
+{{- range $dir := .agent.persistence.jobStateDirs.dirs }}
+- name: checkouts
+  mountPath: {{ printf "/agents/%s" $dir | quote }}
+  {{- /* Quoted: an unquoted scalar is YAML-typed, and an empty or null subPath mounts the
+  volume ROOT — the whole claim, the agent's home included, read-write. */}}
+  subPath: {{ $dir | quote }}
+{{- end }}
 {{- end }}
 {{- range $volume := .agent.sharedVolumes }}
 - name: {{ $volume.name }}
@@ -232,7 +295,7 @@ No volume at all is the case where the bundle rides inside `bundle.stageImage` i
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}
 {{- end }}
-{{- if and .job (not .job.worker) (or .agent.persistence.jobCheckouts .agent.persistence.jobCodeIndex) }}
+{{- if and .job (not .job.worker) (include "agent.sharesClaimWithJobs" .) }}
 - name: checkouts
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}

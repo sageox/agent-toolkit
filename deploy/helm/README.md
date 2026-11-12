@@ -499,6 +499,46 @@ or search must fail the body; do not convert it into an empty result or run `ox 
 to repair it. The agent remains the only index writer. A successful check is not a lock:
 the agent can update the store during the run, so handle a later search failure too.
 
+### A job that shares state with the agent
+
+Some state is written by both sides: a chat tool queues work and a clock drains it, or a
+cache the agent fills saves the body a model call. On a `ReadWriteOnce` claim that state is
+out of a job Pod's reach, and the usual way out, a `sharedVolumes` claim two Pods can mount,
+needs `ReadWriteMany` storage or moving the data. `persistence.jobStateDirs` names
+directories at the root of the agent's own claim and mounts each one **read-write** at
+`/agents/<dir>` in the scheduled local command jobs it names:
+
+```yaml
+agents:
+  ashby:
+    persistence:
+      jobStateDirs:
+        jobs: ["daily-screening"]
+        dirs: [".screening-state"]
+```
+
+- **Only the named jobs.** Any other job gets neither the mount nor the affinity, so it
+  can't write the agent's state and doesn't lose ticks when the agent Pod is away. A name
+  that is not a scheduled local command job of this agent is refused: a typo, an
+  on-request job or a prompt job would otherwise be silently left unmounted.
+
+- **Siblings of the agent's home, never inside it.** Each entry is one path segment named
+  `<name>-state` or `.<name>-state`. That rule keeps out any agent's home (`/agents/<name>`
+  holds the bundle, `state.json` and the memory vault), instruction locations a brain
+  session loads (`.claude`, `CLAUDE.md`), and YAML scalars such as `null`, which would
+  otherwise render an empty `subPath`, i.e. the volume root.
+- **The chart can't see inside the claim.** If something writing the claim root replaces
+  a state directory with a symlink to an agent's home, the kubelet follows it. The only
+  writers there are the agent's own processes, which already own that home, but a job
+  body would then reach it too. A run-time check is tracked upstream.
+- **The body is a second writer by design.** Serialize writes against the agent's
+  processes yourself: an `O_EXCL` lock file in the directory works, because both Pods run
+  on one node against one filesystem.
+- **Same placement price as `jobCheckouts`.** The required same-node affinity applies, so a
+  tick while the agent Pod is missing is lost as a `DeadlineExceeded` Job.
+- **The directory should already exist.** If it doesn't, the kubelet creates it on first
+  mount.
+
 ### A job that keeps its home between runs
 
 A job Pod's home is part of the container, so anything a body writes under `HOME` is gone
