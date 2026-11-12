@@ -16,6 +16,9 @@ start=$SECONDS
 
 # a job timeout or cancel must not leave the log empty
 on_interrupt() {
+  # stop the command too: bash does not forward the signal, and SIGINT is ignored in background jobs
+  kill -TERM "$child" 2>/dev/null
+  wait "$child" 2>/dev/null
   echo "interrupted: $label after $((SECONDS - start))s; output so far:" >&2
   tail -n 200 "$log" >&2
   exit 143
@@ -23,7 +26,8 @@ on_interrupt() {
 trap on_interrupt INT TERM
 
 "$@" >"$log" 2>&1 &
-wait $!
+child=$!
+wait "$child"
 status=$?
 
 if [[ $status -ne 0 ]]; then
