@@ -127,24 +127,50 @@ bundle.
 {{- end -}}
 
 {{/*
-Whether this agent's scheduled local jobs mount any part of its claim. One definition,
-because the volume and the required same-node affinity must agree: a job Pod that mounts
-the ReadWriteOnce claim without the affinity waits behind a `Multi-Attach` event forever.
+Whether this job's Pod mounts any part of the agent's claim. One definition, because the
+volume and the required same-node affinity must agree: a job Pod that mounts the
+ReadWriteOnce claim without the affinity waits behind a `Multi-Attach` event forever.
+Checkouts and the index are per agent; state directories are per named job, so a job that
+does not need the agent's state neither gets write access to it nor loses ticks when the
+agent Pod is away. Takes (dict "agent" $agent "job" $job).
 */}}
 {{- define "agent.sharesClaimWithJobs" -}}
-{{- if or .persistence.jobCheckouts .persistence.jobCodeIndex .persistence.jobStateDirs }}true{{- end }}
+{{- $p := .agent.persistence -}}
+{{- if or $p.jobCheckouts $p.jobCodeIndex (include "agent.jobSharesState" .) }}true{{- end }}
+{{- end -}}
+
+{{- define "agent.jobSharesState" -}}
+{{- if has .job.slug (dig "jobStateDirs" "jobs" list .agent.persistence) }}true{{- end }}
 {{- end -}}
 
 {{/*
-Refuses a `persistence.jobStateDirs` entry naming the agent's own home. `/agents/<name>`
-holds the bundle (a prompt job's steering), `state.json` and the local memory vault; a
-writable mount of it would hand all three to a job body. The schema already limits each
-entry to one path segment, so the home is the only private directory an entry could name.
+Refuses a `persistence.jobStateDirs` that cannot mean what it says.
+
+A dir naming the agent's own home: `/agents/<name>` holds the bundle (a prompt job's
+steering), `state.json` and the local memory vault, and a writable mount of it would hand
+all three to a job body. The schema already limits each dir to one path segment, so the
+home is the only private directory one could name.
+
+A job that is not a scheduled local command job of this agent: the mount would silently
+never happen (a typo, a prompt job, a worker), and a body that reads its queue from an
+empty directory passes green forever.
 */}}
 {{- define "agent.assertJobStateDirs" -}}
-{{- range $dir := .agent.persistence.jobStateDirs }}
+{{- $state := .agent.persistence.jobStateDirs -}}
+{{- if $state }}
+{{- range $dir := $state.dirs }}
 {{- if eq $dir $.name }}
-{{- fail (printf "agents.%s.persistence.jobStateDirs names %s, the agent's own home: it holds the bundle, state.json and the memory vault, none of which a job body may write. Keep shared state in a sibling directory such as .%s-state." $.name $dir $.name) }}
+{{- fail (printf "agents.%s.persistence.jobStateDirs.dirs names %s, the agent's own home: it holds the bundle, state.json and the memory vault, none of which a job body may write. Keep shared state in a sibling directory such as .%s-state." $.name $dir $.name) }}
+{{- end }}
+{{- end }}
+{{- range $slug := $state.jobs }}
+{{- $ok := false }}
+{{- range $job := $.agent.jobs }}
+{{- if and (eq $job.slug $slug) (not $job.prompt) (not $job.worker) $job.trigger.schedules }}{{ $ok = true }}{{ end }}
+{{- end }}
+{{- if not $ok }}
+{{- fail (printf "agents.%s.persistence.jobStateDirs.jobs names %s, which is not a scheduled local command job of this agent (declared in jobs[] with a schedule, no prompt, no worker). Nothing would be mounted for it." $.name $slug) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end -}}
@@ -167,8 +193,8 @@ entry to one path segment, so the home is the only private directory an entry co
 {{- /* Writable, unlike the two above: these directories hold state the body and the agent
 both keep (a work queue, a cache), so the body is a writer by design and must serialize its
 own writes against the agent's. Siblings of the agent's home, never inside it. */}}
-{{- if and .job (not .job.worker) }}
-{{- range $dir := .agent.persistence.jobStateDirs }}
+{{- if and .job (not .job.worker) (include "agent.jobSharesState" .) }}
+{{- range $dir := .agent.persistence.jobStateDirs.dirs }}
 - name: checkouts
   mountPath: /agents/{{ $dir }}
   subPath: {{ $dir }}
@@ -265,7 +291,7 @@ No volume at all is the case where the bundle rides inside `bundle.stageImage` i
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}
 {{- end }}
-{{- if and .job (not .job.worker) (include "agent.sharesClaimWithJobs" .agent) }}
+{{- if and .job (not .job.worker) (include "agent.sharesClaimWithJobs" .) }}
 - name: checkouts
   persistentVolumeClaim:
     claimName: {{ include "agent.claimName" . }}

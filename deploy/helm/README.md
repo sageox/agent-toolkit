@@ -506,14 +506,21 @@ cache the agent fills saves the body a model call. On a `ReadWriteOnce` claim th
 out of a job Pod's reach, and the usual way out, a `sharedVolumes` claim two Pods can mount,
 needs `ReadWriteMany` storage or moving the data. `persistence.jobStateDirs` names
 directories at the root of the agent's own claim and mounts each one **read-write** at
-`/agents/<dir>` in this agent's scheduled local command jobs:
+`/agents/<dir>` in the scheduled local command jobs it names:
 
 ```yaml
 agents:
   ashby:
     persistence:
-      jobStateDirs: [".screening-state"]
+      jobStateDirs:
+        jobs: ["daily-screening"]
+        dirs: [".screening-state"]
 ```
+
+- **Only the named jobs.** Any other job gets neither the mount nor the affinity, so it
+  can't write the agent's state and doesn't lose ticks when the agent Pod is away. A name
+  that is not a scheduled local command job of this agent is refused: a typo, an
+  on-request job or a prompt job would otherwise be silently left unmounted.
 
 - **Siblings of the agent's home, never inside it.** Each entry is one path segment, and
   the agent's own name is refused: `/agents/<name>` holds the bundle, `state.json` and the
