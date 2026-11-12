@@ -20,6 +20,13 @@ The tool policy is not admitting them. `./bin/sageox-agent doctor` names the exa
 that are missing. This is almost always the namespacing above. The log says which call it
 was and which rule stopped it: grep `tool_call` for `outcome=refused`.
 
+**It answered as though it could not see the thread it was asked in.**
+Check the log for `thread_read_failed` beside that turn: `error` names the cause. On Slack,
+`missing_scope` means the app lacks the history scope for that kind of conversation, and a
+timeout means Slack's client was still waiting out a rate limit or retrying when the 10
+seconds ran out. A turn with no `thread_read` line at all was for a message that was not in a
+thread.
+
 **`tool_call … outcome=refused` you did not expect.**
 Something asked for a capability it does not hold. Once is a bundle with a line missing —
 `reason` says which gate answered: the policy, the server's `scope`, or the leak scan.
@@ -39,6 +46,16 @@ it may ever arm or delete a switch.
 **`turn_failed` in the log.**
 Brain-side. The error follows on the same line. A turn that exceeds `limits.turnTimeoutMs`
 (default 120s) is cancelled rather than wedging the gateway.
+
+**`tool_call_stranded` in the log.**
+A tool call is still running with no turn left to hear it, so its answer reaches nobody —
+and the brain, cut off before it arrived, will have said whatever it could without it. The
+call is not cancelled: it finishes and writes its own `tool_call` line afterwards, reading
+`ok` if it worked, which is why this line exists at all. It names no turn, because a
+`tools/call` carries nothing that says which turn made it; the `turn_done` and `turn_failed`
+lines just above it are where to look. Either the call is slower than `limits.turnTimeoutMs`
+and that number should go up, or the work belongs in a job with a `report` destination,
+which answers after the turn by design.
 
 **The team brain says it could not read team memory.**
 It will not tell you what `ox` said, and that is deliberate: a failing `ox query` can quote

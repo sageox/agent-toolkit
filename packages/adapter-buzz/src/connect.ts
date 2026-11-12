@@ -46,6 +46,38 @@ const AUTH_GRACE_MS = 1500;
 /** NIP-01 framing of the challenge: `["AUTH", "<challenge>"]`. */
 const AUTH_FRAME = /^\s*\[\s*"AUTH"/;
 
+/**
+ * The NIP-OA owner-attestation tag from `BUZZ_AUTH_TAG`, or `undefined`.
+ *
+ * A public `["auth", <owner_pubkey_hex>, <conditions>, <sig_hex>]` tag the owner
+ * mints with their secret (the tag itself carries no secret). When present it is
+ * appended to the NIP-42 AUTH event below, so the relay materializes the agent's
+ * owner on authentication and clients render "managed by \<owner\>" instead of
+ * "owner unavailable". This mirrors the Rust harness's `send_auth_response`
+ * (block/buzz `crates/buzz-acp/src/relay.rs`), which the TS runtime never ported.
+ *
+ * A missing, empty, or malformed value is ignored, not fatal — the relay is the
+ * authority on the signature, so shape validation here only avoids sending an
+ * obviously-broken tag. The agent simply stays unattested.
+ */
+export function ownerAuthTag(raw: string | undefined = process.env.BUZZ_AUTH_TAG): string[] | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 4 || !parsed.every((x) => typeof x === "string")) {
+    return undefined;
+  }
+  const [label, owner, , sig] = parsed as string[];
+  if (label !== "auth" || !/^[0-9a-f]{64}$/.test(owner) || !/^[0-9a-f]{128}$/.test(sig)) {
+    return undefined;
+  }
+  return parsed as string[];
+}
+
 export async function connectAuthenticated(
   relayUrl: string,
   signer: Signer,
@@ -72,9 +104,17 @@ export async function connectAuthenticated(
     onChallenge = resolve;
   });
 
+  const authTag = ownerAuthTag();
+
   const answer = async (): Promise<Omit<ConnectResult, "relay">> => {
     try {
-      await relay.auth((evt: EventTemplate) => signer.signEvent(evt));
+      await relay.auth((evt: EventTemplate) =>
+        // nostr-tools builds the kind-22242 AUTH event with `relay` + `challenge`
+        // tags; the NIP-OA owner tag rides alongside them, exactly as the relay's
+        // membership-delegation fallback expects. Copy rather than mutate the
+        // template the library handed us.
+        signer.signEvent(authTag ? { ...evt, tags: [...evt.tags, authTag] } : evt),
+      );
       return { authenticated: true };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);

@@ -160,9 +160,24 @@
       ],
       "properties": {
         "authTag": {
-          "type": "string",
-          "minLength": 1,
-          "description": "NIP-OA owner attestation tag (JSON array, public) injected as BUZZ_AUTH_TAG into the agent Deployment and scheduled job hosts, binding the agent to its owner. Minted with the owner secret; the tag itself is not a secret. Omit to leave the agent 'owner unavailable'."
+          "description": "NIP-OA owner attestation tag [\"auth\", <owner pubkey hex>, <conditions>, <sig hex>], public, injected as JSON in BUZZ_AUTH_TAG into the agent Deployment and scheduled job hosts, binding the agent to its owner. Give it as a YAML list or as the JSON string a minted tag prints as. Minted with the owner secret; the tag itself is not a secret. Omit to leave the agent 'owner unavailable'.",
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^\\s*\\[\\s*\"auth\"\\s*,\\s*\"[0-9a-f]{64}\"\\s*,\\s*\"([^\"\\\\]|\\\\.)*\"\\s*,\\s*\"[0-9a-f]{128}\"\\s*\\]\\s*$"
+            },
+            {
+              "type": "array",
+              "prefixItems": [
+                { "const": "auth" },
+                { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                { "type": "string" },
+                { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+              ],
+              "minItems": 4,
+              "maxItems": 4
+            }
+          ]
         },
         "workEvents": {
           "type": "boolean",
@@ -229,6 +244,29 @@
             "jobCodeIndex": {
               "type": "boolean",
               "description": "Mount workspace/ox-data read-only into this agent's CronJob Pods. Implies the checkout mount and required same-node affinity even when jobCheckouts is false. Default false. Applies only to scheduled local command jobs, not external workers or prompt jobs. Requires ox 0.15.0 or newer, included in the current runtime image. The body must set XDG_DATA_HOME to the mounted directory, run code commands from a checkout, and check index readiness; see the job body contract."
+            },
+            "jobHome": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["size", "jobs", "paths"],
+              "description": "Persistent data directories under HOME (/home/agent) for the scheduled local command jobs named in jobs: a ReadWriteOncePod claim kept on uninstall, mounted once per entry of paths by subPath. Holds what a job keeps between runs, such as a coding harness's transcripts and ox's Ledger clones and upload queue; the rest of HOME stays ephemeral. Every listed directory is input that earlier runs could write. The named jobs take turns on the claim; see the chart README for the stuck-Terminating unstick step.",
+              "properties": {
+                "size": { "type": "string", "minLength": 1 },
+                "paths": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "description": "Directories relative to HOME, for example .claude/projects or .local/share/sageox. The chart refuses a path that is, holds or sits inside a location tools read as config or instructions, such as .config, .gitconfig or .claude/settings.json.",
+                  "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$" }
+                },
+                "storageClass": { "type": "string", "minLength": 1, "description": "Defaults to gp3." },
+                "jobs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" }
+                }
+              }
             }
           }
         },

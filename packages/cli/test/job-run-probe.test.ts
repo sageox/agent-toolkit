@@ -6,9 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   BUZZ_DEFAULTS,
   generateKeypair,
+  LocalRelay,
   resolveBuzzSigner,
 } from "@sageox/agent-toolkit-adapter-buzz";
-import { FakeRelay } from "../../adapter-buzz/test/fake-relay.ts";
 import { CLI, run as exec } from "./cli-harness.ts";
 
 /**
@@ -28,7 +28,7 @@ const now = Math.floor(Date.now() / 1000);
 let home: string;
 let bundle: string;
 let secrets: string;
-let relay: FakeRelay;
+let relay: LocalRelay;
 
 /** A line somebody else left in the report channel, before this run existed. */
 async function inChannel(text: string, at: number) {
@@ -106,7 +106,7 @@ const runAnnounce = async () => {
 };
 
 beforeEach(async () => {
-  relay = await FakeRelay.start({ backlog: [await inChannel("new: item-41", now - 60)] });
+  relay = await LocalRelay.start({ backlog: [await inChannel("new: item-41", now - 60)] });
   home = mkdtempSync(join(tmpdir(), "sageox-agent-job-probe-"));
   bundle = join(home, "demo");
   secrets = join(home, "secrets");

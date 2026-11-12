@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { tokenMatches, originAllowed, type HostedMcp } from "../src/mcp-http.ts";
-import { serveTeamBrain, oxEnv, oxCwd, type TeamOx, type TeamSearch } from "../src/team-server.ts";
-import { homedir } from "node:os";
+import { serveTeamBrain, oxClientId, oxEnv, oxCwd, type TeamOx, type TeamSearch } from "../src/team-server.ts";
+import { devNull, homedir } from "node:os";
 
 let hosted: HostedMcp | undefined;
 afterEach(async () => {
@@ -150,12 +150,30 @@ describe("ox credential handling", () => {
       XDG_STATE_HOME: "/state", XDG_RUNTIME_DIR: "/run", SAGEOX_ENDPOINT: "https://sageox.ai",
     };
     expect(oxEnv({}, base)).toEqual({ ...base, SAGEOX_DAEMON: "false", OX_NO_DAEMON: "1" });
-    expect(oxEnv({ configHome: "/mounted-auth", dataHome: "/agent-data" }, base)).toMatchObject({
-      XDG_CONFIG_HOME: "/mounted-auth", XDG_DATA_HOME: "/agent-data", XDG_CACHE_HOME: "/agent-data/cache",
+    expect(oxEnv({ dataHome: "/agent-data" }, base)).toMatchObject({
+      XDG_CONFIG_HOME: "/config", XDG_DATA_HOME: "/agent-data", XDG_CACHE_HOME: "/agent-data/cache",
       XDG_STATE_HOME: "/state", XDG_RUNTIME_DIR: "/run",
     });
     expect(base.XDG_CONFIG_HOME).toBe("/config");
     expect(base.XDG_DATA_HOME).toBe("/data");
+  });
+
+  it("leaves ox's usage telemetry on unless the operator turned it off", () => {
+    expect(oxEnv({ token: () => "oxt_agent" }, { PATH: "/usr/bin" }).DO_NOT_TRACK).toBeUndefined();
+    expect(oxEnv({ token: () => "oxt_agent" }, { DO_NOT_TRACK: "1" }).DO_NOT_TRACK).toBe("1");
+  });
+
+  it("gives ox the agent's telemetry ID, never one it inherited", () => {
+    const inherited = { SAGEOX_CLIENT_ID: "someone-elses" };
+    expect(oxEnv({ token: () => "oxt_agent", clientId: "agent-id" }, inherited).SAGEOX_CLIENT_ID).toBe("agent-id");
+    expect(oxEnv({ token: () => "oxt_agent" }, inherited).SAGEOX_CLIENT_ID).toBeUndefined();
+  });
+
+  it("derives the telemetry ID from team and agent name alone", () => {
+    // Pinned: a changed derivation re-counts every deployed agent as a new install.
+    expect(oxClientId("team_x", "harry")).toBe("b683e77d-2c81-80e6-b6d6-0c3079e38931");
+    expect(oxClientId("team_y", "harry")).not.toBe(oxClientId("team_x", "harry"));
+    expect(oxClientId("team_x", "ida")).not.toBe(oxClientId("team_x", "harry"));
   });
 
   it("passes a token supplied out-of-band, for containers with no interactive login", () => {
@@ -173,21 +191,31 @@ describe("ox credential handling", () => {
 
   it("adds no credential when the secret is not there to read, rather than an empty one", () => {
     // What `resolveSecret` returns for an unmounted ref. `SAGEOX_TOKEN=` would be a
-    // credential as far as ox is concerned, and it would lose to the auth file silently.
+    // credential as far as ox is concerned.
     expect(oxEnv({ token: () => undefined }, {}).SAGEOX_TOKEN).toBeUndefined();
   });
 
-  it("clears an inherited token when the configured ref reads as nothing", () => {
+  it("gives ox no credential at all when the configured ref reads as nothing", () => {
     // The gateway's own environment is not this agent's credential. On a host running
     // several agents each with its own ref, an ambient `SAGEOX_TOKEN` is somebody else's,
-    // and ox would authenticate as them rather than fall back to the auth file.
-    const env = oxEnv({ token: () => undefined, configHome: "/mnt/secrets-store/ox" }, {
+    // and a workstation's `ox login` is whoever runs the gateway: ox would answer normally
+    // as either of them.
+    const env = oxEnv({ token: () => undefined }, {
       SAGEOX_TOKEN: "oxp_someone_else",
+      XDG_CONFIG_HOME: "/home/operator/.config",
       PATH: "/usr/bin",
     });
 
     expect(env.SAGEOX_TOKEN).toBeUndefined();
-    expect(env).toMatchObject({ XDG_CONFIG_HOME: "/mnt/secrets-store/ox", PATH: "/usr/bin" });
+    expect(env).toMatchObject({ XDG_CONFIG_HOME: devNull, PATH: "/usr/bin" });
+  });
+
+  it("keeps ox off any login on disk even with a token, which is then all it can use", () => {
+    // ox skips `auth.json` for a token bound to the endpoint it calls, and reads it for any
+    // other. An agent never runs `ox login`, so that file is never the agent's.
+    const env = oxEnv({ token: () => "oxt_agent" }, { XDG_CONFIG_HOME: "/home/operator/.config" });
+
+    expect(env).toMatchObject({ SAGEOX_TOKEN: "oxt_agent", XDG_CONFIG_HOME: devNull });
   });
 
   it("leaves an inherited token alone when no ref is configured at all", () => {
@@ -196,20 +224,10 @@ describe("ox credential handling", () => {
     expect(oxEnv({ team: "team_x" }, { SAGEOX_TOKEN: "oxp_mine" }).SAGEOX_TOKEN).toBe("oxp_mine");
   });
 
-  it("points ox at a mounted auth file when given one", () => {
-    const env = oxEnv({ configHome: "/mnt/secrets-store/ox" }, { PATH: "/usr/bin" });
-    expect(env.XDG_CONFIG_HOME).toBe("/mnt/secrets-store/ox");
-  });
-
   it("adds no credential when none is configured, so nothing rides along by accident", () => {
     const env = oxEnv({ team: "team_x" }, { PATH: "/usr/bin" });
     expect(env.SAGEOX_TOKEN).toBeUndefined();
     expect(env.XDG_CONFIG_HOME).toBeUndefined();
-  });
-
-  it("supports both at once — the token wins in ox, and both are the gateway's to hold", () => {
-    const env = oxEnv({ token: () => "tok_abc", configHome: "/mnt/secrets-store/ox" }, {});
-    expect(env).toMatchObject({ SAGEOX_TOKEN: "tok_abc", XDG_CONFIG_HOME: "/mnt/secrets-store/ox" });
   });
 });
 

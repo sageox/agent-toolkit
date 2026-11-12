@@ -1,12 +1,14 @@
 import type { AgentManifest } from "./manifest.ts";
 import type { SurfaceAdapter } from "./adapter.ts";
 import type { Brain, BrainContext, GuardFeedback } from "./brain.ts";
-import type { GuardedMessage, InboundEvent } from "./events.ts";
+import type { GuardedMessage, InboundEvent, ThreadReply } from "./events.ts";
 import type { ProbeResult } from "./health.ts";
 import { evaluateEgress, type GuardVerdict } from "./guard.ts";
 import { SurfaceEgress, type LiveTurnHandle } from "./surface-egress.ts";
 import { TurnPolicy } from "./policy.ts";
 import { ChannelQueue } from "./queue.ts";
+import { TurnClock } from "./turn-clock.ts";
+import { takeStranded, turnListening } from "./tool-audit.ts";
 
 export interface GatewayOpts {
   manifest: AgentManifest;
@@ -38,6 +40,14 @@ export interface GatewayOpts {
    * has not.
    */
   capabilities?: () => readonly ProbeResult[];
+  /**
+   * Where this gateway publishes the deadline of each turn it runs.
+   *
+   * Written here and read by the job tool, which is built before this is — so a caller that
+   * wires both passes the same one to each. Built here when nobody did, which keeps a
+   * gateway with no job tool from needing to know this exists.
+   */
+  turnClock?: TurnClock;
 }
 
 /**
@@ -63,6 +73,22 @@ export interface TurnTally {
   sent: number;
 }
 
+/**
+ * A tick handed its data instead of the tools to fetch it, whose reply is checked before
+ * anything is posted. See `BrainContext.sealed`.
+ */
+export interface SealedTick {
+  /** The turn's whole brief. */
+  instructions: string;
+  /**
+   * The message a reply becomes, or why it is refused. A refusal goes back to the brain as
+   * the guard's does, so any repair is bounded by the turn's own clock and retry count.
+   */
+  accept(
+    text: string,
+  ): { ok: true; msg: GuardedMessage } | { ok: false; rule: string; reason: string };
+}
+
 /** {@link Gateway.tick}'s answer: whether the turn ran at all, and what it did. */
 export interface TickOutcome extends TurnTally {
   /** Why no turn ran, in {@link Gateway}'s own skip vocabulary. Absent when one did. */
@@ -80,10 +106,12 @@ export class Gateway {
   private policy: TurnPolicy;
   private queue: ChannelQueue;
   private egress: SurfaceEgress;
+  private clock: TurnClock;
   private stoppedReason?: string;
 
   constructor(private opts: GatewayOpts) {
     for (const a of opts.adapters) this.byKind.set(a.kind, a);
+    this.clock = opts.turnClock ?? new TurnClock();
     const limits = opts.manifest.limits;
     this.policy = opts.policy ?? new TurnPolicy(limits);
     this.egress =
@@ -225,11 +253,15 @@ export class Gateway {
    * The answer is a top-level post into `to`, which the guard admits exactly as it admits
    * the brain's own `post_message`: a channel the agent has no consent to speak in is one
    * this cannot reach either.
+   *
+   * With `sealed`, the turn has no tools, and a reply reaches `to` only as the message
+   * `accept` makes of it, once.
    */
   async tick(
     event: InboundEvent,
     to: { surface: string; channel: string },
     timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
+    sealed?: SealedTick,
   ): Promise<TickOutcome> {
     const tally: TurnTally = { asked: 0, sent: 0 };
     if (!this.serving) return { ...tally, skipped: "kill_switch" };
@@ -244,10 +276,19 @@ export class Gateway {
       // turn's late reply threads under the message it answers and contradicts nothing, so
       // this is the scheduled path's to close and not the shared loop's.
       let live = true;
-      const send: Send = async (msg) =>
-        live
-          ? this.egress.postReply(to.surface, to.channel, msg)
-          : { ok: false, rule: "turnEnded", reason: "this tick was recorded before the step arrived" };
+      const send: Send = async (msg) => {
+        if (!live) {
+          const reason = "this tick was recorded before the step arrived";
+          return { ok: false, rule: "turnEnded", reason };
+        }
+        if (!sealed) return this.egress.postReply(to.surface, to.channel, msg);
+        // A second answer is a second copy of what was already posted, not a correction.
+        if (tally.sent) {
+          return { ok: false, rule: "answered", reason: "this turn has already posted its answer" };
+        }
+        const accepted = sealed.accept(msg.text);
+        return accepted.ok ? this.egress.postReply(to.surface, to.channel, accepted.msg) : accepted;
+      };
 
       this.queue.submit(`${event.surface}:${event.channel.id}`, async () => {
         const started = Date.now();
@@ -258,8 +299,10 @@ export class Gateway {
           console.info(
             `tick_start surface=${event.surface} channel=${event.channel.id} author=${event.author.id}`,
           );
-          const scheduled = true; // the prompt is the bundle's, so the turn is not fenced
-          await this.runTurn(event, send, tally, timeoutMs, scheduled);
+          await this.runTurn(event, send, tally, timeoutMs, {
+            scheduled: true, // the prompt is the bundle's, so the turn is not fenced
+            sealed: sealed?.instructions,
+          });
           console.info(
             `tick_done surface=${event.surface} channel=${event.channel.id} ` +
               `author=${event.author.id} sent=${tally.sent} ms=${Date.now() - started}`,
@@ -280,6 +323,58 @@ export class Gateway {
         }
       // Shed rather than run: the queue is full of live chat in this channel, which is the
       // `channelQueueLimit` cap doing its job. The tick is owed a record either way.
+      }, () => resolve({ ...tally, skipped: "limit:channelQueueLimit" }));
+    });
+  }
+
+  /**
+   * A tick's answer that needed no turn: a job posting what the host already knows.
+   *
+   * {@link tick}'s door without the brain — the kill switch, the caps, and the destination
+   * channel's queue — so one job's output is admitted the same way whether or not a turn
+   * wrote it. A digest's empty-window notice would otherwise post while a real digest in
+   * the same channel was being rate-limited, shed, or held behind a live conversation.
+   *
+   * `timeoutMs` bounds the whole of it rather than the post alone, because the caller has
+   * nothing else to spend it on: a line queued behind a busy channel until after its tick's
+   * clock ran out is yesterday's news, and is dropped rather than published late.
+   */
+  async say(
+    event: InboundEvent,
+    to: { surface: string; channel: string },
+    text: string,
+    timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
+  ): Promise<TickOutcome> {
+    const tally: TurnTally = { asked: 0, sent: 0 };
+    if (!this.serving) return { ...tally, skipped: "kill_switch" };
+    const admission = this.policy.admit(event);
+    if (!admission.ok) return { ...tally, skipped: `limit:${admission.rule}` };
+
+    // Taken before the queue, which is the wait this has to survive.
+    const ends = Date.now() + timeoutMs;
+    return new Promise<TickOutcome>((resolve) => {
+      this.queue.submit(`${event.surface}:${event.channel.id}`, async () => {
+        const left = ends - Date.now();
+        if (left <= 0) return resolve({ ...tally, skipped: "deadline" });
+        tally.asked++;
+        try {
+          const verdict = await withTimeout(
+            this.egress.postReply(to.surface, to.channel, { text }),
+            left,
+            `the post did not finish in ${left}ms`,
+          );
+          if (verdict.ok) tally.sent++;
+          else {
+            console.warn(
+              `egress_blocked surface=${event.surface} channel=${event.channel.id} ` +
+                `rule=${verdict.rule} reason="${verdict.reason}"`,
+            );
+          }
+          resolve(tally);
+        } catch (error) {
+          // A post that threw may still have landed, so the caller records it as unknown.
+          resolve({ ...tally, error });
+        }
       }, () => resolve({ ...tally, skipped: "limit:channelQueueLimit" }));
     });
   }
@@ -389,24 +484,53 @@ export class Gateway {
     send: Send,
     tally: TurnTally = { asked: 0, sent: 0 },
     timeoutMs = this.opts.manifest.limits.turnTimeoutMs,
-    scheduled = false,
+    tick: Pick<BrainContext, "scheduled" | "sealed"> = {},
   ): Promise<TurnTally> {
+    const thread = await this.threadOf(e);
     const turn = this.opts.brain.runTurn(e, {
       agentName: this.opts.manifest.name,
       persona: this.opts.persona,
       memory: this.opts.memory,
       postMessage: this.opts.postMessage,
       react: this.opts.react,
-      scheduled,
+      ...tick,
       capabilities: this.opts.capabilities?.(),
+      thread,
     });
+    // Published for exactly as long as the bound below applies, and from here rather than
+    // from `limits.turnTimeoutMs`, because this is the only place that knows both which
+    // turn is running and which of the two numbers it was given — a scheduled tick arrives
+    // with its own, shorter one.
+    const closeClock = this.clock.open(Date.now() + timeoutMs);
+    const closeAudit = turnListening();
+    // Held until the brain's own work settles, not until the bound below gives up on it: a
+    // prompt abandoned by the timeout can still call tools, and the live-turn stamp must not
+    // credit those calls to whichever turn is live by then. See `SurfaceEgress.callerEvent`.
+    const closePrompt = this.egress.prompting(e);
+    const prompted = Date.now();
+    let prompting = true;
+    const settled = () => {
+      prompting = false;
+      closePrompt();
+    };
+    // Registered before the bound below, so a turn that settles runs this first and the
+    // `finally` sees it done.
+    const driving = this.drive(turn, e, send, tally);
+    void driving.then(settled, settled);
     try {
-      return await withTimeout(
-        this.drive(turn, e, send, tally),
-        timeoutMs,
-        `turn timed out after ${timeoutMs}ms`,
-      );
+      return await withTimeout(driving, timeoutMs, `turn timed out after ${timeoutMs}ms`);
     } finally {
+      closeClock();
+      closeAudit();
+      this.reportStranded();
+      // Said once, here, because nothing else will: until this prompt ends, every stamped
+      // tool call names nobody, and a server refusing `null` refuses them all.
+      if (prompting) {
+        console.warn(
+          `prompt_outlived_turn surface=${e.surface} channel=${e.channel.id} event=${e.id.nativeId} ` +
+            `ms=${Date.now() - prompted} prompts=${this.egress.promptsRunning()}`,
+        );
+      }
       // An abandoned generator never runs its own `finally`, so the brain would never
       // close its ACP session on a failed send or a timeout. Returning it does.
       //
@@ -414,6 +538,72 @@ export class Gateway {
       // resumed, so awaiting its return would hang exactly where the timeout was meant
       // to rescue us. Cleanup runs if it can; releasing the channel does not wait for it.
       void turn.return(undefined).catch(() => {});
+    }
+  }
+
+  /**
+   * The thread `e` was posted in, or nothing when it is in none or the read failed.
+   *
+   * A failure never reaches the turn: an answer without the thread beats no answer, and the
+   * prompt tells the brain the thread could not be read. The read runs before the turn's clock
+   * starts, so it has a bound of its own — Slack's client waits out a rate limit and retries a
+   * failed call for about half an hour, and this channel's queue waits with it.
+   */
+  private async threadOf(e: InboundEvent): Promise<readonly ThreadReply[] | undefined> {
+    const adapter = this.byKind.get(e.surface);
+    if (!e.threadRoot || !adapter?.readThreadBefore) return undefined;
+    const where = `surface=${e.surface} channel=${e.channel.id} event=${e.id.nativeId}`;
+    const started = Date.now();
+    const done = new AbortController();
+    try {
+      const thread = await withTimeout(
+        adapter.readThreadBefore(e, done.signal),
+        THREAD_READ_TIMEOUT_MS,
+        `the thread read did not finish in ${THREAD_READ_TIMEOUT_MS}ms`,
+      );
+      console.info(`thread_read ${where} messages=${thread.length} ms=${Date.now() - started}`);
+      return thread;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "unknown";
+      console.warn(`thread_read_failed ${where} ms=${Date.now() - started} error="${reason}"`);
+      return undefined;
+    } finally {
+      // Nothing reads the answer past here. A read still paging after a timeout would keep
+      // calling Slack while it rate-limits, and its client pauses every call behind a 429.
+      done.abort();
+    }
+  }
+
+  /**
+   * The calls left running once this gateway has no turn left to hear them.
+   *
+   * A turn that times out releases its channel and abandons the generator, but a tool call
+   * already in flight keeps going and answers into nothing. Its own audit line is written
+   * when it finally lands, reads `outcome=ok`, and cannot know that: by then the turn is
+   * over. Without this line the only trace of the whole failure is whatever the brain said
+   * in the channel before it was cut off — issue #44, where that was a message telling two
+   * people a job had produced nothing, three seconds before the job posted its result.
+   *
+   * Written here because the audit decides *what* — it holds the calls and the count of
+   * turns still able to read one — while this is what turns that into a log line. The tool
+   * name is the caller's and is quoted, as the audit quotes it.
+   *
+   * **No turn ids on the line, and nothing at all until every turn has ended.** Both follow
+   * from the one thing that is not knowable here: a `tools/call` names no turn, so with two
+   * channels mid-turn nothing can say whose call is whose. Reporting at the end of *a* turn
+   * would therefore have blamed whichever turn happened to finish last — a line pointing at
+   * a turn that never made the call, which is worse than no line. What is left that is
+   * checkable is the process-wide claim, and it is the one that matters: this call is still
+   * running and there is nothing left to read its answer. An operator reads it against the
+   * `turn_done` and `turn_failed` lines immediately above it.
+   *
+   * The cost is that a call stranded while another channel is still busy is named later than
+   * it happened, and one that lands in that window is not named at all. Late and true beats
+   * prompt and wrong in an audit log.
+   */
+  private reportStranded(): void {
+    for (const { tool, ms } of takeStranded()) {
+      console.warn(`tool_call_stranded tool=${JSON.stringify(tool)} ms=${ms}`);
     }
   }
 
@@ -465,6 +655,9 @@ export class Gateway {
 
 /** Buzz's typing indicator is ephemeral; upstream refreshes it on this cadence. */
 const TYPING_REFRESH_MS = 3_000;
+
+/** Past the Buzz adapter's own 5s read timeout, so a silent relay is logged with its reason. */
+const THREAD_READ_TIMEOUT_MS = 10_000;
 
 /** Rejects if `work` has not settled in time. `work` itself keeps running; only the wait ends. */
 export async function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {

@@ -7,7 +7,7 @@ import { admitJob, loadManifest, type JobConfig } from "@sageox/agent-toolkit-co
 import { EngramStore } from "../src/engram.ts";
 import { resolveBuzzSigner } from "../src/identity.ts";
 import { engramSwitchSource, type EngramSwitchConfig } from "../src/kill-switch.ts";
-import { FakeRelay } from "./fake-relay.ts";
+import { LocalRelay } from "../src/local-relay.ts";
 
 const KEY = "mem/sweep/enabled";
 
@@ -23,7 +23,7 @@ function job(failDirection: "open" | "closed"): JobConfig {
 }
 
 const stores: EngramStore[] = [];
-const relays: FakeRelay[] = [];
+const relays: LocalRelay[] = [];
 
 afterEach(async () => {
   for (const store of stores.splice(0)) store.close();
@@ -31,7 +31,7 @@ afterEach(async () => {
 });
 
 async function setup(relayOpts: { withholdEose?: boolean; rejectAuth?: boolean } = {}) {
-  const relay = await FakeRelay.start({ requireAuth: true, ...relayOpts });
+  const relay = await LocalRelay.start({ requireAuth: true, ...relayOpts });
   relays.push(relay);
   const signer = await resolveBuzzSigner("TEST_NSEC", {
     env: { TEST_NSEC: nip19.nsecEncode(generateSecretKey()) },

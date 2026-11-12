@@ -7,7 +7,7 @@ yours to run.**
 
 [![CI](https://github.com/sageox/agent-toolkit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sageox/agent-toolkit/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/sageox/agent-toolkit?sort=semver)](https://github.com/sageox/agent-toolkit/releases)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](.mise.toml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
@@ -110,9 +110,9 @@ The **team brain** gives the agent read-only search over your team's own recorde
 | `team_sessions` | Bounded session listings for a configured repository with verified recent ledger sync |
 | `team_recent` | Recent coworker work updates and session activity from a verified fresh ledger |
 
-Session listing and recent activity require a fresh local ledger. Configure optional
-[gateway sync](docs/guide/reference.md#optional-ledger-sync) using an existing Git secret,
-or supply an externally supervised ox checkout and its refresh receipt.
+Session listing and recent activity read a local ledger that the gateway
+[syncs over the team token](docs/guide/reference.md#ledger-sync) when either tool is granted,
+and each read first confirms with SageOx that the token may still read that repository.
 A successful search does not establish ledger availability or freshness.
 
 **It reads; it does not write.** An agent that can write to team memory is an agent whose
@@ -134,14 +134,17 @@ ox teams                     # the teams you belong to, with their IDs
 
 Other install methods: [ox install docs](https://github.com/sageox/ox#install).
 
-**2. Create a personal access token** at
-[sageox.ai/settings/tokens](https://sageox.ai/settings/tokens) — prefixed `oxp_`, shown
-once — and put it in the agent bundle's `.env` as `SAGEOX_TOKEN`.
+**2. Create an access token** and put it in the agent bundle's `.env` as `SAGEOX_TOKEN`.
+A team access token (prefixed `oxt_`, issued from the team's settings on sageox.ai) is what
+`team_sessions` and `team_recent` need. A personal access token (prefixed `oxp_`, from
+[sageox.ai/settings/tokens](https://sageox.ai/settings/tokens)) answers `team_search` only.
+Either is shown once.
 
-**The agent always authenticates with a PAT**, on your workstation and in a container
-alike: the token takes precedence over anything on disk, so the manifest you test locally
-is the one you deploy. Never give the agent the token from your own `ox login` — that one
-expires within hours and cannot refresh itself once out of ox's hands.
+**The agent always authenticates with that token**, on your workstation and in a container
+alike: the agent never reads a login from disk, so your own `ox login` is not a fallback
+and the manifest you test locally is the one you deploy. Never give the agent the token
+from your own `ox login` — that one expires within hours and cannot refresh itself once out
+of ox's hands.
 
 **3. Add the brain.**
 
@@ -206,12 +209,12 @@ Not built yet:
   filesystem. Credentials are kept out of its *environment*, but that is not a filesystem
   boundary.
 
-The toolkit is the **SageOx Agent Toolkit**, which is what its packages are published as
-(`@sageox/agent-toolkit-*`) and what the repository is called. A slug leading with one
-surface would misdescribe a runtime that carries several, and no shipped artifact carries
-the repository's name either — the image is `ghcr.io/sageox/agent-base`, the CLI is
-`sageox-agent`, the chart is `agent`. See [`docs/naming.md`](docs/naming.md) before naming
-anything that leaves this repository.
+The toolkit is the **SageOx Agent Toolkit**, which is what its packages are named
+(`@sageox/agent-toolkit-*`, not published yet) and what the repository is called. A slug
+leading with one surface would misdescribe a runtime that carries several, and no shipped
+artifact carries the repository's name either — the image is `ghcr.io/sageox/agent-base`,
+the CLI is `sageox-agent`, the chart is `agent`. See [`docs/naming.md`](docs/naming.md)
+before naming anything that leaves this repository.
 
 ## Key decisions
 
@@ -263,4 +266,4 @@ TypeScript · pnpm workspaces · Vitest · zod (manifest) · nostr-tools (Buzz) 
 
 ## License
 
-Apache License 2.0 © 2026 SageOx Inc. See [LICENSE](LICENSE).
+MIT License © 2026 SageOx Inc. See [LICENSE](LICENSE).

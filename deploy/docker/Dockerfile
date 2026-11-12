@@ -9,7 +9,10 @@
 # and secrets that arrive as mounted files.
 
 # ---- dependencies ------------------------------------------------------------
-FROM node:22.23.2-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS deps
+FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS deps
+# Docker pulls by the digest and ignores the tag beside it, so a stale digest under a new tag
+# builds silently. This fails the build when the digest is not the Node named here.
+RUN test "$(node --version)" = "v22.23.4"
 WORKDIR /app
 ARG PNPM_VERSION=10.25.0
 RUN corepack enable \
@@ -33,38 +36,49 @@ RUN pnpm install --frozen-lockfile --config.node-linker=hoisted --config.strictD
  && ./node_modules/.bin/tsx --version
 
 # ---- runtime -----------------------------------------------------------------
-FROM node:22.23.2-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS runtime
+FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
+RUN test "$(node --version)" = "v22.23.4"
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends age ca-certificates curl git \
+ && apt-get install -y --no-install-recommends age ca-certificates curl git procps tini \
  && rm -rf /var/lib/apt/lists/*
 
 # The gateway runs ox itself — the credential stays on this side of the brain boundary.
 # Pin the release and verify it so rebuilding this image cannot silently install a newer
 # binary. Debian's architecture names match the SageOx release names we support.
-ARG OX_VERSION=0.15.0
+ARG OX_VERSION=0.25.0
 RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) checksum="ca87bf2fe57fd198a61616e44f41d8ead72b6b904dd82559cc2a47936e17a829" ;; \
-      arm64) checksum="86ea6101519676226646b1a3e33175561d234dedbdbb735df9e5225fff930fac" ;; \
+      amd64) checksum="5824ae5bd47d7bcf504eeb8eb54af5e8f1ad585f0c70f61a24cc3fb2e83febe2" ;; \
+      arm64) checksum="9724dbe91e50ee7ab48211e43f279c3091ff1738f3f134922fbbf912334481c5" ;; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     archive="ox_${OX_VERSION}_linux_${arch}.tar.gz"; \
     curl -fsSL "https://github.com/sageox/ox/releases/download/v${OX_VERSION}/${archive}" -o "/tmp/${archive}"; \
     echo "${checksum}  /tmp/${archive}" | sha256sum -c -; \
-    tar -xzf "/tmp/${archive}" -C /usr/local/bin ox; \
+    tar -xzf "/tmp/${archive}" -C /usr/local/bin --wildcards ox 'ox-adapter-*'; \
     rm "/tmp/${archive}"; \
     ox version
 
-# The brains. Installed as real binaries so the gateway does not reach for npx at runtime,
-# which would mean a network fetch on the first turn.
-ARG CLAUDE_AGENT_ACP_VERSION=0.68.0
+# The brains, and the Claude Code CLI for jobs that run it as a coding harness. Installed as
+# real binaries so nothing reaches for npx at runtime, which would mean a network fetch on
+# the first turn. ox's daemon also runs `claude` to summarize a recorded session before it
+# uploads it, so a job that records sessions needs it on PATH.
+#
+# This runs as root before the agent user exists, so npm's cache lands in /root. Installing
+# after `ENV HOME=/home/agent` would leave a root-owned ~/.npm, and every later npx call by
+# the agent user would fail with EACCES. Cleaning the cache keeps its ~400 MB out of the layer.
+ARG CLAUDE_AGENT_ACP_VERSION=0.84.0
 ARG CODEX_ACP_VERSION=1.11.0
+ARG CLAUDE_CODE_VERSION=2.1.284
 RUN npm install -g "@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}" \
       "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude-agent-acp --version \
- && codex-acp --version
+ && codex-acp --version \
+ && test "$(claude --version)" = "${CLAUDE_CODE_VERSION} (Claude Code)" \
+ && npm cache clean --force
 
 WORKDIR /app
 
@@ -106,5 +120,8 @@ RUN --network=none node deploy/docker/test-ox.mjs
 # Secrets arrive as files under /mnt/secrets-store, which is where resolveSecret looks first.
 # Nothing here carries a credential in ENV, because `docker inspect` can read that.
 
-ENTRYPOINT ["/app/bin/sageox-agent"]
+# tini reaps orphaned processes, which Node as PID 1 never does. Since 0.19.0, ox leaves one
+# behind each command it sends usage telemetry for, so without tini every such call would leave
+# a zombie until the container restarts. `-s` makes tini reap them even when it is not PID 1.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/app/bin/sageox-agent"]
 CMD ["doctor"]

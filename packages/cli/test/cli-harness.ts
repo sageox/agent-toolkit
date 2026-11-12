@@ -23,10 +23,19 @@ export async function doctorReport(
   home: string,
   env: NodeJS.ProcessEnv = {},
 ): Promise<string> {
+  return (await doctorRun(home, env)).stdout;
+}
+
+/** The report and the exit status, for a test that cares whether `doctor` would block. */
+export async function doctorRun(
+  home: string,
+  env: NodeJS.ProcessEnv = {},
+): Promise<{ code: number; stdout: string }> {
   try {
     const { stdout } = await runCli(["doctor", "demo"], { AGENT_TOOLKIT_HOME: home, ...env });
-    return stdout;
+    return { code: 0, stdout };
   } catch (error) {
-    return (error as { stdout?: string }).stdout ?? "";
+    const failed = error as { code?: number; stdout?: string };
+    return { code: failed.code ?? -1, stdout: failed.stdout ?? "" };
   }
 }

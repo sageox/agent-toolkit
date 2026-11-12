@@ -89,6 +89,30 @@ const MAX_ARGS = 32;
  */
 const MAX_ITEMS = 8;
 
+/** Calls this process has started and not answered yet. See {@link takeStranded}. */
+const inFlight = new Set<{ tool: string; started: number; told: boolean }>();
+
+/** Turns still able to read a result. See {@link turnListening}. */
+let listening = 0;
+
+/**
+ * Registers a turn for as long as it will read what its calls return.
+ *
+ * Counted here, beside the calls, because the two are halves of one question — *is anyone
+ * left to hear this?* — and the calls are this process's, not any one gateway's. A gateway
+ * counting its own turns answers that question only while it is the only gateway; a second
+ * one ending a turn would then speak for calls the first was still waiting on.
+ *
+ * The returned closer must run on every exit path. A turn that never closes is a turn this
+ * believes is still listening, and nothing is ever reported again.
+ */
+export function turnListening(): () => void {
+  listening++;
+  return () => {
+    listening--;
+  };
+}
+
 /**
  * Runs one tool call and records it, however it ends.
  *
@@ -99,6 +123,11 @@ const MAX_ITEMS = 8;
  */
 export async function auditToolCall<T>(call: ToolCall, run: () => Promise<T>): Promise<T> {
   const started = Date.now();
+  // Held for exactly the span of the call, so the gateway can say what is still running
+  // once nothing is listening. Removed on every path: an entry that outlived its call
+  // would be reported as stranded the next time every turn had ended.
+  const live = { tool: call.tool, started, told: false };
+  inFlight.add(live);
   try {
     const result = await run();
     write(call, "ok", Date.now() - started);
@@ -112,7 +141,39 @@ export async function auditToolCall<T>(call: ToolCall, run: () => Promise<T>): P
       error instanceof Error ? error.message : undefined,
     );
     throw error;
+  } finally {
+    inFlight.delete(live);
   }
+}
+
+/**
+ * The calls still running that nobody has been told about yet, **marking what it returns.**
+ *
+ * A call in flight when the last turn ends has nowhere to answer, and its own line cannot
+ * say so: that line is written whenever the call finally lands, and by then the turn is
+ * gone. `outcome=ok` is the truth about the call and says nothing about the fact that
+ * nobody read it — which is how a job could post a correct result three seconds after the
+ * brain had already told a channel it produced nothing, with a clean log either side.
+ *
+ * Marked, and hence `take`: a call slow enough to outlive one turn is slow enough to
+ * outlive the next two, and an operator reading the same call reported three times has to
+ * work out whether that was one call or three. Reported once, at the first moment it is
+ * true — which is also the earliest anyone could have acted on it.
+ *
+ * Empty while any turn is still listening, because then the claim is not yet true: a call
+ * in flight may be that turn's, and a call names no turn.
+ */
+export function takeStranded(): { tool: string; ms: number }[] {
+  if (listening > 0) return [];
+  const now = Date.now();
+  const stranded = [];
+  for (const call of inFlight) {
+    if (call.told) continue;
+    call.told = true;
+    // Bounded the same way the audit line's is, because it reaches a log line the same way.
+    stranded.push({ tool: boundName(call.tool), ms: now - call.started });
+  }
+  return stranded;
 }
 
 /**

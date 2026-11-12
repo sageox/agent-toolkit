@@ -64,7 +64,11 @@ const allowAll = () =>
     [],
   );
 
-type Declared = { name: string; inputSchema: { properties: { surface: { description: string } } } };
+type Declared = {
+  name: string;
+  description: string;
+  inputSchema: { properties: { surface: { description: string } } };
+};
 
 /** The full tool declarations, for assertions about what a description actually says. */
 async function handleTools(adapter: SurfaceAdapter): Promise<Declared[]> {
@@ -83,21 +87,23 @@ const askableSurfaces = (declared: Declared[]) => [
 function server(adapter: SurfaceAdapter, policy = allowAll()) {
   const egress = new SurfaceEgress({ manifest, adapters: [adapter] });
   const handle = surfaceReadHandler(egress, policy);
+  const callText = async (name: string, args: Record<string, unknown>) => {
+    const result = await handle({
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    });
+    return ((result?.content as Array<{ text: string }>) ?? [])[0]?.text ?? "";
+  };
   return {
     egress,
     tools: async () =>
       (((await handle({ id: 1, method: "tools/list" }))?.tools ?? []) as { name: string }[]).map(
         (tool) => tool.name,
       ),
-    call: async (name: string, args: Record<string, unknown>) => {
-      const result = await handle({
-        id: 1,
-        method: "tools/call",
-        params: { name, arguments: args },
-      });
-      const text = ((result?.content as Array<{ text: string }>) ?? [])[0]?.text ?? "";
-      return JSON.parse(text) as Record<string, unknown>;
-    },
+    callText,
+    call: async (name: string, args: Record<string, unknown>) =>
+      JSON.parse(await callText(name, args)) as Record<string, unknown>,
   };
 }
 
@@ -114,7 +120,7 @@ describe("the surface read server", () => {
     });
     expect(await call("describe_actor", { surface: "buzz", id: IDA.id })).toEqual({ actor: IDA });
     expect(await call("read_channel", { surface: "buzz", channel: "hive" })).toEqual({
-      messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
+      messages: [{ from: "ida", text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
       more: false,
     });
   });
@@ -132,9 +138,88 @@ describe("the surface read server", () => {
     // and "I stopped after one thing" the same answer, which is the whole reason the
     // adapter goes to the trouble of distinguishing them.
     expect(await call("read_channel", { surface: "buzz", channel: "hive" })).toEqual({
-      messages: [{ author: IDA, text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
+      messages: [{ from: "ida", text: "morning", ts: "2026-08-30T09:00:00.000Z" }],
       more: true,
     });
+  });
+
+  it("puts each message on its own line, so a spilled result can be read in chunks", async () => {
+    const messages = [
+      { author: IDA, text: "first\nline", ts: "2026-08-30T09:00:00.000Z" },
+      { author: IDA, text: "second", ts: "2026-08-30T10:00:00.000Z" },
+    ];
+    const { callText } = server(
+      reader({ readChannel: async () => ({ messages, more: false }) }).value,
+    );
+
+    const text = await callText("read_channel", { surface: "buzz", channel: "hive" });
+    const compact = messages.map(({ text, ts }) => ({ from: "ida", text, ts }));
+    expect(text.split("\n")).toEqual([
+      '{"messages":[',
+      `${JSON.stringify(compact[0])},`,
+      JSON.stringify(compact[1]),
+      '],"more":false}',
+    ]);
+    expect(JSON.parse(text)).toEqual({ messages: compact, more: false });
+  });
+
+  it("uses a compact id when the surface has no display name", async () => {
+    const id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const message = {
+      author: { ...IDA, id, name: undefined },
+      text: "hello",
+      ts: "2026-08-30T09:00:00.000Z",
+    };
+    const { callText } = server(
+      reader({ readChannel: async () => ({ messages: [message], more: false }) }).value,
+    );
+
+    const text = await callText("read_channel", { surface: "buzz", channel: "hive" });
+    expect(JSON.parse(text)).toEqual({
+      messages: [{ from: "0123456789ab…", text: "hello", ts: message.ts }],
+      more: false,
+    });
+    expect(text).not.toContain(id);
+  });
+
+  it("bounds each message's text and marks only the messages it shortened", async () => {
+    const messages = [
+      { author: IDA, text: "hello 🐝 world", ts: "2026-08-30T09:00:00.000Z" },
+      { author: IDA, text: "short", ts: "2026-08-30T10:00:00.000Z" },
+    ];
+    const surface = reader({ readChannel: async () => ({ messages, more: false }) });
+    const { call } = server(surface.value);
+
+    expect(
+      await call("read_channel", {
+        surface: "buzz",
+        channel: "hive",
+        maxTextChars: 7,
+      }),
+    ).toEqual({
+      messages: [
+        { from: "ida", text: "hello 🐝", ts: messages[0].ts, truncated: true },
+        { from: "ida", text: "short", ts: messages[1].ts },
+      ],
+      more: false,
+    });
+    expect(await handleTools(surface.value)).toContainEqual(
+      expect.objectContaining({
+        name: "read_channel",
+        inputSchema: expect.objectContaining({
+          properties: expect.objectContaining({
+            maxTextChars: expect.objectContaining({ type: "integer", minimum: 1 }),
+          }),
+        }),
+      }),
+    );
+
+    await expect(
+      call("read_channel", { surface: "buzz", channel: "hive", maxTextChars: 0 }),
+    ).rejects.toThrow();
+    await expect(
+      call("read_channel", { surface: "buzz", channel: "hive", maxTextChars: 1.5 }),
+    ).rejects.toThrow();
   });
 
   it("names a channel read by display name, and only among configured ones", async () => {
@@ -251,6 +336,15 @@ describe("the surface read server", () => {
     await expect(blind.call("describe_actor", { surface: "buzz", id: IDA.id })).rejects.toThrow(
       /cannot look an id up/,
     );
+  });
+
+  it("does not advertise a compact channel attribution label as an actor id", async () => {
+    const description = (await handleTools(reader().value)).find(
+      (tool) => tool.name === "describe_actor",
+    )?.description;
+
+    expect(description).toContain("full id");
+    expect(description).toContain("compact `read_channel.from` label is attribution only");
   });
 
   it("offers and serves only the reads the policy allows", async () => {

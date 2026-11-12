@@ -68,7 +68,7 @@ private https://github.com/acme/service
 });
 
 describe("repository warmup", () => {
-  it("returns immediately, then clones, indexes, canaries, and searches with the same data home", async () => {
+  it("returns immediately, then clones, indexes, canaries, searches, and reads insights with the same data home", async () => {
     const root = mkdtempSync(join(tmpdir(), "sageox-agent-repos-"));
     roots.push(root);
     const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
@@ -85,10 +85,11 @@ describe("repository warmup", () => {
 
     const saved = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = "must-not-leak";
+    vi.stubEnv("DO_NOT_TRACK", "1");
     try {
       const workspace = createRepoWorkspace(
         parseReposConf("https://github.com/acme/service\n"),
-        { root, run },
+        { root, run, oxClientId: "agent-id" },
       );
       // The re-probe path: the reading is recomputed on every call, so the disclosure the
       // gateway assembles clears itself when the index goes warm. Latch it once at startup
@@ -101,11 +102,13 @@ describe("repository warmup", () => {
 
       const result = await workspace.search("author gate", 5);
       expect(result).toContain("src/a.ts");
+      await workspace.insights(14, 10);
       expect(calls.map((call) => [call.command, ...call.args].slice(0, 3).join(" "))).toEqual([
         "git clone https://github.com/acme/service",
         "ox index code",
         "ox code status",
         "ox code search",
+        "ox code insights",
       ]);
       const clone = calls.find((call) => call.command === "git")!;
       expect(clone.env.GIT_CONFIG_KEY_0).toBe("core.hooksPath");
@@ -113,10 +116,13 @@ describe("repository warmup", () => {
       for (const call of calls.filter((call) => call.command === "ox")) {
         expect(call.env.ANTHROPIC_API_KEY).toBeUndefined();
         expect(call.env.XDG_DATA_HOME).toBe(join(root, "ox-data"));
+        expect(call.env.DO_NOT_TRACK).toBe("1");
+        expect(call.env.SAGEOX_CLIENT_ID).toBe("agent-id");
       }
     } finally {
       if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = saved;
+      vi.unstubAllEnvs();
     }
   });
 

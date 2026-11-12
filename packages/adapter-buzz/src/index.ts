@@ -7,3 +7,4 @@ export * from "./profile.ts";
 export * from "./engram.ts";
 export * from "./private-brain.ts";
 export * from "./kill-switch.ts";
+export * from "./local-relay.ts";

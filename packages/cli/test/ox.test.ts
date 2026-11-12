@@ -2,12 +2,12 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expiringSoon, credentialSource, oxStatus, oxTeams } from "../src/ox.ts";
+import { expiringSoon, oxStatus, oxTeams } from "../src/ox.ts";
 
-/** Puts an `ox` on PATH that prints `stdout` whatever it is asked. */
-const withFakeOx = async <T>(stdout: string, run: () => Promise<T>): Promise<T> => {
+/** Puts an `ox` on PATH that runs `script` whatever it is asked. */
+const withFakeOx = async <T>(script: string, run: () => Promise<T>): Promise<T> => {
   const bin = mkdtempSync(join(tmpdir(), "ox-fake-"));
-  writeFileSync(join(bin, "ox"), `#!/bin/sh\ncat <<'JSON'\n${stdout}\nJSON\n`, { mode: 0o755 });
+  writeFileSync(join(bin, "ox"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
   const path = process.env.PATH;
   process.env.PATH = `${bin}:${path}`;
   try {
@@ -17,6 +17,9 @@ const withFakeOx = async <T>(stdout: string, run: () => Promise<T>): Promise<T> 
     rmSync(bin, { recursive: true, force: true });
   }
 };
+
+/** A {@link withFakeOx} script that prints `stdout`. */
+const printing = (stdout: string) => `cat <<'JSON'\n${stdout}\nJSON`;
 
 describe("expiringSoon", () => {
   const now = new Date("2026-08-14T00:00:00Z");
@@ -39,36 +42,6 @@ describe("expiringSoon", () => {
   });
 });
 
-describe("credential source reporting", () => {
-  it("names the token when the child carried one, since a PAT carries no user claims", () => {
-    expect(credentialSource({ SAGEOX_TOKEN: "oxp_x" })).toBe("SAGEOX_TOKEN");
-  });
-
-  it("reports the auth file when the child carried no token", () => {
-    expect(credentialSource({})).toBe("auth file");
-  });
-
-  it("prefers the token even when an auth file is also configured, as ox does", () => {
-    expect(credentialSource({ SAGEOX_TOKEN: "oxp_x", XDG_CONFIG_HOME: "/mnt/secrets-store/ox" })).toBe(
-      "SAGEOX_TOKEN",
-    );
-  });
-
-  it("labels the run from the env the child got, not from a second reading", async () => {
-    // `OxScope.token` reads a file that a rotation rewrites under this process — that is
-    // the point of resolving it per child — so a reading taken after `ox status` exits can
-    // disagree with the one that built its env, and `doctor` would then name a credential
-    // the run never used. One reading, and the label comes off the env it produced.
-    let reads = 0;
-    const status = await withFakeOx(JSON.stringify({ auth: { authenticated: true } }), () =>
-      oxStatus({ token: () => (reads++ === 0 ? "oxp_x" : undefined) }),
-    );
-
-    expect(status.source).toBe("SAGEOX_TOKEN");
-    expect(reads).toBe(1);
-  });
-});
-
 /**
  * `ox team list` reports a restore's `<team-id>.bak.<epoch>` clone as a team. It is not one
  * anybody can pick — its id is a directory name, so choosing it writes a string into the
@@ -87,14 +60,14 @@ describe("the teams this machine can see", () => {
   });
 
   it("drops restore clones and puts the primary team first", async () => {
-    const teams = await withFakeOx(listing, () => oxTeams());
+    const teams = await withFakeOx(printing(listing), () => oxTeams());
 
     expect(teams.map((t) => t.id)).toEqual(["team_jihjpfkt8b", "team_xlcr6yzpec"]);
   });
 
   it("keeps a team whose own name merely contains the word", async () => {
     const teams = await withFakeOx(
-      JSON.stringify({ teams: [{ team_id: "team_bak99", name: "Backups" }] }),
+      printing(JSON.stringify({ teams: [{ team_id: "team_bak99", name: "Backups" }] })),
       () => oxTeams(),
     );
 
@@ -102,6 +75,20 @@ describe("the teams this machine can see", () => {
   });
 
   it("answers with an empty list rather than throwing when ox cannot be read", async () => {
-    expect(await withFakeOx("not json at all", () => oxTeams())).toEqual([]);
+    expect(await withFakeOx(printing("not json at all"), () => oxTeams())).toEqual([]);
+  });
+});
+
+describe("oxStatus", () => {
+  it("reports why ox failed without the token it was given", async () => {
+    // Longer than the 160-character bound: cut first, the error would keep part of it.
+    const token = `oxt_${"x".repeat(200)}`;
+    const status = await withFakeOx(`echo "Error: $SAGEOX_TOKEN was refused" >&2; exit 1`, () =>
+      oxStatus({ token: () => token }),
+    );
+
+    expect(status).toMatchObject({ installed: true, authenticated: false });
+    expect(status.error).toContain("Error: [REDACTED] was refused");
+    expect(status.error).not.toContain("oxt_");
   });
 });

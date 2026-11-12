@@ -63,6 +63,23 @@ agent:
     harry: { ... }
 ```
 
+## Owner attestation
+
+Set `agents.<name>.authTag` to the agent's NIP-OA owner attestation to bind it to its
+owner, so Buzz shows "managed by \<owner\>" instead of "owner unavailable". The chart
+sets it as `BUZZ_AUTH_TAG` on that agent's Deployment and CronJob hosts. Give it as a
+YAML list or as the JSON string a minted tag prints as; the schema refuses anything
+that is not the `["auth", <owner pubkey hex>, <conditions>, <sig hex>]` tuple. The tag
+is public: it is minted with the owner's secret, which never enters the pod. A relay
+that records owners keeps the first one, so check an agent's current owner before
+giving it a tag.
+
+```yaml
+agents:
+  harry:
+    authTag: ["auth", "<owner pubkey hex>", "<conditions>", "<sig hex>"]
+```
+
 ## Structured job logs
 
 With toolkit **0.4.1 or newer**, set `agents.<name>.workEvents: true` to enable
@@ -79,11 +96,11 @@ Collect `sageox_work_event` records from those containers' stdout. Child diagnos
 use a separate envelope. External jobs report lifecycle and aggregate results from
 the launching host; their events remain partial because the dispatcher does not
 return individual worker checks or work metadata. See the
-[work event contract](https://github.com/sageox/agent-toolkit/blob/v0.6.0/docs/job-contract.md#structured-work-events-schema-1).
+[work event contract](https://github.com/sageox/agent-toolkit/blob/v0.12.1/docs/job-contract.md#structured-work-events-schema-1).
 
 Structured job answers need no chart setting: declare `output: {format: json}` in
 the bundle's `agent.yaml`, and use workers built from the same toolkit release as
-the gateway and dispatcher. See [structured answers](https://github.com/sageox/agent-toolkit/blob/v0.6.0/docs/external-jobs.md#structured-answers).
+the gateway and dispatcher. See [structured answers](https://github.com/sageox/agent-toolkit/blob/v0.12.1/docs/external-jobs.md#structured-answers).
 
 ## Where a bundle comes from
 
@@ -411,7 +428,7 @@ agents:
 
 A body then finds `workspace/repos/<owner>--<repo>` under its working directory, where a run
 started from chat already finds it
-([the job body contract](https://github.com/sageox/agent-toolkit/blob/v0.6.0/docs/job-contract.md#what-a-body-finds-on-disk)).
+([the job body contract](https://github.com/sageox/agent-toolkit/blob/v0.12.1/docs/job-contract.md#what-a-body-finds-on-disk)).
 
 Three things this deliberately does not do.
 
@@ -499,6 +516,63 @@ or search must fail the body; do not convert it into an empty result or run `ox 
 to repair it. The agent remains the only index writer. A successful check is not a lock:
 the agent can update the store during the run, so handle a later search failure too.
 
+### A job that keeps its home between runs
+
+A job Pod's home is part of the container, so anything a body writes under `HOME` is gone
+when the Pod ends. That includes a coding harness's session transcripts and ox's Ledger
+clones and upload queue. `persistence.jobHome` gives the lanes it names a home that
+persists:
+
+```yaml
+agents:
+  bunyan:
+    persistence:
+      jobHome:
+        size: 20Gi
+        storageClass: gp3   # the default
+        jobs: [shift]
+        paths:              # under HOME; only these persist
+          - .claude/projects        # Claude Code's session transcripts
+          - .local/share/sageox     # ox's Ledger clones and upload queue
+```
+
+The chart renders one more claim per agent, `<release>-<agent>-home`. It is `ReadWriteOncePod`
+and carries `helm.sh/resource-policy: keep`, so uninstalling the release does not delete it.
+Each named job gets `HOME=/home/agent` and mounts one directory of the claim per `paths`
+entry, at `/home/agent/<path>`. A small init container creates those directories first, as
+the agent user. Other jobs and the Deployment Pod do not mount the claim. Only scheduled
+local command jobs can be named; the chart refuses a slug that names a worker job, a prompt
+job, a job with no schedule, or no job at all.
+
+**Only data persists.** The rest of HOME starts clean every run. A job body steered by text
+it read, such as an issue or a pull request, could otherwise leave config or instructions
+that every later run trusts: `~/.gitconfig`, shell rc files, a harness's settings, hooks or
+`CLAUDE.md`, and `~/.config`, where ox keeps its login. The chart refuses a path that is,
+holds or sits inside one of those. A path you list is still something earlier runs wrote,
+so list data, not config. Claude Code keeps its auto memory, which it loads as instructions,
+inside `.claude/projects`, so a lane that keeps any `.claude/` path runs with
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. Its session transcripts still persist. A bundle whose
+`run.env` sets its own `HOME` moves the job off these mounts, so leave `HOME` unset there. An agent whose home claim name would equal another agent's claim,
+for example agents `foo` and `foo-home`, is refused; rename one or set `fullnameOverride`.
+
+`ReadWriteOncePod` means one Pod at a time, across every node. Two named lanes that overlap
+take turns, and the later one waits in `Init` until the earlier one exits. Name one lane per
+agent unless their schedules cannot overlap.
+
+**Unsticking a held claim.** A Pod stuck in `Terminating`, usually on a node that stopped
+responding, keeps the claim. Every later run then waits in `Init:0/1` behind it, logs
+nothing, and is killed at its deadline. `kubectl describe pod` on the waiting Pod names the
+holder. Then release the claim:
+
+```sh
+kubectl -n <namespace> get pods -l agent-toolkit/job=<slug>    # the old one shows Terminating
+kubectl -n <namespace> delete pod <stuck-pod> --grace-period=0 --force
+```
+
+Force-delete only once the node is really gone or rebooted. A force-deleted Pod whose node
+is still running keeps its processes, and they keep writing to the volume while the next run
+mounts it. If the node is reachable, rebooting it releases the volume safely.
+
 ### A job that reads the Kubernetes API
 
 No Pod this chart renders mounts a ServiceAccount token by default, and the projected token
@@ -568,7 +642,7 @@ These gateway/scheduled-Pod mount rules apply to local jobs. An external `worker
 instead maps each `run.secrets` and `run.jobSecrets` ref through
 `agents.<agent>.jobs[].worker.secrets`.
 That worker-only credential path supports both requested and scheduled runs, without
-mounting the credential in the gateway. See [external jobs](https://github.com/sageox/agent-toolkit/blob/v0.6.0/docs/external-jobs.md).
+mounting the credential in the gateway. See [external jobs](https://github.com/sageox/agent-toolkit/blob/v0.12.1/docs/external-jobs.md).
 
 Two consequences worth knowing before you split a local job credential out:
 
@@ -596,4 +670,4 @@ rule that reads as a control and is not.
 
 ## External job workers
 
-For on-demand jobs with their own runtime image, use [the external jobs guide](https://github.com/sageox/agent-toolkit/blob/v0.6.0/docs/external-jobs.md). It covers the worker image, per-job ServiceAccount and Secret mappings, the shared dispatcher, scheduled triggers, durable results and cancellation. The gateway image does not need the task runtime.
+For on-demand jobs with their own runtime image, use [the external jobs guide](https://github.com/sageox/agent-toolkit/blob/v0.12.1/docs/external-jobs.md). It covers the worker image, per-job ServiceAccount and Secret mappings, the shared dispatcher, scheduled triggers, durable results and cancellation. The gateway image does not need the task runtime.

@@ -131,6 +131,20 @@ export interface SurfaceAdapter {
   readThread?(root: EventRef, limit?: number): Promise<readonly ThreadReply[]>;
 
   /**
+   * The thread an inbound message was posted in, as far as that message: the root, then each
+   * reply before it, oldest first. `[]` for a message in no thread.
+   *
+   * The gateway reads it before a turn, so the brain answers the conversation and not one line
+   * of it. Its authority is the event, which this adapter delivered from a channel it serves —
+   * not a root the caller holds, which is {@link readThread}'s. Unlike that read, the root is
+   * included: it is what the thread is about. Every text in it is untrusted.
+   *
+   * `signal` fires once the gateway has stopped waiting. A read that can outlive that wait
+   * stops at its next page or lookup instead of finishing for nobody.
+   */
+  readThreadBefore?(event: InboundEvent, signal?: AbortSignal): Promise<readonly ThreadReply[]>;
+
+  /**
    * Channels this agent is a member of, as the surface itself reports membership.
    *
    * Not {@link postTargets}, which is what an operator configured. Slack lists a channel

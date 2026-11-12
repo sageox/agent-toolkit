@@ -67,7 +67,7 @@ spec:
               value: 127.0.0.1
             {{- if $agent.authTag }}
             - name: BUZZ_AUTH_TAG
-              value: {{ $agent.authTag | quote }}
+              value: {{ include "agent.authTag" $agent.authTag | quote }}
             {{- end }}
             {{- if $agent.workEvents }}
             - name: AGENT_WORK_EVENTS

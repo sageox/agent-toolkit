@@ -62,7 +62,7 @@ fi
 # linked twice, so a count alone still passes when one of those two is replaced by a copy
 # of another pinned link. Matched at any tag rather than at this release's, so a link left
 # behind on the previous one is reported as the stale link it is.
-release_docs='https://github.com/sageox/agent-toolkit/blob/v0.6.0/docs'
+release_docs='https://github.com/sageox/agent-toolkit/blob/v0.12.1/docs'
 expected=$(printf '%s\n' \
   "$release_docs/external-jobs.md" \
   "$release_docs/external-jobs.md" \
@@ -622,5 +622,119 @@ rendered=$(helm template agents "$chart" --values "$values" \
   --set-string 'agents.harry.jobs[0].worker.resources.limits.memory=128Mi' \
   --show-only templates/dispatcher.yaml)
 present '\"resources\":{\"limits\":{\"memory\":\"128Mi\"},\"requests\":{\"cpu\":\"1\"}}'
+
+# A persistent job home. Checked inside the CronJob that names it, part by part, because the
+# failures are a mount on the wrong container, a second lane silently sharing the claim and
+# waiting behind it, or the whole HOME persisting.
+cronjob_doc() { awk -v want="  name: $1" 'BEGIN{RS="\n---\n"} {n=split($0, lines, "\n"); for (i=1;i<=n;i++) if (lines[i]==want) {print; exit}}' <<<"$rendered"; }
+pod_part() { sed -n "/^          $2:\$/,/^          $3:\$/p" <<<"$1"; }
+home=(--set 'agents.harry.persistence.jobHome.size=20Gi'
+      --set 'agents.harry.persistence.jobHome.jobs[0]=shift'
+      --set 'agents.harry.persistence.jobHome.paths[0]=.claude/projects'
+      --set 'agents.harry.persistence.jobHome.paths[1]=.local/share/sageox')
+# A schedule on harry's on-request job gives it a CronJob of its own, so this agent has a
+# second scheduled lane the home must stay out of.
+render "${home[@]}" --set 'agents.harry.jobs[1].trigger.schedules[0]=0 5 * * *'
+all=$rendered
+shift_doc=$(cronjob_doc agents-harry-shift)
+inbox_doc=$(cronjob_doc agents-harry-inbox)
+[ -n "$shift_doc" ] && [ -n "$inbox_doc" ] || fail 'expected the shift and inbox CronJobs'
+rendered=$(pod_part "$shift_doc" containers volumes)
+counted 2 'name: job-home'
+present 'mountPath: "/home/agent/.claude/projects"'
+present 'subPath: ".claude/projects"'
+present 'mountPath: "/home/agent/.local/share/sageox"'
+present 'subPath: ".local/share/sageox"'
+absent 'mountPath: /home/agent'
+counted 1 'name: HOME'
+# Claude Code's auto memory lives in .claude/projects and is read as instructions.
+counted 1 'name: CLAUDE_CODE_DISABLE_AUTO_MEMORY'
+grep -A1 -F 'name: CLAUDE_CODE_DISABLE_AUTO_MEMORY' <<<"$rendered" | grep -qF 'value: "1"' \
+  || fail 'expected CLAUDE_CODE_DISABLE_AUTO_MEMORY to be "1"'
+rendered=$(pod_part "$shift_doc" initContainers containers)
+# The home's own init container, which only creates the directories: its name and its mount.
+counted 2 'name: job-home'
+counted 1 'mountPath: /job-home'
+present 'command: ["mkdir", "-p", "--"]'
+absent 'subPath'
+rendered=$(sed -n '/^          volumes:$/,$p' <<<"$shift_doc")
+counted 1 'claimName: agents-harry-home'
+rendered=$inbox_doc
+absent 'job-home'
+absent 'name: HOME'
+absent 'CLAUDE_CODE_DISABLE_AUTO_MEMORY'
+# Keeping only ox's data leaves Claude Code's memory as it was.
+render "${home[@]}" --set 'agents.harry.persistence.jobHome.paths[0]=.cache/x'
+counted 1 'name: HOME'
+absent 'CLAUDE_CODE_DISABLE_AUTO_MEMORY'
+rendered=$all
+counted 1 'claimName: agents-harry-home'
+rendered=$(helm template agents "$chart" --values "$values" "${home[@]}" --show-only templates/pvc.yaml)
+counted 1 'name: agents-harry-home'
+counted 1 'ReadWriteOncePod'
+present 'storageClassName: "gp3"'
+present 'storage: 20Gi'
+counted 3 'helm.sh/resource-policy: keep'
+rendered=$(helm template agents "$chart" --values "$values" "${home[@]}" \
+  --set 'agents.harry.persistence.jobHome.storageClass=fast' --show-only templates/pvc.yaml)
+present 'storageClassName: "fast"'
+# Off by default: no claim and no mount anywhere.
+render
+absent 'job-home'
+absent 'name: HOME'
+rendered=$(helm template agents "$chart" --values "$values" --show-only templates/pvc.yaml)
+absent '-home'
+# A slug that no Pod of this chart runs would mount the home nowhere.
+for slug in shfit inbox daily-digest; do
+  refuses "a job home for $slug" "persistence.jobHome.jobs names $slug" \
+    "${home[@]}" --set "agents.harry.persistence.jobHome.jobs[0]=$slug"
+done
+refuses 'a job home for a worker job' 'persistence.jobHome.jobs names shift' "${home[@]}" \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'
+refuses 'a job home with no size' "missing property 'size'" \
+  --set 'agents.harry.persistence.jobHome.jobs[0]=shift' \
+  --set 'agents.harry.persistence.jobHome.paths[0]=.claude/projects'
+refuses 'a job home with no paths' "missing property 'paths'" \
+  --set 'agents.harry.persistence.jobHome.size=20Gi' \
+  --set 'agents.harry.persistence.jobHome.jobs[0]=shift'
+# What a later run reads as config or instructions never persists, however it is spelled.
+for path in .config .config/sageox .gitconfig .claude .claude/settings.json .claude/hooks/pre .ssh; do
+  refuses "a job home path of $path" "persistence.jobHome.paths has $path, which would keep" \
+    "${home[@]}" --set "agents.harry.persistence.jobHome.paths[2]=$path"
+done
+refuses 'a job home path with ..' 'has no . or .. part' \
+  "${home[@]}" --set 'agents.harry.persistence.jobHome.paths[2]=.cache/../.config'
+refuses 'an absolute job home path' 'jobHome/paths/2' \
+  "${home[@]}" --set 'agents.harry.persistence.jobHome.paths[2]=/etc'
+refuses 'a job home path inside another' 'list only one of them' \
+  "${home[@]}" --set 'agents.harry.persistence.jobHome.paths[2]=.local/share/sageox/ledgers'
+# The home's volume name and mounts are the chart's; a shared volume must not reuse either.
+shared=(--set 'agents.harry.sharedVolumes[0].claimName=team-share')
+refuses 'a shared volume named job-home' 'a volume named job-home' "${home[@]}" "${shared[@]}" \
+  --set 'agents.harry.sharedVolumes[0].name=job-home' \
+  --set 'agents.harry.sharedVolumes[0].mountPath=/shared'
+for mount in /home/agent /home/agent/.claude/projects /home/agent/.local/share/sageox/x; do
+  refuses "a shared volume at $mount" "overlaps the job home" "${home[@]}" "${shared[@]}" \
+    --set 'agents.harry.sharedVolumes[0].name=shared' \
+    --set "agents.harry.sharedVolumes[0].mountPath=$mount"
+done
+# Agents may share one claim through existingClaim; only the home claims are checked.
+helm template agents "$chart" --values "$values" "${home[@]}" \
+  --set agents.harry.persistence.existingClaim=agents-ida >/dev/null \
+  || fail 'expected a shared existingClaim to render'
+refuses 'a job home claim that another agent mounts' \
+  "harry: its job home claim agents-harry-home is also a claim ida mounts" "${home[@]}" \
+  --set 'agents.ida.persistence.existingClaim=agents-harry-home'
+# A shared volume on the job home's claim would let the Deployment hold it, and every run wait.
+refuses 'a shared volume on a job home claim' \
+  "harry: its job home claim agents-harry-home is also the claim of ida's shared volume shared" \
+  "${home[@]}" --set 'agents.ida.sharedVolumes[0].name=shared' \
+  --set 'agents.ida.sharedVolumes[0].claimName=agents-harry-home' \
+  --set 'agents.ida.sharedVolumes[0].mountPath=/shared'
+# Agents foo and foo-home: foo's home claim would be foo-home's own claim.
+refuses 'a job home claim that is another agent'"'"'s claim' \
+  "harry: its job home claim agents-harry-home is also ida's claim" "${home[@]}" \
+  --set 'agents.ida.fullnameOverride=agents-harry-home'
 
 printf 'jobs.sh: ok\n'
