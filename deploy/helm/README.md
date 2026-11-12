@@ -522,9 +522,15 @@ agents:
   that is not a scheduled local command job of this agent is refused: a typo, an
   on-request job or a prompt job would otherwise be silently left unmounted.
 
-- **Siblings of the agent's home, never inside it.** Each entry is one path segment, and
-  the agent's own name is refused: `/agents/<name>` holds the bundle, `state.json` and the
-  memory vault.
+- **Siblings of the agent's home, never inside it.** Each entry is one path segment named
+  `<name>-state` or `.<name>-state`. That rule keeps out any agent's home (`/agents/<name>`
+  holds the bundle, `state.json` and the memory vault), instruction locations a brain
+  session loads (`.claude`, `CLAUDE.md`), and YAML scalars such as `null`, which would
+  otherwise render an empty `subPath`, i.e. the volume root.
+- **The chart can't see inside the claim.** If something writing the claim root replaces
+  a state directory with a symlink to an agent's home, the kubelet follows it. The only
+  writers there are the agent's own processes, which already own that home, but a job
+  body would then reach it too. A run-time check is tracked upstream.
 - **The body is a second writer by design.** Serialize writes against the agent's
   processes yourself: an `O_EXCL` lock file in the directory works, because both Pods run
   on one node against one filesystem.

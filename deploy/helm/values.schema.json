@@ -241,10 +241,10 @@
                   "type": "array",
                   "minItems": 1,
                   "uniqueItems": true,
-                  "description": "Each one path segment, e.g. .screening-state.",
+                  "description": "Each one path segment named <name>-state or .<name>-state, e.g. .screening-state. The suffix is the guard: it keeps out an agent's home, instruction locations such as .claude, and YAML scalars such as null.",
                   "items": {
                     "type": "string",
-                    "pattern": "^([A-Za-z0-9_][A-Za-z0-9._-]*|\\.[A-Za-z0-9_-][A-Za-z0-9._-]*)$"
+                    "pattern": "^\\.?[a-z0-9][a-z0-9-]*-state$"
                   }
                 }
               }

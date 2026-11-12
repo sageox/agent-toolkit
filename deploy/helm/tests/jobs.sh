@@ -286,8 +286,9 @@ present "claimName: agents-harry"
 state=(--set 'agents.harry.persistence.jobStateDirs.jobs[0]=shift'
   --set 'agents.harry.persistence.jobStateDirs.dirs[0]=.queue-state')
 render "${state[@]}"
-present "mountPath: /agents/.queue-state"
-present "subPath: .queue-state"
+# Quoted: an unquoted `null` subPath is the volume root — the whole claim, read-write.
+present 'mountPath: "/agents/.queue-state"'
+present 'subPath: ".queue-state"'
 absent "workspace/repos"
 counted 2 "name: checkouts"
 matched 1 "claimName: agents-harry$"
@@ -295,15 +296,15 @@ counted 2 "emptyDir: {}"
 counted 1 "podAffinity:"
 present "requiredDuringSchedulingIgnoredDuringExecution:"
 present "operator: DoesNotExist"
-if grep -A2 -F "mountPath: /agents/.queue-state" <<<"$rendered" | grep -qF "readOnly"; then
+if grep -A3 -F 'mountPath: "/agents/.queue-state"' <<<"$rendered" | grep -qF "readOnly"; then
   fail "a job state directory must be writable"
 fi
 # Scoped: a second scheduled job of the same agent that is not named gets nothing.
 render "${state[@]}" --set 'agents.harry.jobs[0].trigger.schedules[1]=30 2 * * *'
-counted 2 "mountPath: /agents/.queue-state"
+counted 2 'mountPath: "/agents/.queue-state"'
 render "${state[@]}" --set 'agents.harry.persistence.jobStateDirs.jobs[0]=shift' \
   --set 'agents.harry.jobs[1].trigger.schedules[0]=0 3 * * *'
-counted 1 "mountPath: /agents/.queue-state"
+counted 1 'mountPath: "/agents/.queue-state"'
 counted 1 "podAffinity:"
 # Beside the checkouts it shares the one claim reference rather than adding a second.
 render "${state[@]}" --set agents.harry.persistence.jobCheckouts=true
@@ -313,11 +314,12 @@ rendered=$(helm template agents "$chart" --values "$values" "${state[@]}" \
   --show-only templates/deployment.yaml)
 absent ".queue-state"
 absent "podAffinity"
-# The agent's home holds the bundle, state.json and the vault; anything with a slash or a
-# dot-dot could reach into it. Each is refused where the mount is made.
-refuses "a state dir naming the agent's own home" "the agent's own home" \
-  "${state[@]}" --set 'agents.harry.persistence.jobStateDirs.dirs[0]=harry'
-for bad in .. . 'harry/workspace' '../etc' ''; do
+# Only `<name>-state` / `.<name>-state`. That one rule keeps out an agent's home (the
+# bundle, state.json, the vault), anything with a slash or a dot-dot, instruction
+# locations a brain session loads (.claude, CLAUDE.md), and YAML scalars (null renders an
+# empty subPath, which is the volume root).
+for bad in harry ida .. . 'harry/workspace' '../etc' '' null true 123 .claude CLAUDE.md \
+  .Queue-state queue-state/x; do
   refuses "state dir '$bad'" "jobStateDirs" \
     "${state[@]}" --set-string "agents.harry.persistence.jobStateDirs.dirs[0]=$bad"
 done
@@ -327,6 +329,26 @@ for job in shfit inbox daily-digest; do
   refuses "state for job '$job'" "not a scheduled local command job" \
     "${state[@]}" --set "agents.harry.persistence.jobStateDirs.jobs[0]=$job"
 done
+# Two agents may share one claim, so a dir naming ANY agent's home is refused, not only
+# the agent's own. Only reachable for an agent whose name itself ends in `-state`.
+neighbour=$(mktemp)
+cat >"$neighbour" <<'YAML'
+agents:
+  ida-state:
+    bundle: { volume: { configMap: { name: agent-ida-state-bundle } } }
+    serviceAccount: { create: true, name: "" }
+    secrets:
+      kubernetesSecret: agent-ida-state
+      csi: { secretProviderClass: "" }
+    persistence: { size: 5Gi }
+    jobs: []
+    terminationGracePeriodSeconds: 130
+    resources: {}
+    sharedVolumes: []
+YAML
+refuses "a state dir naming another agent's home" "an agent's home" \
+  --values "$neighbour" "${state[@]}" --set 'agents.harry.persistence.jobStateDirs.dirs[0]=ida-state'
+rm -f "$neighbour"
 refuses "state dirs with no jobs" "jobStateDirs" \
   --set 'agents.harry.persistence.jobStateDirs.dirs[0]=.queue-state'
 
