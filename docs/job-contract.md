@@ -143,7 +143,8 @@ and a body that needs one that cannot clones its own.
 the mount when there is one: `git clone --depth 1 workspace/repos/acme--widgets ./work` is
 local, needs no token, and costs no network. Durable state a body genuinely shares with the
 agent is a mount the deployment gives it
-([`sharedVolumes`](../deploy/helm/README.md#jobs) is the Kubernetes spelling); a working
+([`sharedVolumes`](../deploy/helm/README.md#jobs), or on the agent's own claim
+[`persistence.jobStateDirs`](../deploy/helm/README.md#a-job-that-shares-state-with-the-agent)); a working
 tree is not that, which is why the checkouts arrive read-only or not at all.
 
 **The index is a separate opt-in.** `persistence.jobCheckouts` shares only checkouts.

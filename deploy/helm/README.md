@@ -499,6 +499,33 @@ or search must fail the body; do not convert it into an empty result or run `ox 
 to repair it. The agent remains the only index writer. A successful check is not a lock:
 the agent can update the store during the run, so handle a later search failure too.
 
+### A job that shares state with the agent
+
+Some state is written by both sides: a chat tool queues work and a clock drains it, or a
+cache the agent fills saves the body a model call. On a `ReadWriteOnce` claim that state is
+out of a job Pod's reach, and the usual way out, a `sharedVolumes` claim two Pods can mount,
+needs `ReadWriteMany` storage or moving the data. `persistence.jobStateDirs` names
+directories at the root of the agent's own claim and mounts each one **read-write** at
+`/agents/<dir>` in this agent's scheduled local command jobs:
+
+```yaml
+agents:
+  ashby:
+    persistence:
+      jobStateDirs: [".screening-state"]
+```
+
+- **Siblings of the agent's home, never inside it.** Each entry is one path segment, and
+  the agent's own name is refused: `/agents/<name>` holds the bundle, `state.json` and the
+  memory vault.
+- **The body is a second writer by design.** Serialize writes against the agent's
+  processes yourself: an `O_EXCL` lock file in the directory works, because both Pods run
+  on one node against one filesystem.
+- **Same placement price as `jobCheckouts`.** The required same-node affinity applies, so a
+  tick while the agent Pod is missing is lost as a `DeadlineExceeded` Job.
+- **The directory should already exist.** If it doesn't, the kubelet creates it on first
+  mount.
+
 ### A job that reads the Kubernetes API
 
 No Pod this chart renders mounts a ServiceAccount token by default, and the projected token

@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owner (the "managed by <owner>" badge). The tag is public — minted with the
   owner secret, which never enters the pod. Omit it to leave an agent
   "owner unavailable" (the prior behavior). Values-only and backward compatible.
+- Chart: `persistence.jobStateDirs` mounts named directories at the root of an agent's
+  claim read-write into its scheduled local command jobs, with the same required
+  same-node affinity as `jobCheckouts`. A clock can drain state the agent's chat tools
+  fill, such as a work queue, with no model turn and no `ReadWriteMany` storage. The
+  agent's own home is refused.
 
 ### Changed
 
