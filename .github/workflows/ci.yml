@@ -58,13 +58,16 @@ jobs:
           tar xzf "$RUNNER_TEMP/age.tar.gz" -C "$RUNNER_TEMP"
           sudo install "$RUNNER_TEMP/age/age" "$RUNNER_TEMP/age/age-keygen" /usr/local/bin/
 
-      # Output of passing tests is the bulk of a green log. Failing tests keep theirs. Called through
-      # `pnpm exec` because `pnpm test --silent` would be taken as pnpm's own flag. Re-run jobs with
-      # "Enable debug logging" (RUNNER_DEBUG=1) to see everything.
+      # Passing tests' console output, per-test lines and the output of child processes the tests
+      # spawn were most of a green log. The wrapper prints the Vitest totals when green and
+      # everything when red; --silent=passed-only and the dot reporter keep the red log to the
+      # failures. Called through `pnpm exec` because `pnpm test --silent` would be taken as pnpm's
+      # own flag. Re-run jobs with "Enable debug logging" (RUNNER_DEBUG=1) to see everything.
       - name: Run tests
         env:
           VITEST_SILENT: ${{ runner.debug == '1' && 'false' || 'passed-only' }}
-        run: pnpm exec vitest run --silent="$VITEST_SILENT"
+          VITEST_REPORTER: ${{ runner.debug == '1' && 'default' || 'dot' }}
+        run: scripts/ci/run-quiet.sh 'vitest' pnpm exec vitest run --silent="$VITEST_SILENT" --reporter="$VITEST_REPORTER"
 
       - name: Run typecheck
         run: pnpm typecheck

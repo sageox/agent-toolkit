@@ -32,4 +32,7 @@ if [[ $status -ne 0 ]]; then
   exit "$status"
 fi
 
-echo "ok $label $((SECONDS - start))s"
+# Vitest's totals, so a run that found no tests cannot pass quietly
+totals=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -E '^ *(Test Files|Tests) ' | sed 's/^ *//' | paste -sd ';' - | sed 's/;/; /g')
+
+echo "ok $label $((SECONDS - start))s${totals:+ -- $totals}"
