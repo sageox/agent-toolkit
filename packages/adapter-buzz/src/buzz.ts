@@ -124,8 +124,13 @@ export interface BuzzAdapterOptions {
 
 /** What one channel's live REQ has delivered, as the stall check reads it. */
 interface Heard {
-  /** The newest `created_at` received on this channel's REQ, or one below its floor. */
+  /** The newest `created_at` received on this channel's REQ, or the REQ's own `since`. */
   newest: number;
+  /**
+   * Ids already received (or reported) at exactly {@link newest}. `created_at` is in whole
+   * seconds, so the check reads that second inclusively and these are what it excludes.
+   */
+  atNewest: Set<string>;
   /** Wall-clock milliseconds of the last receipt, or of the subscription opening. */
   at: number;
 }
@@ -276,7 +281,11 @@ export class BuzzAdapter implements SurfaceAdapter {
     for (const filter of this.filters()) {
       const subscribed = filter[`#${BUZZ_DEFAULTS.channelTag}`]?.[0];
       if (subscribed !== undefined && !this.heard.has(subscribed)) {
-        this.heard.set(subscribed, { newest: (filter.since ?? 0) - 1, at: Date.now() });
+        this.heard.set(subscribed, {
+          newest: filter.since ?? 0,
+          atNewest: new Set(),
+          at: Date.now(),
+        });
       }
       relay.subscribe([filter], {
         onevent: (event: Event) => {
@@ -284,7 +293,7 @@ export class BuzzAdapter implements SurfaceAdapter {
           // this REQ is being fed, not whether it was the one to deliver.
           if (subscribed !== undefined) {
             const heard = this.heard.get(subscribed)!;
-            heard.newest = Math.max(heard.newest, event.created_at);
+            markHeard(heard, event);
             heard.at = Date.now();
           }
           const deliver = () => {
@@ -780,7 +789,8 @@ export class BuzzAdapter implements SurfaceAdapter {
    *
    * Each missed event is reported once: the floor moves past it, so a stall that keeps
    * swallowing events keeps logging, and one that was a single gap logs that gap. It only
-   * reports — a restart re-opens every REQ and resumes from the cursor.
+   * reports. A restart re-opens every REQ, but resumes from the process-wide cursor, which
+   * a healthy sibling channel may have moved past what this one missed.
    */
   private async checkStalls(interval: number): Promise<void> {
     const relay = this.relay;
@@ -790,11 +800,19 @@ export class BuzzAdapter implements SurfaceAdapter {
       for (const [channel, heard] of this.heard) {
         if (Date.now() - heard.at < interval) continue;
         const until = Math.floor(Date.now() / 1000) - STALL_GRACE_SECONDS;
-        if (until <= heard.newest) continue;
-        // `stop()` mid-check: a subscribe on the closed socket throws, and its failure
-        // would be logged as a check that failed rather than an adapter that stopped.
-        if (this.relay !== relay) return;
-        const filter: Filter = { kinds: [BUZZ_DEFAULTS.kind], since: heard.newest + 1, until };
+        if (until < heard.newest) continue;
+        // Stopped, or between reconnects: nostr-tools sends a REQ on a closed socket as an
+        // unawaited promise, so the rejection would escape `query` as an unhandled one.
+        // Skipping costs nothing — the next interval asks again.
+        if (this.relay !== relay || !relay.connected) return;
+        // `limit` keeps a long stall to one small answer: a relay returns the newest that
+        // many, and only `atNewest.size` of them can be ones the REQ already delivered.
+        const filter: Filter = {
+          kinds: [BUZZ_DEFAULTS.kind],
+          since: heard.newest,
+          until,
+          limit: heard.atNewest.size + 1,
+        };
         filter[`#${BUZZ_DEFAULTS.channelTag}`] = [channel];
         let missed: Event[];
         try {
@@ -807,12 +825,11 @@ export class BuzzAdapter implements SurfaceAdapter {
           );
           continue;
         }
-        const newest = missed.reduce<Event | undefined>(
-          (a, b) => (a && a.created_at >= b.created_at ? a : b),
-          undefined,
-        );
-        if (!newest || newest.created_at <= heard.newest) continue;
-        heard.newest = newest.created_at;
+        const newest = missed
+          .filter((e) => e.created_at > heard.newest || !heard.atNewest.has(e.id))
+          .reduce<Event | undefined>((a, b) => (a && a.created_at >= b.created_at ? a : b), undefined);
+        if (!newest) continue;
+        markHeard(heard, newest);
         console.warn(
           `subscription_stalled surface=${SURFACE} channel=${channel} ` +
             `missed_event=${newest.id} missed_at=${newest.created_at} ` +
@@ -870,6 +887,16 @@ const DIRECTORY_NAME = /^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,31}$/u;
  * is the nondeterminism this function exists to remove. NIP-01 settles it: on equal
  * timestamps the **lowest id in lexical order** is the one retained.
  */
+/** Moves a channel's receipt floor to `event`, keeping every id seen in the floor's second. */
+function markHeard(heard: Heard, event: Event): void {
+  if (event.created_at > heard.newest) {
+    heard.newest = event.created_at;
+    heard.atNewest = new Set([event.id]);
+  } else if (event.created_at === heard.newest) {
+    heard.atNewest.add(event.id);
+  }
+}
+
 function newestPerAuthor(events: Event[]): Event[] {
   const current = new Map<string, Event>();
   for (const event of events) {
