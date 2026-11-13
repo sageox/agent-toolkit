@@ -140,6 +140,11 @@ Pod is the dispatcher's, and a prompt job has no process.
 */}}
 {{- range $job := $agent.jobs -}}
 {{- if $job.work -}}
+{{- range $volume := $agent.sharedVolumes -}}
+{{- if has $volume.name (list "job-work" "job-stage") -}}
+{{- fail (printf "%s: sharedVolumes has a volume named %s, a name the chart gives job %s's work phase; rename it" $name $volume.name $job.slug) -}}
+{{- end -}}
+{{- end -}}
 {{- if or $job.worker (hasKey $job "prompt") -}}
 {{- fail (printf "%s: job %s has work: true, which only a scheduled local command job can have" $name $job.slug) -}}
 {{- end -}}

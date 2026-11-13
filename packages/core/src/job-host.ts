@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fileFlags } from "node:fs";
-import { mkdir, open, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rm, writeFile } from "node:fs/promises";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -338,6 +338,54 @@ export function workPhaseRecordPath(stageDir: string): string {
 /** What a body stages for the next phase; `JOB_STAGE_DIR` in both. */
 export function stageOutputDir(stageDir: string): string {
   return join(stageDir, "out");
+}
+
+/** Past this many entries a stage is refused rather than walked: a harness can mint inodes. */
+const STAGE_ENTRY_LIMIT = 100_000;
+
+/**
+ * Refuses a stage that holds anything but directories and regular files. The work phase
+ * wrote all of it, and a symlink it leaves is resolved in the publish container — where
+ * `/mnt/job-secrets-store/<ref>` and `/proc/self/environ` are this process's own
+ * credentials, which a body that posts a staged file would then post. Checked once and
+ * not again: the work phase's processes are dead by now and nothing else writes the stage.
+ */
+export async function refuseUnsoundStage(out: string): Promise<void> {
+  let seen = 0;
+  const walk = async (dir: string): Promise<void> => {
+    for (const name of await readdir(dir)) {
+      if (++seen > STAGE_ENTRY_LIMIT) throw new Error(`the stage holds more than ${STAGE_ENTRY_LIMIT} entries`);
+      const path = join(dir, name);
+      const entry = await lstat(path);
+      if (entry.isDirectory()) await walk(path);
+      else if (!entry.isFile()) throw new Error(`the stage holds ${path}, which is not a regular file or directory`);
+    }
+  };
+  const root = await lstat(out).catch(() => undefined);
+  if (!root?.isDirectory()) throw new Error(`the stage's ${out} is not a directory`);
+  await walk(out);
+}
+
+/**
+ * Makes what the body staged readable by the publish phase's UID, which is not this one: a
+ * body that wrote a 0600 file or a `mktemp -d` directory would otherwise strand its own
+ * output. Symlinks and the like are left alone for {@link refuseUnsoundStage} to refuse.
+ */
+async function openStageToPublisher(dir: string): Promise<void> {
+  try {
+    for (const name of await readdir(dir)) {
+      const path = join(dir, name);
+      const entry = await lstat(path);
+      if (entry.isDirectory()) {
+        await chmod(path, (entry.mode & 0o7777) | 0o755);
+        await openStageToPublisher(path);
+      } else if (entry.isFile()) {
+        await chmod(path, (entry.mode & 0o7777) | 0o644);
+      }
+    }
+  } catch {
+    // Best effort: an entry the publish phase cannot read is its refusal to report.
+  }
 }
 
 /**
@@ -1077,6 +1125,11 @@ export class JobHost {
     const stageDir = this.opts.stageDir;
     const phased = Boolean(job.run.work);
     job = publishPhase(job);
+    // Read before anything can refuse the run, so a publish body that never started still
+    // reports a work phase that failed as FAIL rather than letting it fold into UNKNOWN.
+    const workCheck = phased && stageDir ? await this.readWorkPhase(job, stageDir) : undefined;
+    const unstartedGates = [unstarted, ...(workCheck ? [verdictFromGate(workCheck)] : [])];
+    const unstartedChecks = [{ gate: jobGate(job), executed: false, exitCode: null }, ...(workCheck ? [workCheck] : [])];
 
     let env: NodeJS.ProcessEnv;
     let channel: HostedMcp | undefined;
@@ -1090,6 +1143,7 @@ export class JobHost {
       if (!phased && stageDir) {
         throw new Error(`job ${job.slug} declares no run.work, and this run was given a stage a work phase wrote`);
       }
+      if (stageDir) await refuseUnsoundStage(stageOutputDir(stageDir));
       verdictPath = join(await this.workDir(), `${job.slug}-${base.runId}.json`);
       channel = await this.openChannel(job);
       env = this.envelope(job, base, verdictPath, channel);
@@ -1115,8 +1169,8 @@ export class JobHost {
       return {
         outcome: "crashed",
         execution,
-        gates: [unstarted],
-        checks: [{ gate: jobGate(job), executed: false, exitCode: null }],
+        gates: unstartedGates,
+        checks: unstartedChecks,
         reason: `the job body could not be started: ${errorLine(error)}`,
       };
     }
@@ -1129,8 +1183,8 @@ export class JobHost {
       return {
         outcome: "crashed",
         execution: execution.info,
-        gates: [unstarted],
-        checks: [{ gate: jobGate(job), executed: false, exitCode: null }],
+        gates: unstartedGates,
+        checks: unstartedChecks,
         reason: `the job body could not be started: ${job.run.command} did not run`,
       };
     }
@@ -1140,7 +1194,6 @@ export class JobHost {
       execution.bowedOut || execution.interrupted || execution.exitCode === null);
     // The work phase's claim sits beside the publish body's: either one UNKNOWN or FAIL
     // holds the run there, so nothing a failed harness staged is reported as shipped.
-    const workCheck = phased && stageDir ? await this.readWorkPhase(job, stageDir) : undefined;
     const { work, reportStatus } = report;
     const gates = workCheck ? [verdictFromGate(workCheck), ...report.gates] : report.gates;
     // A body this host stopped never got to speak, whatever it managed to exit with on the
@@ -1541,7 +1594,7 @@ export class JobHost {
     if (!isProcessJob(job) || !job.run.work) throw new Error(`job ${job.slug} declares no run.work`);
     if (!stageDir) throw new Error(`job ${job.slug}: the work phase needs a stage to write to`);
     const out = stageOutputDir(stageDir);
-    await mkdir(out, { recursive: true });
+    await mkdir(out, { recursive: true, mode: 0o755 });
     const record = async (result: WorkPhaseResult) => {
       await writeFile(workPhaseRecordPath(stageDir), JSON.stringify(result) + "\n", { mode: 0o644 });
       return result;
@@ -1561,9 +1614,11 @@ export class JobHost {
     const hostEnv = this.opts.env ?? process.env;
     const noAutoMemory = hostEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY;
     // `envelope` less every credential and the verdict path: this phase proves nothing to
-    // the host, and it is the phase the credentials are being kept from.
+    // the host, and it is the phase the credentials are being kept from. `run.passthrough`
+    // is the publish body's grant — it is how an ambient identity such as AWS_ROLE_ARN is
+    // handed on — so this phase gets only the base list.
     const env: NodeJS.ProcessEnv = {
-      ...passthroughEnv(hostEnv, job.run.passthrough),
+      ...passthroughEnv(hostEnv),
       ...job.run.env,
       ...(noAutoMemory && !["0", "false"].includes(noAutoMemory.toLowerCase())
         ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: noAutoMemory }
@@ -1581,6 +1636,7 @@ export class JobHost {
       ...(job.model ? { JOB_MODEL: job.model } : {}),
     };
     const execution = await this.spawnBody(phase, env, base);
+    await openStageToPublisher(out);
     return record({
       executed: execution.started,
       exitCode: execution.bowedOut || execution.interrupted ? null : execution.exitCode,

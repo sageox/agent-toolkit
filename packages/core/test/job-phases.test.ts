@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -57,7 +57,7 @@ let runs: JobRun[];
 const host = (stage: string | null = stageDir) =>
   new JobHost({
     workDir: dir,
-    env: { ...process.env },
+    env: { ...process.env, PASSED_ON: "ambient-identity" },
     secretOpts: { dir: secretsDir },
     onRun: (run) => runs.push(run),
     ...(stage ? { stageDir: stage } : {}),
@@ -159,5 +159,48 @@ describe("the work phase", () => {
     const unphased = await host().tick(plain);
     expect(unphased.outcome).toBe("crashed");
     expect(unphased.reason).toMatch(/declares no run\.work, and this run was given a stage/);
+  });
+});
+
+describe("the stage between the phases", () => {
+  it("withholds the publish body's passthrough grant from the work phase", async () => {
+    const seen = join(dir, "work-env.json");
+    const job = phases(DUMP(seen), "");
+    await host().work({ ...job, run: { ...job.run, passthrough: ["PASSED_ON"] } });
+    const env = JSON.parse(readFileSync(seen, "utf8")) as Record<string, string>;
+    expect(env.PASSED_ON).toBeUndefined();
+    expect(env.PATH).toBeDefined();
+  });
+
+  it("makes what the work phase staged readable by another UID", async () => {
+    const staged = 'const fs=require("fs");fs.mkdirSync(process.env.JOB_STAGE_DIR+"/d",{mode:0o700});fs.writeFileSync(process.env.JOB_STAGE_DIR+"/d/f","x",{mode:0o600});';
+    await host().work(phases(staged, ""));
+    const { statSync } = await import("node:fs");
+    expect(statSync(join(stageOutputDir(stageDir), "d")).mode & 0o055).toBe(0o055);
+    expect(statSync(join(stageOutputDir(stageDir), "d", "f")).mode & 0o044).toBe(0o044);
+  });
+
+  it("refuses to start a publish body on a stage holding a symlink", async () => {
+    const seen = join(dir, "publish-env.json");
+    const job = phases("", DUMP(seen) + PROVES);
+    await host().work(job);
+    await symlink(join(secretsDir, "GH_TOKEN"), join(stageOutputDir(stageDir), "pr-body.md"));
+    const run = await host().tick(job);
+
+    expect(run.outcome).toBe("crashed");
+    expect(run.reason).toMatch(/pr-body\.md, which is not a regular file or directory/);
+    expect(run.verdict.status).toBe("UNKNOWN");
+    expect(() => readFileSync(seen)).toThrow();
+  });
+
+  it("keeps a failed work phase's FAIL when the publish body never starts", async () => {
+    const job = phases("process.exit(3)", PROVES);
+    await host().work(job);
+    await symlink("/proc/self/environ", join(stageOutputDir(stageDir), "env"));
+    const run = await host().tick(job);
+
+    expect(run.outcome).toBe("crashed");
+    expect(run.verdict.status).toBe("FAIL");
+    expect(run.checks).toContainEqual({ gate: "job:fix:work", executed: true, exitCode: 3 });
   });
 });

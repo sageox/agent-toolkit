@@ -2039,7 +2039,10 @@ async function jobCmd(argv: string[]): Promise<void> {
   }
 
   if (sub === "work") return jobWorkCmd(argv, agent.dir, manifest.name, job);
-  const stageDir = optionValue(argv, "stage", "the directory the work phase staged into");
+  // Resolved here, against the caller's directory, as `job work` resolves it: the host
+  // chdirs into the bundle below, and the two phases must land on one stage.
+  const stagePath = optionValue(argv, "stage", "the directory the work phase staged into");
+  const stageDir = stagePath ? resolve(stagePath) : undefined;
 
   // Before anything is opened: a mistyped flag is a refusal at the terminal, not a relay
   // connection and a chdir that a throw would leave behind.
@@ -2081,7 +2084,7 @@ async function jobCmd(argv: string[]): Promise<void> {
     ...reporter?.channel,
     secretOpts: { dir: jobSecretDirs(argv, secretsDir) },
     rehearsal: rehearsal !== undefined,
-    ...(stageDir ? { stageDir: resolve(stageDir) } : {}),
+    ...(stageDir ? { stageDir } : {}),
   });
   let run: JobRun;
   try {

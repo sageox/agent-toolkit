@@ -655,7 +655,7 @@ whose output is a credentialed write:
 run:
   command: node
   args: [runner/publish.ts]
-  jobSecrets: { GITHUB_TOKEN: github-write-token }
+  jobSecrets: { GITHUB_TOKEN: GITHUB_WRITE_TOKEN }
   work:
     command: node
     args: [runner/harness.ts]
@@ -668,7 +668,8 @@ run:
 | Runs | `run.work.command` | `run.command` |
 | `secrets`, `jobSecrets` | none resolved | resolved |
 | `JOB_VERDICT_PATH` | unset | set |
-| `JOB_STAGE_DIR` | `<dir>/out`, writable | `<dir>/out` — untrusted input |
+| `JOB_STAGE_DIR` | `<dir>/out`, writable | `<dir>/out` — untrusted input, directories and regular files only |
+| `run.passthrough` | not applied | applied |
 | `JOB_PHASE` | `work` | unset |
 | Wall clock | `run.work.wallClockMs` | `budget.wallClockMs − run.work.wallClockMs − budget.deadlineHeadroomMs` |
 
@@ -680,6 +681,11 @@ one that left no record at UNKNOWN. The record is the work phase's own claim —
 rewrite it — so the publish body must still verify what it publishes rather than trusting
 that a 0 means the stage is sound. The kill switch is read when the publish phase is
 admitted, so a parked job's work phase may still run; nothing it staged is published.
+
+Once the work body exits, the work phase makes everything it staged readable by other users,
+since the publish phase runs as a different UID. The publish phase then refuses to start if
+the stage holds anything but directories and regular files: a staged symlink would resolve
+in the publish container, where it can name that container's own secrets.
 
 Refused beside `trigger.onRequest` (that run executes in the gateway's process) and
 `worker` (the dispatcher builds a single-container Pod).

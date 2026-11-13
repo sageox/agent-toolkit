@@ -785,6 +785,13 @@ refuses 'a work phase on a worker' 'job shift has work: true, which only a sched
   --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'
 refuses 'a work phase on a mirrored prompt job' "at '/agents/harry/jobs/2/work': false schema" \
   --set 'agents.harry.jobs[2].work=true'
+grep -qF -- '/work/.gitconfig' <<<"$sweep" || fail 'the work phase has no HOME telling Git the read-only checkouts are safe'
+refuses 'a shared volume named like the work stage' \
+  "ida: sharedVolumes has a volume named job-stage, a name the chart gives job sweep's work phase; rename it" \
+  "${phased[@]}" \
+  --set 'agents.ida.sharedVolumes[0].name=job-stage' \
+  --set 'agents.ida.sharedVolumes[0].mountPath=/shared' \
+  --set 'agents.ida.sharedVolumes[0].claimName=shared'
 refuses 'a work phase beside a cluster token' \
   'job sweep has work: true and serviceAccount.automountJobToken is set' \
   --set 'agents.ida.jobs[0].work=true' --set agents.ida.serviceAccount.automountJobToken=true

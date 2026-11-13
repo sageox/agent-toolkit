@@ -82,6 +82,12 @@ scheduled run is lost.
       # what opened a window where a configured agent starts and reads no repositories.
       [ -e /config/repos.conf ] || rm -f {{ $into.root }}/{{ .name }}/repos.conf
       rm -f {{ $into.root }}/{{ .name }}/.env
+      {{- if .stageInto }}
+      # The work phase's HOME. It reads checkouts another UID cloned, which Git refuses as
+      # "dubious ownership" without this; they are mounted read-only, and that UID is the
+      # publisher, not anything less trusted than this phase.
+      printf '[safe]\n\tdirectory = *\n' > {{ $into.root }}/.gitconfig
+      {{- end }}
   securityContext:
     runAsNonRoot: true
     runAsUser: {{ $into.uid }}
