@@ -13,7 +13,11 @@ with nothing to say so. Refused at load rather than discovered during an inciden
 Check the log for `event_skipped` — the `reason` names the gate: `own_message`,
 `not_mentioned`, `author_gate:owner-only` (the sender is not the owner), `kill_switch`, or
 `limit:<rule>`. No line at all means the relay is not delivering: run
-`./bin/sageox-agent probe --agent <name> --relay <url>`.
+`./bin/sageox-agent probe --agent <name> --relay <url>`. A Buzz agent that heard nothing on a
+configured channel for five minutes asks the relay for that channel directly; a
+`subscription_stalled channel=<id>` warning means the relay holds a message the agent's live
+subscription never delivered. The socket and its pings are fine — that one subscription is
+not. Restart the agent: it re-subscribes every channel and resumes from where it stopped.
 
 **It answers, but says it cannot use its memory or tools.**
 The tool policy is not admitting them. `./bin/sageox-agent doctor` names the exact strings

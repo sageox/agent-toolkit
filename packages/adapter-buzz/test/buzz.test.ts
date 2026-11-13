@@ -763,6 +763,68 @@ describe("BuzzAdapter subscription shape", () => {
   });
 });
 
+describe("BuzzAdapter stall check", () => {
+  const twoChannels = [
+    { id: "hive", reply: "private" as const },
+    { id: "eng", reply: "private" as const },
+  ];
+
+  /** Stored and pushed, the way a relay takes a post: a stalled REQ is the only one that misses it. */
+  function publish(event: ReturnType<typeof inChannel>) {
+    relay.backlog.push(event);
+    relay.emit(event);
+  }
+
+  function stallLines(warn: { mock: { calls: unknown[][] } }) {
+    return warn.mock.calls
+      .map((args) => String(args[0]))
+      .filter((line) => line.startsWith("subscription_stalled"));
+  }
+
+  // The relay kept the socket and every ping alive and simply stopped feeding one REQ; the
+  // agent looked healthy and logged nothing for a day. The check is what turns that into a line.
+  it("names the one channel whose live REQ stopped delivering what the relay holds", async () => {
+    relay = await LocalRelay.start();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const got: InboundEvent[] = [];
+    const a = newAdapter({ channels: twoChannels, since: now - 600, stallCheckIntervalMs: 50 });
+    await a.start((e) => got.push(e));
+    await settle();
+
+    relay.stall("eng");
+    const missed = inChannel("eng", "nobody hears this", now - 120);
+    publish(missed);
+    await settle(300);
+
+    expect(got).toEqual([]);
+    const lines = stallLines(warn);
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("channel=eng");
+    expect(lines[0]).toContain(`missed_event=${missed.id}`);
+    warn.mockRestore();
+    await a.stop();
+  });
+
+  // A channel can be silent for a day. Quiet is not a stall, and neither is a channel that
+  // delivered everything the relay holds.
+  it("says nothing about a quiet channel or one that is still being fed", async () => {
+    relay = await LocalRelay.start();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const got: InboundEvent[] = [];
+    const a = newAdapter({ channels: twoChannels, since: now - 600, stallCheckIntervalMs: 50 });
+    await a.start((e) => got.push(e));
+    await settle();
+
+    publish(inChannel("eng", "heard live", now - 120));
+    await settle(300);
+
+    expect(got.map((e) => e.text)).toEqual(["heard live"]);
+    expect(stallLines(warn)).toEqual([]);
+    warn.mockRestore();
+    await a.stop();
+  });
+});
+
 describe("BuzzAdapter working signals", () => {
   it("acknowledges the message it picked up with a NIP-25 reaction", async () => {
     relay = await LocalRelay.start();

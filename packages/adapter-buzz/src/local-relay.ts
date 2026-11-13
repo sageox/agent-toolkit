@@ -27,6 +27,8 @@ export class LocalRelay {
   readonly reqs: ReqRecord[] = [];
   /** The REQs still open, with the socket to push to. `emit` routes on these. */
   private openSubs: OpenSub[] = [];
+  /** Open REQs {@link stall} has stopped pushing to. */
+  private stalled = new Set<OpenSub>();
   /** Every event the adapter published. */
   readonly published: Event[] = [];
   /** Every signed AUTH event, in order — a reconnected socket is challenged again. */
@@ -203,9 +205,22 @@ export class LocalRelay {
    */
   emit(event: Event): void {
     for (const sub of this.openSubs) {
+      if (this.stalled.has(sub)) continue;
       if (sub.filters.some((filter) => matchesFilter(event, filter))) {
         sub.ws.send(JSON.stringify(["EVENT", sub.subId, event]));
       }
+    }
+  }
+
+  /**
+   * Stops pushing live events to the REQs open on `channel` right now, while still storing
+   * events and answering every new REQ — a relay that keeps a subscription open and quietly
+   * stops feeding it, on a socket that stays healthy.
+   */
+  stall(channel: string): void {
+    for (const sub of this.openSubs) {
+      const channels = sub.filters.flatMap((filter) => (filter["#h"] as string[] | undefined) ?? []);
+      if (channels.includes(channel)) this.stalled.add(sub);
     }
   }
 

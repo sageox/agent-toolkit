@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Buzz: a `subscription_stalled channel=<id> missed_event=<id>` warning when one channel's
+  live subscription stops delivering while the socket stays up. A configured channel that
+  has heard nothing for five minutes (`stallCheckIntervalMs`) is asked about with a fresh
+  read; anything the relay returns that the subscription never received is the stall. A
+  channel that is merely quiet logs nothing. Before this, a stalled subscription looked
+  healthy — process alive, pings answered — until someone noticed missed messages.
+
 - Helm: an optional per-agent `authTag` value, injected as `BUZZ_AUTH_TAG` into
   the agent Deployment and its scheduled-job hosts. Carries a NIP-OA owner
   attestation so the running agent's authenticated connection binds it to its

@@ -65,6 +65,27 @@ const READ_TIMEOUT_MS = 5000;
  */
 const DIRECTORY_EOSE_TIMEOUT_MS = 30_000;
 
+/**
+ * How often a channel subscription that has heard nothing is checked against the relay.
+ *
+ * A quiet channel and a stalled REQ look identical from inside the REQ, so the check asks
+ * the relay in a fresh one-shot REQ whether it holds anything the live one never
+ * delivered — that is what tells them apart. Five minutes keeps a stall a minutes-long
+ * incident rather than a day-long one, at the cost of one small REQ per quiet channel per
+ * interval; a channel that has delivered within the interval is not checked at all.
+ */
+const STALL_CHECK_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * How old, in seconds, an event must be before its absence from the live REQ counts.
+ *
+ * An event published moments ago may still be on its way down the live subscription, and
+ * `created_at` is the author's clock, which can run ahead of ours. The same minute
+ * {@link FRESH_START_LOOKBACK} allows for skew keeps an in-flight event from being
+ * reported as missed.
+ */
+const STALL_GRACE_SECONDS = 60;
+
 export interface BuzzAdapterOptions {
   relayUrl: string;
   /**
@@ -94,6 +115,19 @@ export interface BuzzAdapterOptions {
    * {@link FRESH_START_LOOKBACK} rather than asking for the channel's whole stored history.
    */
   since?: number;
+  /**
+   * Overrides {@link STALL_CHECK_INTERVAL_MS}. `0` turns the check off — for a caller
+   * that holds the adapter for one call and exits, not for a listening agent.
+   */
+  stallCheckIntervalMs?: number;
+}
+
+/** What one channel's live REQ has delivered, as the stall check reads it. */
+interface Heard {
+  /** The newest `created_at` received on this channel's REQ, or one below its floor. */
+  newest: number;
+  /** Wall-clock milliseconds of the last receipt, or of the subscription opening. */
+  at: number;
 }
 
 export class BuzzAdapter implements SurfaceAdapter {
@@ -128,6 +162,13 @@ export class BuzzAdapter implements SurfaceAdapter {
    * Written once per directory record and never read on the message path.
    */
   private agentRecords = new Map<string, Stamped>();
+  /**
+   * Per channel rather than per process: with one REQ per channel, one channel can stall
+   * while its siblings stream, and a process-wide "last event" would hide exactly that.
+   */
+  private heard = new Map<string, Heard>();
+  private stallTimer?: ReturnType<typeof setInterval>;
+  private checkingStalls = false;
 
   constructor(private opts: BuzzAdapterOptions) {
     this.since = opts.since;
@@ -178,6 +219,12 @@ export class BuzzAdapter implements SurfaceAdapter {
 
     this.onEvent = onEvent;
     this.subscribeAll();
+
+    const interval = this.opts.stallCheckIntervalMs ?? STALL_CHECK_INTERVAL_MS;
+    if (interval > 0 && (this.opts.channels ?? []).length > 0) {
+      this.stallTimer = setInterval(() => void this.checkStalls(interval), interval);
+      this.stallTimer.unref?.();
+    }
   }
 
   /**
@@ -227,8 +274,19 @@ export class BuzzAdapter implements SurfaceAdapter {
     });
 
     for (const filter of this.filters()) {
+      const subscribed = filter[`#${BUZZ_DEFAULTS.channelTag}`]?.[0];
+      if (subscribed !== undefined && !this.heard.has(subscribed)) {
+        this.heard.set(subscribed, { newest: (filter.since ?? 0) - 1, at: Date.now() });
+      }
       relay.subscribe([filter], {
         onevent: (event: Event) => {
+          // On receipt, and before the cross-post check below: the question is whether
+          // this REQ is being fed, not whether it was the one to deliver.
+          if (subscribed !== undefined) {
+            const heard = this.heard.get(subscribed)!;
+            heard.newest = Math.max(heard.newest, event.created_at);
+            heard.at = Date.now();
+          }
           const deliver = () => {
             // Advance the cursor on everything delivered, not just what we act on: a
             // filtered-out event still proves the relay had nothing older left to send.
@@ -243,7 +301,6 @@ export class BuzzAdapter implements SurfaceAdapter {
             // An event tagged with two of our channels matches two REQs, and
             // normalization gives it one channel. Only that channel's REQ delivers it, or
             // the brain answers the same message once per REQ it arrived on.
-            const subscribed = filter[`#${BUZZ_DEFAULTS.channelTag}`]?.[0];
             if (subscribed !== undefined && inbound.channel.id !== subscribed) return;
             this.lastByChannel.set(inbound.channel.id, inbound);
             onEvent(inbound);
@@ -704,9 +761,67 @@ export class BuzzAdapter implements SurfaceAdapter {
   }
 
   async stop(): Promise<void> {
+    clearInterval(this.stallTimer);
+    this.stallTimer = undefined;
     this.relay?.close();
     this.relay = undefined;
     this.onEvent = undefined;
+  }
+
+  /**
+   * Reports a channel whose live REQ has stopped delivering what the relay holds.
+   *
+   * A stalled REQ is otherwise silent: socket open, nostr-tools' ping answered, process
+   * healthy, nothing logged. The ping only proves the socket — the stall that made a
+   * two-channel agent deaf for a day was a REQ the relay stopped feeding on a socket that
+   * answered every ping. Time since the last event cannot decide it alone, because a
+   * channel may be quiet for a day; so a channel quiet for a whole interval is asked about
+   * directly, and anything the relay returns that the REQ never received is the stall.
+   *
+   * Each missed event is reported once: the floor moves past it, so a stall that keeps
+   * swallowing events keeps logging, and one that was a single gap logs that gap. It only
+   * reports — a restart re-opens every REQ and resumes from the cursor.
+   */
+  private async checkStalls(interval: number): Promise<void> {
+    const relay = this.relay;
+    if (!relay || this.checkingStalls) return;
+    this.checkingStalls = true;
+    try {
+      for (const [channel, heard] of this.heard) {
+        if (Date.now() - heard.at < interval) continue;
+        const until = Math.floor(Date.now() / 1000) - STALL_GRACE_SECONDS;
+        if (until <= heard.newest) continue;
+        // `stop()` mid-check: a subscribe on the closed socket throws, and its failure
+        // would be logged as a check that failed rather than an adapter that stopped.
+        if (this.relay !== relay) return;
+        const filter: Filter = { kinds: [BUZZ_DEFAULTS.kind], since: heard.newest + 1, until };
+        filter[`#${BUZZ_DEFAULTS.channelTag}`] = [channel];
+        let missed: Event[];
+        try {
+          missed = await this.query(relay, filter);
+        } catch (error) {
+          if (this.relay !== relay) return;
+          console.warn(
+            `subscription_check_failed surface=${SURFACE} channel=${channel} ` +
+              `reason=${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+          );
+          continue;
+        }
+        const newest = missed.reduce<Event | undefined>(
+          (a, b) => (a && a.created_at >= b.created_at ? a : b),
+          undefined,
+        );
+        if (!newest || newest.created_at <= heard.newest) continue;
+        heard.newest = newest.created_at;
+        console.warn(
+          `subscription_stalled surface=${SURFACE} channel=${channel} ` +
+            `missed_event=${newest.id} missed_at=${newest.created_at} ` +
+            `quiet_for_s=${Math.round((Date.now() - heard.at) / 1000)}`,
+        );
+      }
+    } finally {
+      this.checkingStalls = false;
+    }
   }
 
   /** One filter per REQ `start` opens — see {@link BuzzAdapterOptions.channels}. */
