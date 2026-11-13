@@ -19,8 +19,8 @@ configured channel for five minutes asks the relay for that channel directly; a
 subscription never delivered. The socket and its pings are fine — that one subscription is
 not. Restarting the agent re-subscribes every channel and restores live delivery, but it does
 not replay what was missed: it resumes from one cursor shared by all channels, and a healthy
-channel may have moved that cursor past the missed message. The warning names each missed
-event, so a message that still needs an answer can be re-asked once the agent is back.
+channel may have moved that cursor past the missed message. The warning names the newest
+missed event, not every one, so check the channel for what went unanswered during the gap.
 
 **It answers, but says it cannot use its memory or tools.**
 The tool policy is not admitting them. `./bin/sageox-agent doctor` names the exact strings

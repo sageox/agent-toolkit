@@ -86,6 +86,13 @@ const STALL_CHECK_INTERVAL_MS = 5 * 60_000;
  */
 const STALL_GRACE_SECONDS = 60;
 
+/**
+ * Ids kept per channel for the newest second. Real chat stays far below this; past it a
+ * sender flooding one backdated second can't grow memory or the check's `limit`, at the
+ * cost of a possible false `subscription_stalled` line for that second.
+ */
+const MAX_IDS_AT_NEWEST = 100;
+
 export interface BuzzAdapterOptions {
   relayUrl: string;
   /**
@@ -826,7 +833,11 @@ export class BuzzAdapter implements SurfaceAdapter {
           continue;
         }
         const newest = missed
-          .filter((e) => e.created_at > heard.newest || !heard.atNewest.has(e.id))
+          .filter(
+            (e) =>
+              e.created_at > heard.newest ||
+              (e.created_at === heard.newest && !heard.atNewest.has(e.id)),
+          )
           .reduce<Event | undefined>((a, b) => (a && a.created_at >= b.created_at ? a : b), undefined);
         if (!newest) continue;
         markHeard(heard, newest);
@@ -892,7 +903,7 @@ function markHeard(heard: Heard, event: Event): void {
   if (event.created_at > heard.newest) {
     heard.newest = event.created_at;
     heard.atNewest = new Set([event.id]);
-  } else if (event.created_at === heard.newest) {
+  } else if (event.created_at === heard.newest && heard.atNewest.size < MAX_IDS_AT_NEWEST) {
     heard.atNewest.add(event.id);
   }
 }
