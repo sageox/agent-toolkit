@@ -58,7 +58,8 @@ not. Nothing at render time can see that; the Deployment never becomes ready, an
 scheduled run is lost.
 */}}
 {{- define "agent.stageConfig" -}}
-- name: stage-config
+{{- $into := default (dict "container" "stage-config" "root" "/agents" "uid" 10001 "volume" "agent-data") .stageInto -}}
+- name: {{ $into.container }}
   image: {{ default (required "imageRef is required" .root.Values.imageRef) .agent.bundle.stageImage | quote }}
   command: ["/bin/sh", "-ceu"]
   args:
@@ -67,24 +68,24 @@ scheduled run is lost.
       # then land each file by rename, which is atomic: a reader sees the whole old file or
       # the whole new one. `persistence.existingClaim` is the operator's own volume, so this
       # stage cannot assume it is the only thing writing where it lands.
-      install -d -m 0700 /agents/{{ .name }}
-      stage=$(mktemp -d /agents/.stage.XXXXXX)
+      install -d -m 0700 {{ $into.root }}/{{ .name }}
+      stage=$(mktemp -d {{ $into.root }}/.stage.XXXXXX)
       cp -LR /config/. "$stage/"
       rm -f "$stage/.env"
       find "$stage" -type f | while read -r file; do
-        dest="/agents/{{ .name }}/${file#$stage/}"
+        dest="{{ $into.root }}/{{ .name }}/${file#$stage/}"
         mkdir -p "${dest%/*}"
         mv -f "$file" "$dest"
       done
       rm -rf "$stage"
       # Only once the bundle has genuinely stopped supplying one. Deleting it up front is
       # what opened a window where a configured agent starts and reads no repositories.
-      [ -e /config/repos.conf ] || rm -f /agents/{{ .name }}/repos.conf
-      rm -f /agents/{{ .name }}/.env
+      [ -e /config/repos.conf ] || rm -f {{ $into.root }}/{{ .name }}/repos.conf
+      rm -f {{ $into.root }}/{{ .name }}/.env
   securityContext:
     runAsNonRoot: true
-    runAsUser: 10001
-    runAsGroup: 10001
+    runAsUser: {{ $into.uid }}
+    runAsGroup: {{ $into.uid }}
     allowPrivilegeEscalation: false
     capabilities:
       drop: ["ALL"]
@@ -94,11 +95,13 @@ scheduled run is lost.
       mountPath: /config
       readOnly: true
     {{- end }}
-    - name: agent-data
-      mountPath: /agents
+    - name: {{ $into.volume }}
+      mountPath: {{ $into.root }}
+    {{- if not .stageInto }}
     {{- range $volume := .agent.sharedVolumes }}
     - name: {{ $volume.name }}
       mountPath: {{ $volume.mountPath | quote }}
+    {{- end }}
     {{- end }}
 {{- end -}}
 

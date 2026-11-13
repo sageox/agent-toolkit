@@ -71,6 +71,7 @@ import {
   describeJobRun,
   serveJobs,
   requestableJobs,
+  isProcessJob,
   isPromptJob,
   readJobPrompt,
   type PromptJob,
@@ -1983,10 +1984,11 @@ async function jobCmd(argv: string[]): Promise<void> {
     return;
   }
   const slug = argv[1];
-  if ((!["run", "arm", "park", "status", "cancel"].includes(sub ?? "")) || !slug || slug.startsWith("--")) {
+  if ((!["run", "work", "arm", "park", "status", "cancel"].includes(sub ?? "")) || !slug || slug.startsWith("--")) {
     throw new Error(
       "usage: sageox-agent job run <slug> [--trigger schedule|on-request|webhook] " +
-        "[--param <name>=<value>]... [--agent <name>]\n" +
+        "[--param <name>=<value>]... [--stage <dir>] [--agent <name>]\n" +
+        "       sageox-agent job work <slug> --stage <dir> [--agent <name>]\n" +
         "       sageox-agent job arm | park <slug> [--agent <name>]\n" +
         "       sageox-agent job status | cancel <slug> --run-id <id> [--agent <name>]",
     );
@@ -1999,7 +2001,9 @@ async function jobCmd(argv: string[]): Promise<void> {
   const agent = await agentFromFlag(argv);
   // Before the agent's `.env` loads, so that and `--secrets` are all a rehearsal holds.
   const rehearsalDir = hasFlag(argv, "rehearse") ? leaveTheShell() : undefined;
-  loadDotEnv(agent.env);
+  // The work phase is the one a credential is being kept from, so it does not read the
+  // file a local agent keeps them in. The CLI never resolves a ref for it either.
+  if (sub !== "work") loadDotEnv(agent.env);
   const secretsDir = secretsDirFrom(argv); // before the chdir below
   const manifest = readManifest(agent.config);
   const job = manifest.jobs.find((l) => l.slug === slug);
@@ -2033,6 +2037,9 @@ async function jobCmd(argv: string[]): Promise<void> {
         `\`sageox-agent run\` holds that clock; \`sageox-agent job park ${job.slug}\` stops it`,
     );
   }
+
+  if (sub === "work") return jobWorkCmd(argv, agent.dir, manifest.name, job);
+  const stageDir = optionValue(argv, "stage", "the directory the work phase staged into");
 
   // Before anything is opened: a mistyped flag is a refusal at the terminal, not a relay
   // connection and a chdir that a throw would leave behind.
@@ -2074,6 +2081,7 @@ async function jobCmd(argv: string[]): Promise<void> {
     ...reporter?.channel,
     secretOpts: { dir: jobSecretDirs(argv, secretsDir) },
     rehearsal: rehearsal !== undefined,
+    ...(stageDir ? { stageDir: resolve(stageDir) } : {}),
   });
   let run: JobRun;
   try {
@@ -2107,6 +2115,35 @@ async function jobCmd(argv: string[]): Promise<void> {
   // somebody chose, while an undeclared trigger is a job wired to the wrong job.
   if (["crashed", "budget-bowout", "unknown", "cancelled"].includes(run.outcome)) process.exit(1);
   if (run.outcome === "denied-trigger") process.exit(1);
+}
+
+/**
+ * `job work`: a `run.work` job's work phase, in the container the deployment gave it.
+ *
+ * Refuses every way of handing it a credential rather than ignoring them: the point of the
+ * phase is that it holds none, and a flag silently dropped reads as one honored. Exits 0
+ * once the phase's outcome is recorded, whatever that outcome was, because a failed work
+ * container stops the Pod before the publish phase runs — and that phase is the one that
+ * writes the run record and announces it. Only a stage it could not write is a non-zero
+ * exit, which is a run nobody can account for and should stop the Pod.
+ */
+async function jobWorkCmd(argv: string[], dir: string, agentName: string, job: JobConfig): Promise<void> {
+  for (const name of ["secrets", "job-secrets", "param"] as const) {
+    if (hasFlag(argv, name)) throw new Error(`--${name} does not apply to \`job work\`: the work phase is given no secrets and no parameters`);
+  }
+  if (flag(argv, "trigger", "schedule") !== "schedule") throw new Error("the work phase runs on a schedule only");
+  if (!isProcessJob(job) || !job.run.work) throw new Error(`job "${job.slug}" declares no run.work`);
+  const stage = optionValue(argv, "stage", "the directory to stage into");
+  if (!stage) throw new Error("--stage is required: it is where the publish phase reads the work phase from");
+  const stageDir = resolve(stage);
+  process.chdir(dir);
+  const host = new JobHost({ ...jobWorkEvents(agentName), stageDir });
+  const result = await host.work(job);
+  const line = !result.executed
+    ? `${job.slug}: work phase did not run\n`
+    : `${job.slug}: work phase exited ${result.exitCode ?? "without an exit code"}\n`;
+  if (process.env.AGENT_WORK_EVENTS === "1") writeJobDiagnostic("host", line);
+  else process.stdout.write(line);
 }
 
 /**
@@ -3089,6 +3126,8 @@ running it:
                                authors manifests can run against a checkout in CI
   doctor [--bundle <dir>]      check config, credentials, and policy before running
   run [--bundle <dir>]         run every configured surface locally (Ctrl+C to stop)
+  job work <slug> --stage <dir>
+                               a run.work job's work phase: no secrets, stages for job run
   job run <slug> [--trigger schedule|on-request|webhook]
                                run one declared job once and exit — what a CronJob execs.
                                The trigger is stamped from this flag; a run started here is

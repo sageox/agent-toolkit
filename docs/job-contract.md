@@ -646,6 +646,44 @@ messages read, and `partial` for a read that stopped early.
 A prompt job without `source` is unchanged: its turn keeps the agent's tools, its reply is
 posted as written, and the turn finishing is its one gate.
 
+## A job with a work phase
+
+`run.work` splits a scheduled body in two, for a job whose work is an untrusted harness and
+whose output is a credentialed write:
+
+```yaml
+run:
+  command: node
+  args: [runner/publish.ts]
+  jobSecrets: { GITHUB_TOKEN: github-write-token }
+  work:
+    command: node
+    args: [runner/harness.ts]
+    wallClockMs: 2400000
+```
+
+| | Work phase | Publish phase |
+|---|---|---|
+| Started by | `sageox-agent job work <slug> --stage <dir>` | `sageox-agent job run <slug> --stage <dir>` |
+| Runs | `run.work.command` | `run.command` |
+| `secrets`, `jobSecrets` | none resolved | resolved |
+| `JOB_VERDICT_PATH` | unset | set |
+| `JOB_STAGE_DIR` | `<dir>/out`, writable | `<dir>/out` — untrusted input |
+| `JOB_PHASE` | `work` | unset |
+| Wall clock | `run.work.wallClockMs` | `budget.wallClockMs − run.work.wallClockMs − budget.deadlineHeadroomMs` |
+
+A target runs the phases in separate containers under separate UIDs, publish only once every
+process of the work phase is dead; see the Helm chart's "A job with a work phase". The work
+phase records how it ended in `<dir>/work.json`, and the publish phase reports that as the
+gate `job:<slug>:work` beside its own: a work phase that failed holds the run at FAIL, and
+one that left no record at UNKNOWN. The record is the work phase's own claim — its body can
+rewrite it — so the publish body must still verify what it publishes rather than trusting
+that a 0 means the stage is sound. The kill switch is read when the publish phase is
+admitted, so a parked job's work phase may still run; nothing it staged is published.
+
+Refused beside `trigger.onRequest` (that run executes in the gateway's process) and
+`worker` (the dispatcher builds a single-container Pod).
+
 ## Structured work events (schema 1)
 
 Set `AGENT_WORK_EVENTS=1` on `sageox-agent job run` or `sageox-agent run` to emit
