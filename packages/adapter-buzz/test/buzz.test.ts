@@ -763,6 +763,127 @@ describe("BuzzAdapter subscription shape", () => {
   });
 });
 
+describe("BuzzAdapter stall check", () => {
+  const twoChannels = [
+    { id: "hive", reply: "private" as const },
+    { id: "eng", reply: "private" as const },
+  ];
+
+  /** Stored and pushed, the way a relay takes a post: a stalled REQ is the only one that misses it. */
+  function publish(event: ReturnType<typeof inChannel>) {
+    relay.backlog.push(event);
+    relay.emit(event);
+  }
+
+  function warnings(warn: { mock: { calls: unknown[][] } }, kind: string) {
+    return warn.mock.calls
+      .map((args) => String(args[0]))
+      .filter((line) => line.startsWith(kind));
+  }
+
+  /** The check's own one-shot REQs for `channel` — the only REQs that carry an `until`. */
+  function checksOf(channel: string) {
+    return chatReqs().filter(
+      (req) => req.filters[0].until !== undefined && (req.filters[0]["#h"] as string[])[0] === channel,
+    );
+  }
+
+  async function listening() {
+    const got: InboundEvent[] = [];
+    const a = newAdapter({ channels: twoChannels, since: now - 600, stallCheckIntervalMs: 50 });
+    await a.start((e) => got.push(e));
+    await vi.waitFor(() =>
+      expect(chatReqs().filter((req) => req.filters[0].until === undefined)).toHaveLength(2),
+    );
+    return { a, got };
+  }
+
+  // The relay kept the socket and every ping alive and simply stopped feeding one REQ; the
+  // agent looked healthy and logged nothing for a day. The check is what turns that into a line.
+  it("names the one channel whose live REQ stopped delivering what the relay holds", async () => {
+    relay = await LocalRelay.start();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { a, got } = await listening();
+
+    relay.stall("eng");
+    const missed = inChannel("eng", "nobody hears this", now - 120);
+    publish(missed);
+
+    await vi.waitFor(() => expect(warnings(warn, "subscription_stalled")).toHaveLength(1), {
+      timeout: 3000,
+    });
+    expect(got).toEqual([]);
+    const [line] = warnings(warn, "subscription_stalled");
+    expect(line).toContain("channel=eng");
+    expect(line).toContain(`missed_event=${missed.id}`);
+    warn.mockRestore();
+    await a.stop();
+  });
+
+  // `created_at` is whole seconds: a message missed in the same second as the last one
+  // received is still a miss, and the one that was received is not.
+  it("names a message missed in the same second as the last one received", async () => {
+    relay = await LocalRelay.start();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { a, got } = await listening();
+
+    const heard = inChannel("eng", "heard live", now - 120);
+    publish(heard);
+    await vi.waitFor(() => expect(got).toHaveLength(1));
+    relay.stall("eng");
+    const missed = inChannel("eng", "missed, same second", now - 120);
+    publish(missed);
+
+    await vi.waitFor(() => expect(warnings(warn, "subscription_stalled")).toHaveLength(1), {
+      timeout: 3000,
+    });
+    const [line] = warnings(warn, "subscription_stalled");
+    expect(line).toContain(`missed_event=${missed.id}`);
+    warn.mockRestore();
+    await a.stop();
+  });
+
+  // nostr-tools sends a REQ on a closed socket as an unawaited promise; a check fired then
+  // would be an unhandled rejection, which ends a Node process. Vitest fails the run on one.
+  it("skips the check while the relay is gone", async () => {
+    relay = await LocalRelay.start();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const a = newAdapter({ channels: [{ id: "eng", reply: "private" }], stallCheckIntervalMs: 50 });
+    await a.start(() => {});
+
+    await relay.stop();
+    await settle(1500);
+
+    expect(warnings(warn, "subscription_stalled")).toEqual([]);
+    warn.mockRestore();
+    await a.stop();
+  });
+
+  // A channel can be silent for a day. Quiet is not a stall, and neither is a channel that
+  // delivered everything the relay holds.
+  it("says nothing about a quiet channel or one that is still being fed", async () => {
+    relay = await LocalRelay.start();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { a, got } = await listening();
+
+    publish(inChannel("eng", "heard live", now - 120));
+
+    // Checks run one at a time, so a second check REQ per channel means the first finished.
+    await vi.waitFor(
+      () => {
+        expect(checksOf("hive").length).toBeGreaterThanOrEqual(2);
+        expect(checksOf("eng").length).toBeGreaterThanOrEqual(2);
+      },
+      { timeout: 3000 },
+    );
+    expect(got.map((e) => e.text)).toEqual(["heard live"]);
+    expect(warnings(warn, "subscription_stalled")).toEqual([]);
+    expect(warnings(warn, "subscription_check_failed")).toEqual([]);
+    warn.mockRestore();
+    await a.stop();
+  });
+});
+
 describe("BuzzAdapter working signals", () => {
   it("acknowledges the message it picked up with a NIP-25 reaction", async () => {
     relay = await LocalRelay.start();
