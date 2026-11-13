@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`doctor` warns when a Buzz agent's directory record and profile disagree on its name.**
+  A rename that reached the kind-0 profile but not the record left the record's
+  `display_name` binding to nobody, while `doctor` still called the agent mentionable. The
+  warning names both values and the fix: re-run `sageox-agent identity register buzz`. A
+  space in the name is not flagged — clients match multi-word names.
 - Helm: an optional per-agent `authTag` value, injected as `BUZZ_AUTH_TAG` into
   the agent Deployment and its scheduled-job hosts. Carries a NIP-OA owner
   attestation so the running agent's authenticated connection binds it to its

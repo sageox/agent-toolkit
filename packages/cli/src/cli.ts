@@ -100,6 +100,7 @@ import {
   probeRelay,
   publishDirectory,
   readDirectory,
+  readProfile,
   type AgentDirectory,
   resolveBuzzSigner,
   servePrivateBrain,
@@ -2257,8 +2258,51 @@ async function checkDirectory(opts: {
     }
   }
 
+  const drift = await profileNameDrift(opts, record);
+  if (drift) {
+    opts.warnings.push(drift);
+    return;
+  }
+
   opts.ok.push(
     `surface buzz: directory record lists ${expected.channelIds.length} channel(s), so it is mentionable`,
+  );
+}
+
+/**
+ * Whether the directory record still names the agent the way its kind-0 profile does.
+ *
+ * The profile is written by the `buzz` CLI and the record by this toolkit, so a rename can
+ * reach one and not the other. Clients resolve a mention against the profile's names, so a
+ * person typing the record's stale `display_name` gets no binding, and nothing reports it.
+ * A space in the name is not the fault: clients match multi-word names.
+ *
+ * A warning, not a problem: the profile's own name still reaches the agent, and
+ * bring-up runs `doctor`, so refusing it here would take a reachable agent off the air.
+ * Re-registering is the fix, not a restart: `run` keeps whatever display name the record
+ * carries, and registration writes profile.json's name to both.
+ */
+async function profileNameDrift(
+  opts: { relayUrl: string; identityRef: string; secretsDir?: string },
+  record: Record<string, unknown>,
+): Promise<string | undefined> {
+  if (typeof record.display_name !== "string") return undefined;
+  let profile: Record<string, unknown> | undefined;
+  try {
+    profile = await readProfile(opts);
+  } catch (error) {
+    return `surface buzz: could not read the profile at ${opts.relayUrl} to compare its name with the directory record: ${errorText(error)}`;
+  }
+  const names = [profile?.display_name, profile?.name].filter(
+    (name): name is string => typeof name === "string" && name.trim() !== "",
+  );
+  // No profile name to compare with is a different fault, and not this record's.
+  if (!names.length || names.includes(record.display_name)) return undefined;
+  return (
+    `surface buzz: the directory record's display_name is ${JSON.stringify(record.display_name)} ` +
+    `but the profile names it ${JSON.stringify(names[0])}, so a mention by the record's name ` +
+    "does not resolve — re-run `sageox-agent identity register buzz`, which publishes " +
+    "profile.json's display_name to both (a restart keeps the record's)"
   );
 }
 

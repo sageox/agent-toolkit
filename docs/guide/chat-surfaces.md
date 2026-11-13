@@ -89,6 +89,12 @@ other tools survive. `respondTo: owner-only` publishes as an allowlist of the ow
 is what it means and what clients read; a mode they do not recognise would read as "never
 mentionable" and hide the agent from the very person it answers.
 
+`doctor` also warns when the record's `display_name` is not a name the agent's kind-0 profile
+carries — a rename that reached the profile and not the record. Clients resolve a mention
+against the profile, so the record's stale name binds to nobody. A space in the name is fine;
+clients match multi-word names. Re-run registration to fix it: it publishes `profile.json`'s
+`display_name` to both, whereas a restart keeps whatever the record says.
+
 On a membership-gated relay, a new identity may be refused before it can publish that
 profile or list and join channels. Registration calls this out with the identity's npub
 and finishes successfully so the rest of setup can continue. Ask a relay owner or admin
