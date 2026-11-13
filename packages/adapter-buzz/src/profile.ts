@@ -112,9 +112,24 @@ export function mergeDirectoryContent(
 
 /** The agent's directory record as the relay currently holds it, or undefined if it has none. */
 function fetchDirectory(relay: Relay, pubkey: string): Promise<Record<string, unknown> | undefined> {
+  return fetchOwn(relay, pubkey, DIRECTORY_KIND);
+}
+
+/**
+ * The newest readable event of one replaceable kind signed by `pubkey`, or undefined.
+ *
+ * Newest by `created_at` rather than last-delivered: a relay that has not yet pruned an
+ * older copy of a replaceable event may send both, in either order.
+ */
+function fetchOwn(
+  relay: Relay,
+  pubkey: string,
+  kind: number,
+): Promise<Record<string, unknown> | undefined> {
   return new Promise((resolve) => {
     let settled = false;
     let found: Record<string, unknown> | undefined;
+    let foundAt = -Infinity;
     const finish = () => {
       if (settled) return;
       settled = true;
@@ -123,14 +138,18 @@ function fetchDirectory(relay: Relay, pubkey: string): Promise<Record<string, un
     };
     const timer = setTimeout(finish, DIRECTORY_READ_MS);
 
-    const sub = relay.subscribe([{ kinds: [DIRECTORY_KIND], authors: [pubkey] }], {
+    const sub = relay.subscribe([{ kinds: [kind], authors: [pubkey] }], {
       onevent: (event: Event) => {
+        if (event.created_at < foundAt) return;
         try {
           const parsed: unknown = JSON.parse(event.content);
-          if (parsed && typeof parsed === "object") found = parsed as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            found = parsed as Record<string, unknown>;
+            foundAt = event.created_at;
+          }
         } catch {
-          // Unreadable content is not worth preserving, so leave `found` unset and let
-          // the publish below replace it wholesale.
+          // Unreadable content counts as none: there is nothing in it worth preserving,
+          // so a directory publish replaces it wholesale.
         }
       },
       oneose: () => {
@@ -153,6 +172,30 @@ export async function readDirectory(opts: {
   const { relay } = await connectAuthenticated(opts.relayUrl, signer);
   try {
     return await fetchDirectory(relay, await signer.getPublicKey());
+  } finally {
+    relay.close();
+  }
+}
+
+/**
+ * Reads the agent's own kind-0 profile — the names clients resolve an `@…` mention against.
+ *
+ * `doctor` compares it with the directory record's `display_name`: the two are written by
+ * different paths (the `buzz` CLI and this toolkit), so they can drift apart.
+ */
+export async function readProfile(opts: {
+  relayUrl: string;
+  identityRef: string;
+  secretsDir?: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<Record<string, unknown> | undefined> {
+  const signer = await resolveBuzzSigner(opts.identityRef, { dir: opts.secretsDir, env: opts.env });
+  // Bounded like a publish: `doctor` awaits this, and setup awaits `doctor`.
+  const { relay } = await connectAuthenticated(opts.relayUrl, signer, {
+    connectTimeoutMs: CONNECT_MS,
+  });
+  try {
+    return await fetchOwn(relay, await signer.getPublicKey(), 0);
   } finally {
     relay.close();
   }
