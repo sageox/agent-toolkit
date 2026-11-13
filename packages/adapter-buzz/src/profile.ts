@@ -190,7 +190,10 @@ export async function readProfile(opts: {
   env?: NodeJS.ProcessEnv;
 }): Promise<Record<string, unknown> | undefined> {
   const signer = await resolveBuzzSigner(opts.identityRef, { dir: opts.secretsDir, env: opts.env });
-  const { relay } = await connectAuthenticated(opts.relayUrl, signer);
+  // Bounded like a publish: `doctor` awaits this, and setup awaits `doctor`.
+  const { relay } = await connectAuthenticated(opts.relayUrl, signer, {
+    connectTimeoutMs: CONNECT_MS,
+  });
   try {
     return await fetchOwn(relay, await signer.getPublicKey(), 0);
   } finally {
