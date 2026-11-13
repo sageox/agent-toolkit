@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Re-running `sageox-agent identity register buzz` now renames the agent's Buzz directory
+  record.** The record kept the first `display_name` it was ever published with, so renaming
+  an agent in `profile.json` updated its profile and left the record unchanged — and a
+  display name with a space makes clients strip mentions of the agent at send. Registration
+  now writes the display name it was given (from `profile.json` or `--name`) over the
+  record's, and publishes the record under the manifest's `name`, as `run` does, so the two
+  no longer flip the field on every restart. `run`'s own reconcile still keeps whatever
+  display name the record carries.
+
 ### Added
 
 - Helm: an optional per-agent `authTag` value, injected as `BUZZ_AUTH_TAG` into

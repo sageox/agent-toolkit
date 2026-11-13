@@ -60,10 +60,10 @@ function toWire(
   directory: AgentDirectory,
   existing: Record<string, unknown>,
 ): Record<string, unknown> {
-  // The manifest has no field for a display name, so the record carries the only copy of
-  // whatever a person set in a client. `directoryFor` never fills one in, so defaulting to
-  // the handle on every publish would rewrite that chosen name to the lowercase slug — on
-  // the deploy that was reconciling something else.
+  // The manifest has no field for a display name, so a publish that was not given one —
+  // `run`'s reconcile — keeps the record's copy rather than rewriting a chosen name to the
+  // lowercase slug on a deploy that was reconciling something else. Registration gives one,
+  // from profile.json, and that replaces the copy.
   const carriedName = typeof existing.display_name === "string" ? existing.display_name : undefined;
   const wire: Record<string, unknown> = {
     name: directory.name,
