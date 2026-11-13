@@ -43,10 +43,14 @@ describe("identity register buzz, for an agent already in the directory", () => 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "sageox-agent-register-directory-"));
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    // An exported key wins over the bundle's .env and would point registration at another
+    // agent's record.
+    vi.stubEnv("BUZZ_NSEC", key.nsec);
   });
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     process.chdir(savedCwd);
     await relay?.stop();
     rmSync(root, { recursive: true, force: true });
