@@ -173,9 +173,10 @@ describe("the stage between the phases", () => {
   });
 
   it("makes what the work phase staged readable by another UID", async () => {
-    const staged = 'const fs=require("fs");fs.mkdirSync(process.env.JOB_STAGE_DIR+"/d",{mode:0o700});fs.writeFileSync(process.env.JOB_STAGE_DIR+"/d/f","x",{mode:0o600});';
+    const staged = 'const fs=require("fs");fs.chmodSync(process.env.JOB_STAGE_DIR,0o700);fs.mkdirSync(process.env.JOB_STAGE_DIR+"/d",{mode:0o700});fs.writeFileSync(process.env.JOB_STAGE_DIR+"/d/f","x",{mode:0o600});';
     await host().work(phases(staged, ""));
     const { statSync } = await import("node:fs");
+    expect(statSync(stageOutputDir(stageDir)).mode & 0o055).toBe(0o055);
     expect(statSync(join(stageOutputDir(stageDir), "d")).mode & 0o055).toBe(0o055);
     expect(statSync(join(stageOutputDir(stageDir), "d", "f")).mode & 0o044).toBe(0o044);
   });

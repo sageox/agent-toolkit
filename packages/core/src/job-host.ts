@@ -371,18 +371,27 @@ export async function refuseUnsoundStage(out: string): Promise<void> {
  * body that wrote a 0600 file or a `mktemp -d` directory would otherwise strand its own
  * output. Symlinks and the like are left alone for {@link refuseUnsoundStage} to refuse.
  */
-async function openStageToPublisher(dir: string): Promise<void> {
-  try {
+async function openStageToPublisher(out: string): Promise<void> {
+  let seen = 0;
+  const open = async (dir: string): Promise<void> => {
     for (const name of await readdir(dir)) {
+      // The same cap the publish side refuses past: walking further opens nothing it would read.
+      if (++seen > STAGE_ENTRY_LIMIT) return;
       const path = join(dir, name);
       const entry = await lstat(path);
       if (entry.isDirectory()) {
         await chmod(path, (entry.mode & 0o7777) | 0o755);
-        await openStageToPublisher(path);
+        await open(path);
       } else if (entry.isFile()) {
         await chmod(path, (entry.mode & 0o7777) | 0o644);
       }
     }
+  };
+  try {
+    const root = await lstat(out);
+    if (!root.isDirectory()) return;
+    await chmod(out, (root.mode & 0o7777) | 0o755);
+    await open(out);
   } catch {
     // Best effort: an entry the publish phase cannot read is its refusal to report.
   }
