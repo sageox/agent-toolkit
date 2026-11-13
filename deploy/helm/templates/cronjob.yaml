@@ -119,6 +119,68 @@ spec:
             {{- if include "agent.jobHasHome" $context }}
             {{- include "agent.jobHomeInit" $context | nindent 12 }}
             {{- end }}
+            {{- if $job.work }}
+{{- /*
+`run.work`: the harness runs here, before the `job` container exists, as UID 10002 and with
+nothing that container holds. Kubernetes starts `job` only after this container has exited
+and every process in it is dead, `setsid()` descendants included, so nothing the harness
+started is still running when a credential is on disk. Ordering, not a check: two processes
+under one UID share every file either can reach, and no inspection a credentialed runner
+makes survives a descendant rewriting the path between the check and the use.
+
+What this container can reach is the whole boundary, so it is listed rather than shared
+with the `job` container's helpers: its own copy of the bundle, staged under its own UID
+into `job-work`; the stage it writes, `job-stage`, which `job` mounts read-only and reads as
+untrusted input; and the agent's checkouts, read-only. No secret volume, no `--secrets`, no
+`agent-data` — the `job` container's bundle, whose commands it then runs with credentials —
+no shared claim, no job home. A cloud identity a webhook injects into every container is
+not this chart's to withhold: see "A job with a work phase" in the chart README.
+*/}}
+            {{- include "agent.stageConfig" (merge (dict "stageInto" (dict "container" "stage-work" "root" "/work" "uid" 10002 "volume" "job-work")) $context) | nindent 12 }}
+            - name: work
+              image: {{ required "imageRef is required" $.Values.imageRef | quote }}
+              args:
+                - job
+                - work
+                - {{ $job.slug | quote }}
+                - --bundle
+                - /work/{{ $name }}
+                - --stage
+                - /stage
+              env:
+                - name: HOME
+                  value: /work
+                {{- if $agent.workEvents }}
+                - name: AGENT_WORK_EVENTS
+                  value: "1"
+                {{- end }}
+              resources:
+                {{- toYaml $agent.resources | nindent 16 }}
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 10002
+                runAsGroup: 10002
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: job-work
+                  mountPath: /work
+                - name: job-stage
+                  mountPath: /stage
+                {{- if or $agent.persistence.jobCheckouts $agent.persistence.jobCodeIndex }}
+                - name: checkouts
+                  mountPath: /work/{{ $name }}/workspace/repos
+                  subPath: {{ $name }}/workspace/repos
+                  readOnly: true
+                {{- end }}
+                {{- if $agent.persistence.jobCodeIndex }}
+                - name: checkouts
+                  mountPath: /work/{{ $name }}/workspace/ox-data
+                  subPath: {{ $name }}/workspace/ox-data
+                  readOnly: true
+                {{- end }}
+            {{- end }}
           containers:
             - name: job
               image: {{ required "imageRef is required" $.Values.imageRef | quote }}
@@ -146,6 +208,10 @@ whole of what the second mount buys.
                 {{- if and (not $job.worker) (include "agent.hasJobSecrets" $agent) }}
                 - --job-secrets
                 - {{ include "agent.jobSecretsMountPath" $context }}
+                {{- end }}
+                {{- if $job.work }}
+                - --stage
+                - /stage
                 {{- end }}
               {{- if or $job.worker $agent.workEvents (include "agent.jobHasHome" $context) $agent.authTag }}
               env:
@@ -187,12 +253,23 @@ whole of what the second mount buys.
                 {{- if include "agent.jobHasHome" $context }}
                 {{- include "agent.jobHomeMounts" $context | nindent 16 }}
                 {{- end }}
+                {{- if $job.work }}
+                - name: job-stage
+                  mountPath: /stage
+                  readOnly: true
+                {{- end }}
           volumes:
             {{- include "agent.podVolumes" $context | nindent 12 }}
             {{- if include "agent.jobHasHome" $context }}
             - name: job-home
               persistentVolumeClaim:
                 claimName: {{ include "agent.jobHomeClaimName" $context }}
+            {{- end }}
+            {{- if $job.work }}
+            - name: job-work
+              emptyDir: {}
+            - name: job-stage
+              emptyDir: {}
             {{- end }}
 {{ end }}
 {{- end }}

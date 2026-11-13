@@ -247,6 +247,8 @@ Three, and they are fixed:
 | `agent` | Deployment Pod | the gateway, and the brain as its subprocess |
 | `job` | CronJob Pod | `sageox-agent job run <slug>` |
 | `stage-config` | init container of both | the bundle copy into `/agents` |
+| `stage-work` | init container of a `work: true` job | the work phase's own bundle copy into `/work` |
+| `work` | init container of a `work: true` job | `sageox-agent job work <slug>` |
 
 They are listed because a cluster add-on that acts on *some* containers needs their names,
 and nothing else here would tell you them. EKS's IRSA webhook is the case worth spelling
@@ -667,6 +669,48 @@ There is deliberately no `Read(//mnt/job-secrets-store/**)` deny rule to add. Th
 does not exist in the Pod the brain runs in, and a deny rule covering nothing is the kind of
 rule that reads as a control and is not.
 
+
+### A job with a work phase
+
+A job whose `agent.yaml` declares `run.work` is mirrored with `work: true`. Its Pod then
+runs the harness and the credentialed publish in separate containers, under separate UIDs,
+one after the other:
+
+| Container | UID | Holds |
+|---|---|---|
+| `stage-work` (init) | 10002 | its own copy of the bundle, in the `job-work` emptyDir |
+| `work` (init) | 10002 | `job work <slug>`: the bundle copy, `/stage` read-write, the checkouts read-only |
+| `job` | 10001 | `job run <slug> --stage /stage`: `agent-data`, `secrets`, `jobSecrets`, `/stage` read-only |
+
+```yaml
+agents:
+  harry:
+    jobs:
+      - slug: fix
+        work: true
+        suspend: false
+        trigger: { schedules: ["*/15 * * * *"], timezone: UTC }
+        budget: { wallClockMs: 3600000, deadlineHeadroomMs: 300000 }
+```
+
+The boundary is the ordering. Kubernetes starts `job` only after `work` has exited and every
+process in it is dead, so nothing the harness started is alive while a credential is on
+disk, and nothing it wrote is anywhere the `job` container executes from: `job` runs the
+bundle in `agent-data`, which `work` never mounts. What `work` leaves in `/stage` is
+untrusted input to the publish body, which must validate it before acting on it.
+
+What this chart cannot withhold is a cloud identity that a webhook injects into **every**
+container of the Pod. On EKS that is the IRSA token and EKS Pod Identity's credential
+endpoint, which read whatever the agent's role can — including the Secrets Manager entries
+the `job` container's CSI mount reads. Exclude `work` from that injection
+(`eks.amazonaws.com/skip-containers` for IRSA) and check on your own cluster that
+`env` inside the `work` container carries no `AWS_*` credential variable before counting on
+the split. **This is not asserted by the chart's tests**, which can only read rendered YAML.
+
+`work: true` is refused beside `serviceAccount.automountJobToken` (a cluster token mounts
+into every container) and `persistence.jobHome` (a home the publish phase keeps that the
+work phase has no copy of). The job's budget covers both phases: `activeDeadlineSeconds`
+is unchanged, and `run.work.wallClockMs` is carved out of `budget.wallClockMs`.
 
 ## External job workers
 

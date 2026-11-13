@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `run.work` and the chart's `work: true`: a scheduled job may split into a work phase
+  and a publish phase. The work phase (`sageox-agent job work <slug> --stage <dir>`)
+  runs `run.work.command` with no secret resolved and no verdict path; the chart runs
+  it as a `work` init container under UID 10002 with no secret volume, its own copy of
+  the bundle, and the checkouts read-only. The `job` container (UID 10001) starts only
+  once every work process is dead, is the only container with `secrets` and
+  `jobSecrets`, reads the staged output read-only from `JOB_STAGE_DIR`, and folds the
+  work phase's exit into the verdict as `job:<slug>:work`. `run.work.wallClockMs` is
+  carved out of `budget.wallClockMs`. Refused beside `trigger.onRequest`, `worker`,
+  `serviceAccount.automountJobToken` and `persistence.jobHome`. Opt-in; jobs without
+  it render and run as before.
+
 - Helm: an optional per-agent `authTag` value, injected as `BUZZ_AUTH_TAG` into
   the agent Deployment and its scheduled-job hosts. Carries a NIP-OA owner
   attestation so the running agent's authenticated connection binds it to its

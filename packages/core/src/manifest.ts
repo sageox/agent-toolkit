@@ -874,6 +874,31 @@ export const JobSchema = z
          * here instead and the grant stays readable.
          */
         passthrough: z.array(EnvVarName).default([]),
+        /**
+         * The work phase: the process that does the untrusted work — a coding harness over a
+         * checkout — run before `command` in a container of its own, under another UID, with
+         * no secrets mounted and none resolved. `command` is then the publish phase, the only
+         * one handed `secrets` and `jobSecrets`, and it reads what this phase staged in
+         * `JOB_STAGE_DIR` as untrusted input.
+         *
+         * A separate container rather than a separate process, because two processes under
+         * one UID share every file either can reach: no check a credentialed runner makes
+         * on a path survives a harness descendant rewriting it between the check and the
+         * use. The platform starts the publish container only once every process in the
+         * work container is dead, `setsid()` descendants included.
+         *
+         * `wallClockMs` is this phase's own bound, carved out of `budget.wallClockMs` with
+         * the job's headroom after it, so the two phases together still end inside the one
+         * platform deadline the budget derives.
+         */
+        work: z
+          .object({
+            command: z.string().min(1),
+            args: z.array(z.string()).default([]),
+            wallClockMs: z.number().int().positive(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),
@@ -1439,6 +1464,28 @@ const ManifestSchema = z
           "credentialed work a job of its own that nothing may ask for",
         path: ["jobs"],
       });
+    }
+  })
+  // A work phase is a container the deployment starts before the publishing one, so it
+  // exists only where a job runs in a Pod of its own: never inside the gateway, which is
+  // where an on-request run executes, and never as an external worker, whose Pod the
+  // dispatcher builds. Either pairing would run the harness beside the credential the
+  // phase split exists to keep from it.
+  .superRefine((m, ctx) => {
+    for (const job of m.jobs) {
+      const work = job.run?.work;
+      if (!work) continue;
+      const refuse = (message: string) => ctx.addIssue({ code: "custom", message, path: ["jobs"] });
+      if (job.worker) refuse(`job "${job.slug}" declares run.work and a worker — an external worker runs in one container the dispatcher builds, so it has no work phase to give`);
+      if (job.trigger.onRequest) refuse(`job "${job.slug}" declares run.work and arms trigger.onRequest — an on-request run executes in the gateway's own process, beside its secrets, which is the arrangement run.work exists to end`);
+      const budget = job.budget;
+      if (budget && work.wallClockMs + budget.deadlineHeadroomMs >= budget.wallClockMs) {
+        refuse(
+          `job "${job.slug}": run.work.wallClockMs (${work.wallClockMs}) plus budget.deadlineHeadroomMs ` +
+            `(${budget.deadlineHeadroomMs}) must be less than budget.wallClockMs (${budget.wallClockMs}), ` +
+            "or the publish phase is left no time inside the job's deadline",
+        );
+      }
     }
   })
   .refine((m) => m.jobs.every((job) => !job.worker || !job.report?.probe), {

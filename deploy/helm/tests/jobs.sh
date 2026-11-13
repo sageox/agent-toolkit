@@ -737,4 +737,63 @@ refuses 'a job home claim that is another agent'"'"'s claim' \
   "harry: its job home claim agents-harry-home is also ida's claim" "${home[@]}" \
   --set 'agents.ida.fullnameOverride=agents-harry-home'
 
+# A job with a work phase: the harness runs in an init container of its own, under its own
+# UID, holding nothing the publishing container holds. The defect this guards is a harness
+# sharing the credential-holding runner's UID and container, so these assertions are about
+# what the `work` container can reach — and the shape that fails them is the one-container
+# Pod every other job renders. ida's job secrets are on so there is a second source to keep
+# out, and its checkouts so there is a mount that genuinely should cross.
+phased=(--set 'agents.ida.jobs[0].work=true'
+        --set 'agents.ida.jobSecrets.kubernetesSecret=agent-ida-jobs'
+        --set 'agents.ida.jobSecrets.csi.secretProviderClass='
+        --set 'agents.ida.persistence.jobCheckouts=true')
+render "${phased[@]}"
+sweep=$(awk '/^kind: CronJob$/{doc=""} {doc=doc $0 "\n"} /agent-toolkit\/job: "sweep"/{keep=1} /^---$/{if(keep)printf "%s",doc; keep=0; doc=""} END{if(keep)printf "%s",doc}' <<<"$rendered")
+[ -n "$sweep" ] || fail 'no CronJob rendered for the phased sweep job'
+# The `work` init container, from its name to the next container.
+work_container=$(awk '/^            - name: work$/{on=1} on && /^          containers:$/{exit} on' <<<"$sweep")
+job_container=$(awk '/^            - name: job$/{on=1} on && /^          volumes:$/{exit} on' <<<"$sweep")
+[ -n "$work_container" ] || fail 'a job with work: true renders no work init container'
+[ -n "$job_container" ] || fail 'a job with work: true renders no job container'
+grep -qF -- '- work' <<<"$work_container" || fail 'the work container does not run `job work`'
+grep -qF -- 'runAsUser: 10002' <<<"$work_container" || fail 'the work container does not run as UID 10002'
+grep -qF -- 'runAsUser: 10001' <<<"$job_container" || fail 'the job container does not run as UID 10001'
+grep -qF -- 'runAsUser: 10001' <<<"$work_container" && fail 'the work container shares the publishing UID'
+for reach in secrets-store job-secrets-store --secrets --job-secrets 'name: agent-data' 'name: secrets' 'name: job-secrets'; do
+  grep -qF -- "$reach" <<<"$work_container" && fail "the work container can reach $reach"
+done
+grep -qF -- '- --stage' <<<"$job_container" || fail 'the job container is not told where the stage is'
+grep -qF -- '/mnt/job-secrets-store' <<<"$job_container" || fail 'the job container lost its job secrets'
+awk '/name: job-stage/{getline; getline; print}' <<<"$job_container" | grep -qF 'readOnly: true' \
+  || fail 'the job container can write the stage the work phase hands it'
+awk '/name: checkouts/{getline; getline; getline; print}' <<<"$work_container" | grep -qF 'readOnly: true' \
+  || fail 'the work container can write the checkouts'
+# Its own copy of the bundle, staged under its own UID: the job container's is the one whose
+# commands run with credentials.
+grep -qF -- '- name: stage-work' <<<"$sweep" || fail 'the work phase has no bundle of its own'
+grep -qF -- 'install -d -m 0700 /work/ida' <<<"$sweep" || fail 'the work bundle is not staged into job-work'
+grep -cF -- '- name: job-stage' <<<"$sweep" | grep -qx 3 || fail 'job-stage is not exactly one volume and two mounts'
+# And nothing of it on a job that did not ask.
+render
+absent '- name: work'
+absent 'job-stage'
+absent 'runAsUser: 10002'
+
+refuses 'a work phase on a worker' 'job shift has work: true, which only a scheduled local command job can have' \
+  --set 'agents.harry.jobs[0].work=true' \
+  --set agents.harry.dispatcher.tokenSecret=dispatcher-auth \
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'
+refuses 'a work phase on a mirrored prompt job' "at '/agents/harry/jobs/2/work': false schema" \
+  --set 'agents.harry.jobs[2].work=true'
+grep -qF -- '/work/.gitconfig' <<<"$sweep" || fail 'the work phase has no HOME telling Git the read-only checkouts are safe'
+refuses 'a shared volume named like the work stage' \
+  "ida: sharedVolumes has a volume named job-stage, a name the chart gives job sweep's work phase; rename it" \
+  "${phased[@]}" \
+  --set 'agents.ida.sharedVolumes[0].name=job-stage' \
+  --set 'agents.ida.sharedVolumes[0].mountPath=/shared' \
+  --set 'agents.ida.sharedVolumes[0].claimName=shared'
+refuses 'a work phase beside a cluster token' \
+  'job sweep has work: true and serviceAccount.automountJobToken is set' \
+  --set 'agents.ida.jobs[0].work=true' --set agents.ida.serviceAccount.automountJobToken=true
+
 printf 'jobs.sh: ok\n'

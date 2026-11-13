@@ -131,6 +131,31 @@ agent's values carry a job's slug, schedules and budget, and nothing about its c
 {{- fail (printf "%s: jobSecrets is mounted by scheduled job Pods only, and this agent declares no schedule" $name) -}}
 {{- end -}}
 {{- end -}}
+{{/*
+A work phase is only a boundary if nothing the `job` container holds reaches it. A Pod's
+cluster token mounts into every container, and a job home is the `job` container's
+persistent HOME, which a harness could seed for a later credentialed run — so a job with
+`work: true` refuses both rather than rendering a split that leaks across it. A worker's
+Pod is the dispatcher's, and a prompt job has no process.
+*/}}
+{{- range $job := $agent.jobs -}}
+{{- if $job.work -}}
+{{- range $volume := $agent.sharedVolumes -}}
+{{- if has $volume.name (list "job-work" "job-stage") -}}
+{{- fail (printf "%s: sharedVolumes has a volume named %s, a name the chart gives job %s's work phase; rename it" $name $volume.name $job.slug) -}}
+{{- end -}}
+{{- end -}}
+{{- if or $job.worker (hasKey $job "prompt") -}}
+{{- fail (printf "%s: job %s has work: true, which only a scheduled local command job can have" $name $job.slug) -}}
+{{- end -}}
+{{- if $agent.serviceAccount.automountJobToken -}}
+{{- fail (printf "%s: job %s has work: true and serviceAccount.automountJobToken is set; the token would mount into the work container too" $name $job.slug) -}}
+{{- end -}}
+{{- if and ($agent.persistence).jobHome (has $job.slug ($agent.persistence.jobHome.jobs | default list)) -}}
+{{- fail (printf "%s: job %s has work: true and is in persistence.jobHome.jobs; a home the publish phase keeps is one an earlier work phase could not reach, and this chart does not yet give the work phase one" $name $job.slug) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if and (not $agent.serviceAccount.create) (not $agent.serviceAccount.name) -}}
 {{- fail (printf "%s: serviceAccount.name is required when create is false" $name) -}}
 {{- end -}}

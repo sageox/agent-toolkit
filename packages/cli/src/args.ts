@@ -9,7 +9,7 @@ const VALUED = [
   "context", "display-name", "expression", "inputs", "job-secrets", "joke", "metaphor",
   "model", "name", "namespace", "nip05", "owner", "owner-id", "palette", "param", "path",
   "private-channels", "profiles", "query", "relay", "run-id", "scope", "secret-refs",
-  "secrets", "seconds", "success", "team", "trigger", "vault", "visual", "voice", "with",
+  "secrets", "seconds", "stage", "success", "team", "trigger", "vault", "visual", "voice", "with",
   "write-scope",
 ] as const;
 const SWITCHES = [
