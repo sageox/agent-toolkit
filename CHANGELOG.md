@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-17
+
+Everything below shipped after `v0.12.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.13.0` takes `:latest` and starts `:0.13`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
 ### Added
 
 - Helm: an optional per-agent `authTag` value, injected as `BUZZ_AUTH_TAG` into
