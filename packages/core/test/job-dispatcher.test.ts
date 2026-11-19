@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
-import { JobDispatcher, KubeError, serveJobDispatcher, type KubeObject } from "../src/job-dispatcher.ts";
+import { JobDispatcher, KubeError, WorkerProfilesSchema, serveJobDispatcher, type KubeObject } from "../src/job-dispatcher.ts";
 import { ExternalJobs, externalRun, jobDefinition, workerResult, publishJobOutput, type ExternalRequest, type ExternalStatus } from "../src/external-jobs.ts";
 import { JOB_STATUS_LIMIT_BYTES, type FinalJobOutput } from "../src/job-output.ts";
 import { JobSchema, loadManifest, type JobConfig } from "../src/manifest.ts";
@@ -363,6 +363,10 @@ describe("durable Kubernetes job lifecycle", () => {
     const unplaced = (plain.objects.get(`jobs/${runName(req.runId)}`)!.spec!.template as { spec: Record<string, unknown> }).spec;
     expect(unplaced).not.toHaveProperty("nodeSelector");
     expect(unplaced).not.toHaveProperty("tolerations");
+
+    // The empty spellings Kubernetes accepts must not stop the dispatcher from starting.
+    expect(() => WorkerProfilesSchema.parse({ task: { serviceAccountName: "task-worker",
+      tolerations: [{ key: "dedicated", operator: "", effect: "" }] } })).not.toThrow();
   });
 
   it("retains the result after worker cleanup and dispatcher restart, then expires it without replay", async () => {

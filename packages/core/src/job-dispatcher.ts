@@ -28,9 +28,10 @@ export const WorkerProfilesSchema = z.record(z.string(), z.object({
   nodeSelector: z.record(z.string(), z.string()).optional(),
   tolerations: z.array(z.object({
     key: z.string().optional(),
-    operator: z.enum(["Exists", "Equal"]).optional(),
+    // Kubernetes reads an empty operator as `Equal` and an empty effect as every effect.
+    operator: z.enum(["", "Exists", "Equal"]).optional(),
     value: z.string().optional(),
-    effect: z.enum(["NoSchedule", "PreferNoSchedule", "NoExecute"]).optional(),
+    effect: z.enum(["", "NoSchedule", "PreferNoSchedule", "NoExecute"]).optional(),
     tolerationSeconds: z.number().int().optional(),
   }).strict()).optional(),
 }).strict());
