@@ -321,6 +321,8 @@ export interface JobHostOptions {
    * one refuses a stage it would never read.
    */
   stageDir?: string;
+  /** How the work phase probes for a mounted identity token; the filesystem unless a test stands in. */
+  identityFileExists?: (path: string) => boolean;
 }
 
 /** The work phase's own record, written by the host that ran it. */
@@ -1645,7 +1647,7 @@ export class JobHost {
     };
     if (job.suspend) return record({ executed: false, exitCode: null });
     const hostEnv = this.opts.env ?? process.env;
-    const identity = injectedCloudIdentity(hostEnv);
+    const identity = injectedCloudIdentity(hostEnv, this.opts.identityFileExists);
     if (identity) return record({ executed: false, exitCode: null, refused: `refused to start: ${identity}` });
 
     const work = job.run.work;

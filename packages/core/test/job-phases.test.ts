@@ -54,10 +54,16 @@ let dir: string;
 let secretsDir: string;
 let stageDir: string;
 let runs: JobRun[];
+/** The runner's own environment, less anything the work phase would refuse to start beside. */
+const AMBIENT = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => !/^AWS_(ACCESS_KEY_ID|SESSION_TOKEN|WEB_IDENTITY_TOKEN_FILE|CONTAINER_)/.test(name)),
+);
+
 const host = (stage: string | null = stageDir) =>
   new JobHost({
     workDir: dir,
-    env: { ...process.env, PASSED_ON: "ambient-identity" },
+    env: { ...AMBIENT, PASSED_ON: "ambient-identity" },
+    identityFileExists: () => false,
     secretOpts: { dir: secretsDir },
     onRun: (run) => runs.push(run),
     ...(stage ? { stageDir: stage } : {}),
@@ -168,7 +174,8 @@ describe("a cloud identity in the work phase's container", () => {
     const job = phases(DUMP(seen), PROVES);
     const injected = new JobHost({
       workDir: dir,
-      env: { ...process.env, AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.23/v1/credentials" },
+      env: { ...AMBIENT, AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.23/v1/credentials" },
+      identityFileExists: () => false,
       stageDir,
     });
     const result = await injected.work(job);
