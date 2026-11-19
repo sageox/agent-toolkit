@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel that is merely quiet logs nothing. Before this, a stalled subscription looked
   healthy — process alive, pings answered — until someone noticed missed messages.
 
+### Fixed
+
+- **Re-running `sageox-agent identity register buzz` now renames the agent's Buzz directory
+  record.** The record kept the first `display_name` it was ever published with, so renaming
+  an agent in `profile.json` updated its profile and left the record unchanged, so mentions
+  by the new name did not match the record. Registration
+  now writes the display name it was given (from `profile.json` or `--name`) over the
+  record's, and publishes the record under the manifest's `name`, as `run` does, so the two
+  no longer flip the field on every restart. `run`'s own reconcile still keeps whatever
+  display name the record carries.
+
 ## [0.13.0] - 2026-11-17
 
 Everything below shipped after `v0.12.1`.
