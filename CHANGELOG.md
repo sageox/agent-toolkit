@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Re-running `sageox-agent identity register buzz` now renames the agent's Buzz directory
+  record.** The record kept the first `display_name` it was ever published with, so renaming
+  an agent in `profile.json` updated its profile and left the record unchanged, so mentions
+  by the new name did not match the record. Registration
+  now writes the display name it was given (from `profile.json` or `--name`) over the
+  record's, and publishes the record under the manifest's `name`, as `run` does, so the two
+  no longer flip the field on every restart. `run`'s own reconcile still keeps whatever
+  display name the record carries.
+
+## [0.13.0] - 2026-11-17
+
+Everything below shipped after `v0.12.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.13.0` takes `:latest` and starts `:0.13`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
+### Added
+
+- Helm: an optional per-agent `authTag` value, injected as `BUZZ_AUTH_TAG` into
+  the agent Deployment and its scheduled-job hosts. Carries a NIP-OA owner
+  attestation so the running agent's authenticated connection binds it to its
+  owner (the "managed by <owner>" badge). Give it as a YAML list or as the JSON
+  string a minted tag prints as; the values schema refuses anything that is not
+  the `["auth", <owner hex>, <conditions>, <sig hex>]` tuple, since the runtime
+  drops a malformed tag without an error. The tag is public — minted with the
+  owner secret, which never enters the pod. Omit it to leave an agent
+  "owner unavailable" (the prior behavior). Values-only and backward compatible.
+
+### Changed
+
+- **The agent base image ships `ox` 0.26.0.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.25.0. For a job that records its coding sessions,
+  this release gives one complete session per run even when ox's hooks are wired twice, credits
+  the job's Ledger commits to its AI coworker rather than to the harness's git identity, and
+  no longer kills a large Team Context's first clone at 60 seconds.
+  ox's [0.26.0 release notes](https://github.com/sageox/ox/releases/tag/v0.26.0) list what
+  else changed.
+
+## [0.12.1] - 2026-11-11
+
+Everything below shipped after `v0.12.0`.
+
+On publication, `ghcr.io/sageox/agent-base:0.12.1` takes `:latest` and advances `:0.12`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
+- **A Buzz agent deployed with `BUZZ_AUTH_TAG` now sends its NIP-OA owner attestation when it
+  signs in (#140).** The runtime signed in through nostr-tools and never read the variable, so
+  only the `buzz` CLI sent the tag and agents showed "owner unavailable" in Buzz. `adapter-buzz`
+  now adds it to every NIP-42 AUTH event, as Buzz's Rust harness does. An open relay records the
+  tag's owner; a relay that requires membership records it only for an agent it admits through
+  its owner's membership, not for a direct member. The runtime checks only the tag's shape and
+  sends nothing when that fails, leaving the signature and conditions to the relay. Where the
+  relay records an owner it keeps the first one and refuses a sign-in whose tag names another,
+  so check an agent's current owner before giving it a tag.
+
+## [0.12.0] - 2026-11-10
+
+Everything below shipped after `v0.11.2`.
+
+On publication, `ghcr.io/sageox/agent-base:0.12.0` takes `:latest` and `:0.12`. `:0.11` stays
+on 0.11.2. Before 1.0.0 a minor release may break configuration, so no `:0` tag is
+published. Pin the digest recorded on the GitHub Release in production.
+
+A minor release for the opt-in persistent job home, with the tools ox needs to record Claude
+Code sessions added to the image. A chart that does not set `persistence.jobHome` renders as
+it did on 0.11.2.
+
+- **The agent base image can record Claude Code sessions with ox.** It now ships the
+  `ox-adapter-*` binaries from the ox release tarball next to `ox`, `procps` for `ps`, and
+  `@anthropic-ai/claude-code` 2.1.284 as a `claude` binary. ox finds the agent with `ps`,
+  reads the session through the adapter, and its daemon runs `claude` to summarize a session
+  before uploading it, so a job missing any of them records nothing. A job can now call
+  `claude` directly instead of fetching it with `npx` on every run. The image's offline
+  compatibility test checks all three, and that the agent user's `~/.npm` is not root-owned.
+- **A scheduled job can keep data in its home between runs.** `persistence.jobHome` (`size`,
+  optional `storageClass` defaulting to `gp3`, the `jobs` it applies to and the `paths` under
+  HOME to keep) renders a `ReadWriteOncePod` claim per agent, kept on uninstall, and mounts
+  only those directories, for the named lanes only. Session transcripts, ox's Ledger clones
+  and its upload queue then survive the Pod, while config such as `~/.gitconfig`, a harness's
+  settings and `~/.config` starts clean every run; the chart refuses a path that would keep
+  them, and turns off Claude Code's auto memory, which lives in `.claude/projects`, for a
+  lane that keeps a `.claude/` path. The job host carries that setting from its own
+  environment to the job body, ahead of the body's `run.env`. The chart also refuses a slug
+  that no scheduled local command job carries, a shared volume that reuses the home's name,
+  mounts or claim, and a home claim name another agent already uses.
+  The chart README covers releasing the claim from a Pod stuck `Terminating`.
+
+## [0.11.2] - 2026-11-08
+
+Everything below shipped after `v0.11.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.11.2` takes `:latest` and advances `:0.11`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
+- **The agent base image ships `ox` 0.25.0.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.24.2. It is the first release with
+  `ox session wait` and the `disposable_machine` setting, which an agent whose pod keeps
+  only its home directory needs to publish its sessions before the pod goes away. The
+  image's offline compatibility test now also sets `disposable_machine`, so an image with an
+  older ox fails its build.
+  ox's [0.25.0 release notes](https://github.com/sageox/ox/releases/tag/v0.25.0) list what
+  else changed.
+
 - **Claude-hosted MCP services now enforce the tool policy on direct HTTP calls.**
   Every hosted service applies the gateway's allow/deny policy before dispatch, as Codex
   services already did, so a session's URL and bearer token cannot bypass denied tools.
