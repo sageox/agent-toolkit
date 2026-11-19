@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Buzz agent removed from a channel and re-added hears that channel again without a
+  restart (#154).** Leaving a membership-gated channel ends its REQ with CLOSED, and
+  nostr-tools never re-fires a closed REQ, so the channel stayed silent for the life of the
+  process while the agent reported Ready. The adapter now re-opens a closed channel REQ from
+  its cursor, doubling the delay from 1 second up to 5 minutes while the relay keeps
+  refusing, and logs each close as `subscription_closed` with the relay's reason.
+
 ### Added
 
 - Buzz: a `subscription_stalled channel=<id> missed_event=<id>` warning when one channel's

@@ -29,6 +29,8 @@ export class LocalRelay {
   private openSubs: OpenSub[] = [];
   /** Open REQs {@link stall} has stopped pushing to. */
   private stalled = new Set<OpenSub>();
+  /** Channels whose new REQs {@link closeChannel} refuses, with the CLOSED reason. */
+  private refused = new Map<string, string>();
   /** Every event the adapter published. */
   readonly published: Event[] = [];
   /** Every signed AUTH event, in order — a reconnected socket is challenged again. */
@@ -144,6 +146,13 @@ export class LocalRelay {
         }
         const filters = msg.slice(2) as Array<Record<string, unknown>>;
         this.reqs.push({ subId, filters });
+        const gated = filters
+          .flatMap((filter) => (filter["#h"] as string[] | undefined) ?? [])
+          .find((channel) => this.refused.has(channel));
+        if (gated !== undefined) {
+          ws.send(JSON.stringify(["CLOSED", subId, this.refused.get(gated)]));
+          return;
+        }
         this.openSubs.push({ subId, filters, ws });
         // A relay that takes the REQ and then goes quiet: the client is left holding an
         // open subscription that will never terminate itself.
@@ -222,6 +231,25 @@ export class LocalRelay {
       const channels = sub.filters.flatMap((filter) => (filter["#h"] as string[] | undefined) ?? []);
       if (channels.includes(channel)) this.stalled.add(sub);
     }
+  }
+
+  /**
+   * Ends the REQs open on `channel` with a CLOSED, the way a membership-gated relay does when
+   * the agent leaves the channel. With `refuse`, new REQs for it are refused the same way
+   * until {@link readmit}.
+   */
+  closeChannel(channel: string, reason: string, refuse = false): void {
+    const on = (sub: OpenSub) =>
+      sub.filters.some((filter) => ((filter["#h"] as string[] | undefined) ?? []).includes(channel));
+    for (const sub of this.openSubs.filter(on)) {
+      sub.ws.send(JSON.stringify(["CLOSED", sub.subId, reason]));
+    }
+    this.openSubs = this.openSubs.filter((sub) => !on(sub));
+    if (refuse) this.refused.set(channel, reason);
+  }
+
+  readmit(channel: string): void {
+    this.refused.delete(channel);
   }
 
   /** Drops all connections without shutting the relay down, to exercise reconnect. */
