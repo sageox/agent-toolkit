@@ -155,9 +155,8 @@ export class AcpBrain implements Brain {
     // and MCP. With no policy configured nothing is allowlisted, so everything is
     // refused — an agent with no stated policy gets no reach, rather than full reach.
     app.onRequest(CLIENT_METHODS.session_request_permission, async (ctx) => {
-      // `name` is the tool identifier the policy is written against; `title` is a
-      // human-readable label ("Delete the repo") and would never match a rule.
-      const toolName = ctx.params.toolCall.name ?? ctx.params.toolCall.title ?? "";
+      // The adapter sends the native name and arguments separately. A display title is
+      // not an identifier, and checking only the name would skip every qualified deny.
       // Codex's MCP approval omits the tool name. Let that attempt reach the gateway,
       // where the HTTP endpoint checks the actual tool before executing it. The adapter
       // marks MCP approvals explicitly; native permission escalation is always refused.
@@ -165,7 +164,11 @@ export class AcpBrain implements Brain {
         !this.sealed.has(ctx.params.sessionId) &&
         (this.opts.provider === "codex-acp"
           ? ctx.params._meta?.is_mcp_tool_approval === true
-          : this.opts.toolPolicy?.allowsTool(toolName).ok === true);
+          : this.opts.toolPolicy?.allowsNativeRequest({
+              name: ctx.params.toolCall.name,
+              input: ctx.params.toolCall.rawInput,
+              cwd: this.opts.cwd ?? process.cwd(),
+            }).ok === true);
 
       if (allowed) {
         const allow = ctx.params.options.find(

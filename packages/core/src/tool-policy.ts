@@ -1,3 +1,6 @@
+import { lstatSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 
 import { DEFAULT_SECRETS_DIR } from "./secrets.ts";
@@ -169,6 +172,111 @@ const MISANCHORED_SECRETS = /\(\/(?!\/)mnt\/secrets-store/;
  */
 const INERT_PATH_RULE = /^(Write|NotebookEdit|MultiEdit|Glob)\(/;
 
+type NativeArgument = { path: string; realPath: string; cwd: string } | { command: string };
+
+/** Resolve links, including the existing parent of a file that an edit may create. */
+function canonicalPath(path: string): string {
+  try {
+    // The native implementation preserves the filesystem meaning of `link/../file`.
+    return realpathSync.native(path);
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+      lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() ||
+      dirname(path) === path
+    ) {
+      throw error;
+    }
+    return resolve(canonicalPath(dirname(path)), basename(path));
+  }
+}
+
+/**
+ * Match the supported Claude path syntax, not a serialized `Read(...)` tool name.
+ * Unknown syntax fails closed in the caller. Denies cover both the spelled path and
+ * its real target; a scoped allow must cover both, so a link cannot widen a grant.
+ */
+function matchesNativePath(
+  pattern: string,
+  argument: Extract<NativeArgument, { path: string }>,
+  direction: Direction,
+): boolean {
+  if (
+    !pattern || /[\0\\?\[\]{}!]/.test(pattern) ||
+    (pattern.startsWith("~") && !pattern.startsWith("~/"))
+  ) {
+    throw new Error("unsupported path rule");
+  }
+  let base = argument.cwd;
+  if (pattern.startsWith("//")) {
+    base = sep;
+    pattern = pattern.slice(2);
+  } else if (pattern.startsWith("~/")) {
+    base = homedir();
+    pattern = pattern.slice(2);
+  } else {
+    const anchored = pattern.startsWith("/");
+    pattern = pattern.replace(/^(\.\/|\/)/, "");
+    // Gitignore-style filename denies apply at any depth, including dotfiles.
+    if (direction === "deny" && !anchored && !pattern.includes("/")) {
+      base = sep;
+      pattern = `**/${pattern}`;
+    }
+  }
+  const parts = pattern.split("/").filter((part) => part && part !== ".");
+  if (parts.some((part) => part === ".." || (part.includes("**") && part !== "**"))) {
+    throw new Error("unsupported path rule");
+  }
+  const wildcard = parts.findIndex((part) => part.includes("*"));
+  const prefix = resolve(base, ...parts.slice(0, wildcard < 0 ? parts.length : wildcard));
+  const tail = wildcard < 0 ? "" : parts.slice(wildcard).join("/");
+  const expression = tail.replace(/\*\*\/|\*\*|\*|[.+?^${}()|[\]\\]/g, (token) => {
+    if (token === "**/") return "(?:[^/]+/)*";
+    if (token === "**") return "[\\s\\S]*";
+    if (token === "*") return "[^/]*";
+    return `\\${token}`;
+  });
+  const glob = new RegExp(`^${expression}${direction === "deny" ? "(?:/[\\s\\S]*)?" : ""}$`);
+  const at = (root: string, path: string): boolean => {
+    const rest = relative(root, path);
+    if (isAbsolute(rest) || rest === ".." || rest.startsWith(`..${sep}`)) return false;
+    if (!tail) return direction === "deny" || rest === "";
+    return glob.test(rest.split(sep).join("/"));
+  };
+  const realPrefix = canonicalPath(prefix);
+  return direction === "deny"
+    ? [argument.path, argument.realPath].some((path) => at(prefix, path) || at(realPrefix, path))
+    : at(prefix, argument.path) && at(realPrefix, argument.realPath);
+}
+
+function matchesNativeRule(
+  rule: string,
+  name: string,
+  family: string,
+  argument: NativeArgument | undefined,
+  direction: Direction,
+): boolean {
+  if (!rule.includes("(")) {
+    return (
+      matches(rule, name, direction) ||
+      (direction === "deny" && matches(rule, family, direction))
+    );
+  }
+  if (!matches(toolNameOf(rule), family, direction) && !matches(toolNameOf(rule), name, direction)) {
+    return false;
+  }
+  const qualifier = /^[^(]+\((.*)\)$/s.exec(rule)?.[1];
+  if (qualifier === undefined) return direction === "deny";
+  if (argument && "path" in argument) return matchesNativePath(qualifier, argument, direction);
+  // Shell constraints need a shell parser, and search tools need their full search scope.
+  // Never let a bare grant override a qualified deny we cannot safely evaluate. Only an
+  // exact, operator-written command can grant a scoped Bash request; no prefix/glob grants.
+  return (
+    direction === "deny" ||
+    (argument !== undefined && "command" in argument && qualifier === argument.command)
+  );
+}
+
 export class ToolPolicy {
   constructor(
     private allow: string[],
@@ -176,7 +284,8 @@ export class ToolPolicy {
   ) {}
 
   /**
-   * Deny wins, and an unlisted tool is refused.
+   * Deny wins, and an unlisted tool is refused. Native ACP calls must instead use
+   * allowsNativeRequest so qualified denies see the operation arguments.
    *
    * The brain reads untrusted text, so a side-effecting tool is an exfiltration and
    * write vector. Read-only is the low-risk default; anything else gets named on purpose.
@@ -188,6 +297,73 @@ export class ToolPolicy {
     if (this.allow.some((rule) => matches(rule, name, "allow"))) return { ok: true };
 
     return { ok: false, reason: `tool ${name} is not allowlisted` };
+  }
+
+  /**
+   * ACP native calls carry arguments separately; a name alone cannot satisfy path denies.
+   * Path scopes support literal segments, `*` and `**`. Unsupported qualified denies
+   * refuse the request, even with a bare allow; command scopes grant only exact strings.
+   * MCP remains name-based, as at the gateway's tool endpoints.
+   */
+  allowsNativeRequest({
+    name, input, cwd = process.cwd(),
+  }: {
+    name?: string | null;
+    input?: unknown;
+    cwd?: string;
+  }): ToolVerdict {
+    if (!name) return { ok: false, reason: "missing native tool name" };
+    if (name.startsWith(MCP)) return this.allowsTool(name);
+    if (
+      !/^[A-Za-z][A-Za-z0-9_]*$/.test(name) ||
+      !input || typeof input !== "object" || Array.isArray(input)
+    ) {
+      return { ok: false, reason: "malformed native tool request" };
+    }
+    const fields: Record<string, string> = {
+      Read: "file_path",
+      Edit: "file_path",
+      Write: "file_path",
+      MultiEdit: "file_path",
+      NotebookEdit: "notebook_path",
+      Bash: "command",
+    };
+    const families: Record<string, string> = {
+      Write: "Edit",
+      MultiEdit: "Edit",
+      NotebookEdit: "Edit",
+      Glob: "Read",
+      Grep: "Read",
+    };
+    let argument: NativeArgument | undefined;
+    try {
+      const field = Object.hasOwn(fields, name) ? fields[name] : undefined;
+      if (field) {
+        const value = (input as Record<string, unknown>)[field];
+        if (typeof value !== "string" || !value.trim() || value.includes("\0")) {
+          return { ok: false, reason: `missing or malformed ${field} for ${name}` };
+        }
+        if (name === "Bash") {
+          argument = { command: value };
+        } else {
+          if (value.startsWith("~") && !value.startsWith("~/")) throw new Error("unsupported path");
+          const path = value.startsWith("~/")
+            ? `${homedir()}/${value.slice(2)}`
+            : isAbsolute(value) ? value : `${resolve(cwd)}/${value}`;
+          argument = { path: resolve(path), realPath: canonicalPath(path), cwd };
+        }
+      }
+      const family = Object.hasOwn(families, name) ? families[name] : name;
+      if (this.deny.some((rule) => matchesNativeRule(rule, name, family, argument, "deny"))) {
+        return { ok: false, reason: `tool ${name} is denied by policy` };
+      }
+      if (this.allow.some((rule) => matchesNativeRule(rule, name, family, argument, "allow"))) {
+        return { ok: true };
+      }
+      return { ok: false, reason: `tool ${name} is not allowlisted` };
+    } catch {
+      return { ok: false, reason: `cannot safely evaluate arguments for ${name}` };
+    }
   }
 }
 

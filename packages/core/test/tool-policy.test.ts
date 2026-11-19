@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 import { DEFAULT_SECRETS_DIR } from "../src/secrets.ts";
 import { loadToolPolicy, ToolPolicy } from "../src/tool-policy.ts";
 
@@ -9,6 +12,113 @@ const ok = {
     deny: ["Read(./.env)", "Read(//mnt/secrets-store/**)", "Read(**/auth.json)"],
   },
 };
+
+describe("native permission requests", () => {
+  const cwd = process.cwd();
+  const policy = new ToolPolicy(["Read"], ok.permissions.deny);
+  const read = (file_path: unknown, gate = policy, dir = cwd) =>
+    gate.allowsNativeRequest({ name: "Read", input: { file_path }, cwd: dir });
+
+  it.each([
+    "/mnt/secrets-store/token",
+    "/mnt/secrets-store/.hidden/token",
+    "/mnt/secrets-store/sub/../token",
+    relative(cwd, "/mnt/secrets-store/token"),
+    "./.env",
+    join(cwd, ".env"),
+    "docs/../.env",
+    "nested/.env",
+    "auth.json",
+    "nested/auth.json",
+  ])("applies qualified denies before a bare Read allow: %s", (path) => {
+    expect(read(path)).toMatchObject({ ok: false, reason: expect.stringMatching(/denied/) });
+  });
+
+  it.each(["README.md", "./.envrc", "nested/auth.jsonc", "/mnt/secrets-store-old/token"])(
+    "still permits a non-denied read: %s", (path) => {
+      expect(read(path)).toEqual({ ok: true });
+    },
+  );
+
+  it.each([undefined, null, {}, [], "./.env", { file_path: 1 }, { file_path: "" }, { file_path: "a\0b" }])(
+    "refuses missing or malformed arguments: %j", (input) => {
+      expect(policy.allowsNativeRequest({ name: "Read", input }).ok).toBe(false);
+    },
+  );
+
+  it("uses the session cwd and Claude's single-slash versus double-slash anchors", () => {
+    const gate = new ToolPolicy(["Read"], ["Read(/private/**)"]);
+    expect(read(join(cwd, "private/key"), gate).ok).toBe(false);
+    expect(read("/private/key", gate).ok).toBe(true);
+    expect(read("private/.key", gate).ok).toBe(false);
+  });
+
+  it("requires a scoped allow to cover the requested path and keeps bare denies first", () => {
+    const gate = new ToolPolicy(["Read(./docs/**)"], ["Read(./docs/private/**)"]);
+    expect(read("docs/public/readme.md", gate).ok).toBe(true);
+    expect(read("docs/private/key", gate).ok).toBe(false);
+    expect(read("elsewhere/readme.md", gate).ok).toBe(false);
+    expect(read("docs/readme.md", new ToolPolicy(["Read(./docs/**)"], ["Read"])).ok).toBe(false);
+  });
+
+  it("checks file targets and Edit rules for write-family tools", () => {
+    const gate = new ToolPolicy(["Edit", "Write", "MultiEdit", "NotebookEdit"], ["Edit(./.env)"]);
+    for (const name of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) {
+      const field = name === "NotebookEdit" ? "notebook_path" : "file_path";
+      expect(gate.allowsNativeRequest({ name, input: { [field]: "./.env" }, cwd }).ok).toBe(false);
+      expect(gate.allowsNativeRequest({ name, input: { [field]: "./notes.md" }, cwd }).ok).toBe(true);
+      expect(gate.allowsNativeRequest({ name, input: {}, cwd }).ok).toBe(false);
+    }
+  });
+
+  it("does not fall back to a broad grant for unsupported qualified constraints", () => {
+    expect(read("README.md", new ToolPolicy(["Read"], ["Read(**/[.]env)"])).ok).toBe(false);
+    for (const name of ["Glob", "Grep"]) {
+      const gate = new ToolPolicy([name], ok.permissions.deny);
+      expect(gate.allowsNativeRequest({ name, input: { pattern: "*" }, cwd }).ok).toBe(false);
+    }
+    const gate = new ToolPolicy(["Bash"], ["Bash(cat:*)"]);
+    for (const command of ["cat .env", "git status; cat .env", "git status"]) {
+      expect(gate.allowsNativeRequest({ name: "Bash", input: { command } }).ok).toBe(false);
+    }
+  });
+
+  it("uses actual command input for exact Bash grants and refuses malformed commands", () => {
+    const gate = new ToolPolicy(["Bash(git status)"], []);
+    expect(gate.allowsNativeRequest({ name: "Bash", input: { command: "git status" } }).ok).toBe(true);
+    for (const command of [undefined, 42, "", "git status; cat .env"]) {
+      expect(gate.allowsNativeRequest({ name: "Bash", input: { command } }).ok).toBe(false);
+    }
+    expect(gate.allowsNativeRequest({ name: "Bash(git status)", input: {} }).ok).toBe(false);
+  });
+
+  it("checks symlink targets, including link/.. and parents of newly created files", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "native-policy-")));
+    try {
+      mkdirSync(join(root, "docs"));
+      mkdirSync(join(root, "secrets/nested"), { recursive: true });
+      writeFileSync(join(root, "secrets/key"), "secret");
+      writeFileSync(join(root, "docs/readme"), "public");
+      symlinkSync(join(root, "secrets"), join(root, "docs/link"));
+      symlinkSync(join(root, "secrets/nested"), join(root, "docs/inner"));
+      symlinkSync(join(root, "docs/readme"), join(root, "secrets/public-link"));
+      symlinkSync(join(root, "secrets/missing"), join(root, "docs/dangling"));
+      const gate = new ToolPolicy(["Read", "Write"], ["Read(/secrets/**)", "Edit(/secrets/**)"]);
+      expect(read("docs/readme", gate, root).ok).toBe(true);
+      for (const path of ["docs/link/key", "docs/inner/../key", "secrets/public-link", "docs/dangling"]) {
+        expect(read(path, gate, root).ok, path).toBe(false);
+      }
+      expect(gate.allowsNativeRequest({
+        name: "Write", input: { file_path: "docs/link/new" }, cwd: root,
+      }).ok).toBe(false);
+      const scoped = new ToolPolicy(["Read(/docs/**)"], []);
+      expect(read("docs/readme", scoped, root).ok).toBe(true);
+      expect(read("docs/link/key", scoped, root).ok).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("loadToolPolicy invariants", () => {
   it("accepts a well-formed policy", () => {
