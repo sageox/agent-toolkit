@@ -1655,7 +1655,11 @@ async function publishAgentDirectory(opts: {
     return;
   }
 
-  const directory = directoryFor(manifest, surface as BuzzSurfaceChannels, opts.name);
+  // The handle is the manifest's, as `run` publishes it: passing the display name here made
+  // the two writers disagree, so the field flipped on the first restart after a registration.
+  // The display name is the one this registration was given, and replaces the record's —
+  // re-registering is how a rename reaches the record at all.
+  const directory = directoryFor(manifest, surface as BuzzSurfaceChannels, manifest.name, opts.name);
   directory.channelIds = [...new Set([...directory.channelIds, opts.channel])];
 
   try {

@@ -167,7 +167,23 @@ try {
   assert.equal(matches.total, 1);
   assert.equal(matches.results[0].file, "main.go");
   assert.match(matches.results[0].snippet, /ScheduledWorkspaceMarker/);
-  console.log("ox compatibility passed: status, team list, session list, glance, hosted ledger reads and sync, code insights and search");
+  // The reason this image pins ox 0.25.0+: a job whose pod keeps only its home directory
+  // marks the machine disposable. An older ox rejects the key, so this fails on it.
+  run("ox", ["config", "set", "disposable_machine", "on"]);
+  const disposable = JSON.parse(run("ox", ["config", "get", "disposable_machine", "--json"]).stdout);
+  assert.deepEqual([disposable.value, disposable.source], ["on", "user"]);
+  // What a job needs to record its coding sessions: ox finds the agent with `ps`, reads the
+  // transcript through the adapter beside its binary, and the daemon runs `claude` to
+  // summarize a session before upload. Missing any one, sessions stop reaching the Ledger.
+  const adapters = ox(["adapter", "list", "--json"]);
+  const claudeAdapter = adapters.find((adapter) => adapter.name === "claude-code");
+  assert.deepEqual([claudeAdapter?.status, claudeAdapter?.binary_path], ["bundled", "/usr/local/bin/ox-adapter-claude-code"]);
+  assert.equal(run("ps", ["-o", "comm=", "-p", String(process.pid)]).stdout.trim(), "node");
+  assert.match(run("claude", ["--version"], { DISABLE_AUTOUPDATER: "1" }).stdout, /^\d+\.\d+\.\d+ \(Claude Code\)$/m);
+  // A root-owned npm cache in the agent's home makes every npx call fail with EACCES.
+  const npmCache = spawnSync("stat", ["-c", "%u", join(process.env.HOME, ".npm")], { encoding: "utf8" });
+  assert.ok(npmCache.status !== 0 || npmCache.stdout.trim() === String(process.getuid()), "~/.npm is not owned by the agent user");
+  console.log("ox compatibility passed: status, team list, session list, glance, hosted ledger reads and sync, code insights and search, disposable_machine, session recording prerequisites");
 } finally {
   run("chmod", ["-R", "u+w", root]);
   rmSync(root, { recursive: true, force: true });

@@ -40,35 +40,45 @@ FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30
 RUN test "$(node --version)" = "v22.23.4"
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends age ca-certificates curl git tini \
+ && apt-get install -y --no-install-recommends age ca-certificates curl git procps tini \
  && rm -rf /var/lib/apt/lists/*
 
 # The gateway runs ox itself — the credential stays on this side of the brain boundary.
 # Pin the release and verify it so rebuilding this image cannot silently install a newer
 # binary. Debian's architecture names match the SageOx release names we support.
-ARG OX_VERSION=0.24.2
+ARG OX_VERSION=0.26.0
 RUN set -eu; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) checksum="97a78be55be9ea041f68002235d74d0b24e92bd3f9cdda1c20e2aba2c7708d0d" ;; \
-      arm64) checksum="07212d34cb473afbf373f7735aa500570050162f9063d0cce549dd8d45f5b78e" ;; \
+      amd64) checksum="201500fe39268d7adff77089f8270f24a1f0136b66ddd681430df29385b2e5ab" ;; \
+      arm64) checksum="3faa833e3219ed838e88684204700d54eae95f7eb947b3b7505f0c866e569273" ;; \
       *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     archive="ox_${OX_VERSION}_linux_${arch}.tar.gz"; \
     curl -fsSL "https://github.com/sageox/ox/releases/download/v${OX_VERSION}/${archive}" -o "/tmp/${archive}"; \
     echo "${checksum}  /tmp/${archive}" | sha256sum -c -; \
-    tar -xzf "/tmp/${archive}" -C /usr/local/bin ox; \
+    tar -xzf "/tmp/${archive}" -C /usr/local/bin --wildcards ox 'ox-adapter-*'; \
     rm "/tmp/${archive}"; \
     ox version
 
-# The brains. Installed as real binaries so the gateway does not reach for npx at runtime,
-# which would mean a network fetch on the first turn.
+# The brains, and the Claude Code CLI for jobs that run it as a coding harness. Installed as
+# real binaries so nothing reaches for npx at runtime, which would mean a network fetch on
+# the first turn. ox's daemon also runs `claude` to summarize a recorded session before it
+# uploads it, so a job that records sessions needs it on PATH.
+#
+# This runs as root before the agent user exists, so npm's cache lands in /root. Installing
+# after `ENV HOME=/home/agent` would leave a root-owned ~/.npm, and every later npx call by
+# the agent user would fail with EACCES. Cleaning the cache keeps its ~400 MB out of the layer.
 ARG CLAUDE_AGENT_ACP_VERSION=0.84.0
 ARG CODEX_ACP_VERSION=1.11.0
+ARG CLAUDE_CODE_VERSION=2.1.284
 RUN npm install -g "@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}" \
       "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude-agent-acp --version \
- && codex-acp --version
+ && codex-acp --version \
+ && test "$(claude --version)" = "${CLAUDE_CODE_VERSION} (Claude Code)" \
+ && npm cache clean --force
 
 WORKDIR /app
 

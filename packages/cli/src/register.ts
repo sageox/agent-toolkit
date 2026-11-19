@@ -38,22 +38,28 @@ export interface BuzzSurfaceChannels {
  * manifest through its own normalizing reader — would compare the two spellings forever
  * without a re-registration ever reconciling them. `normalizeActorId` rewrites only
  * Nostr-shaped ids, so a Slack member id in the same list is left as its own events spell it.
+ *
+ * `displayName` is given only by a caller that has been told one — registration, from
+ * profile.json or `--name`. Left out, the publish keeps whatever display name the record
+ * already carries, so a reconcile that was about channels does not rename the agent.
  */
 export function directoryFor(
   manifest: AgentManifest,
   surface: BuzzSurfaceChannels,
   name: string,
+  displayName?: string,
 ): AgentDirectory {
   const channelIds = [...new Set((surface.channels ?? []).map((channel) => channel.id))];
   const principals = (ids: string[] | undefined) => ids?.map(normalizeActorId);
+  const named = displayName ? { name, displayName } : { name };
 
   switch (manifest.respondTo) {
     case "owner-only":
-      return { name, channelIds, respondTo: "allowlist", respondToAllowlist: principals(manifest.owner) };
+      return { ...named, channelIds, respondTo: "allowlist", respondToAllowlist: principals(manifest.owner) };
     case "allowlist":
-      return { name, channelIds, respondTo: "allowlist", respondToAllowlist: principals(manifest.allowlist) };
+      return { ...named, channelIds, respondTo: "allowlist", respondToAllowlist: principals(manifest.allowlist) };
     default:
-      return { name, channelIds, respondTo: manifest.respondTo };
+      return { ...named, channelIds, respondTo: manifest.respondTo };
   }
 }
 
