@@ -11,9 +11,11 @@ import {
 import { doctorRun } from "./cli-harness.ts";
 
 const key = generateKeypair();
+// A directory nothing mounts, so a host's /mnt/secrets-store/BUZZ_NSEC cannot sign the fixtures.
+const noMount = join(tmpdir(), "sageox-agent-doctor-name-no-mount");
 
 async function signed(kind: number, content: Record<string, unknown>) {
-  const signer = await resolveBuzzSigner("BUZZ_NSEC", { dir: [], env: { BUZZ_NSEC: key.nsec } });
+  const signer = await resolveBuzzSigner("BUZZ_NSEC", { dir: noMount, env: { BUZZ_NSEC: key.nsec } });
   return signer.signEvent({ kind, created_at: 1786000000, tags: [], content: JSON.stringify(content) });
 }
 
