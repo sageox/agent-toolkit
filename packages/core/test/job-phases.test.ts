@@ -150,11 +150,20 @@ describe("the work phase", () => {
   });
 
   it("holds the run at UNKNOWN when no work phase left a record", async () => {
-    await mkdir(stageDir);
+    await mkdir(stageOutputDir(stageDir), { recursive: true });
     const run = await host().tick(phases("", PROVES));
+    expect(run.outcome).toBe("completed");
     expect(run.verdict.status).toBe("UNKNOWN");
     expect(run.checks).toContainEqual(expect.objectContaining({ gate: "job:fix:work", executed: false }));
   });
+
+  it("records the work phase even when its body left a FIFO where the record goes", async () => {
+    const record = workPhaseRecordPath(stageDir);
+    const job = phases(`require("node:child_process").execFileSync("mkfifo", [${JSON.stringify(record)}])`, PROVES);
+    const result = await host().work(job);
+    expect(result).toEqual({ executed: true, exitCode: 0 });
+    expect(JSON.parse(readFileSync(record, "utf8"))).toEqual(result);
+  }, 10_000);
 
   it("refuses to publish a phased job without a stage, and to hand an unphased one a stage", async () => {
     const phased = await host(null).tick(phases("", PROVES));

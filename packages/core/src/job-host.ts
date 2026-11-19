@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fileFlags, existsSync } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -1642,7 +1642,12 @@ export class JobHost {
     const out = stageOutputDir(stageDir);
     await mkdir(out, { recursive: true, mode: 0o755 });
     const record = async (result: WorkPhaseResult) => {
-      await writeFile(workPhaseRecordPath(stageDir), JSON.stringify(result) + "\n", { mode: 0o644 });
+      // The body may have left anything at the record's path, a FIFO included; renaming a
+      // fresh file over it never opens what was there.
+      const path = workPhaseRecordPath(stageDir);
+      const fresh = `${path}.${randomUUID()}`;
+      await writeFile(fresh, JSON.stringify(result) + "\n", { mode: 0o644, flag: "wx" });
+      await rename(fresh, path);
       return result;
     };
     if (job.suspend) return record({ executed: false, exitCode: null });
