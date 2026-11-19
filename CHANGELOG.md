@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has heard nothing for five minutes (`stallCheckIntervalMs`) is asked about with a fresh
   read; anything the relay returns that the subscription never received is the stall. A
   channel that is merely quiet logs nothing. Before this, a stalled subscription looked
-  healthy — process alive, pings answered — until someone noticed missed messages.
+  healthy — process alive, pings answered — until someone noticed missed messages. A miss
+  can still go unreported if it is timestamped at or before the newest message the channel
+  did receive: that covers a second flooded past 100 messages, and a sender whose clock runs
+  ahead.
 
 ### Fixed
 
