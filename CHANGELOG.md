@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.13.0] - 2026-11-17
-
-Everything below shipped after `v0.12.1`.
-
-On publication, `ghcr.io/sageox/agent-base:0.13.0` takes `:latest` and starts `:0.13`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
-
 ### Added
 
 - `run.work` and the chart's `work: true`: a scheduled job may split into a work phase
@@ -25,7 +19,17 @@ On publication, `ghcr.io/sageox/agent-base:0.13.0` takes `:latest` and starts `:
   work phase's exit into the verdict as `job:<slug>:work`. `run.work.wallClockMs` is
   carved out of `budget.wallClockMs`. Refused beside `trigger.onRequest`, `worker`,
   `serviceAccount.automountJobToken` and `persistence.jobHome`. Opt-in; jobs without
-  it render and run as before.
+  it render and run as before. The work phase refuses to start its body when its
+  container holds an AWS credential variable or an IRSA, EKS Pod Identity or cluster
+  token file, so a webhook that injects into every container cannot hand it one.
+
+## [0.13.0] - 2026-11-17
+
+Everything below shipped after `v0.12.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.13.0` takes `:latest` and starts `:0.13`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
+### Added
 
 - Helm: an optional per-agent `authTag` value, injected as `BUZZ_AUTH_TAG` into
   the agent Deployment and its scheduled-job hosts. Carries a NIP-OA owner

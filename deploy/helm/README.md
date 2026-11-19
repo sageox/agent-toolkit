@@ -706,6 +706,9 @@ the `job` container's CSI mount reads. Exclude `work` from that injection
 (`eks.amazonaws.com/skip-containers` for IRSA) and check on your own cluster that
 `env` inside the `work` container carries no `AWS_*` credential variable before counting on
 the split. **This is not asserted by the chart's tests**, which can only read rendered YAML.
+The work phase checks for itself at run time: it refuses to start its body when it finds an
+AWS credential variable or an IRSA, Pod Identity or cluster token file, and the run reports
+the work gate as UNKNOWN with that reason.
 
 `work: true` is refused beside `serviceAccount.automountJobToken` (a cluster token mounts
 into every container) and `persistence.jobHome` (a home the publish phase keeps that the

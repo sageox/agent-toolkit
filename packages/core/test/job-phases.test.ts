@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { JobHost, publishPhase, stageOutputDir, workPhaseRecordPath, type JobRun } from "../src/job-host.ts";
+import { injectedCloudIdentity, JobHost, publishPhase, stageOutputDir, workPhaseRecordPath, type JobRun } from "../src/job-host.ts";
 import { isProcessJob, loadManifest, type ProcessJob } from "../src/manifest.ts";
 
 const base =
@@ -159,6 +159,38 @@ describe("the work phase", () => {
     const unphased = await host().tick(plain);
     expect(unphased.outcome).toBe("crashed");
     expect(unphased.reason).toMatch(/declares no run\.work, and this run was given a stage/);
+  });
+});
+
+describe("a cloud identity in the work phase's container", () => {
+  it("refuses to start the work body beside an injected credential endpoint, and says so", async () => {
+    const seen = join(dir, "work-env.json");
+    const job = phases(DUMP(seen), PROVES);
+    const injected = new JobHost({
+      workDir: dir,
+      env: { ...process.env, AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.23/v1/credentials" },
+      stageDir,
+    });
+    const result = await injected.work(job);
+
+    expect(result).toEqual({
+      executed: false,
+      exitCode: null,
+      refused: "refused to start: AWS_CONTAINER_CREDENTIALS_FULL_URI is set in the work phase's container",
+    });
+    expect(() => readFileSync(seen)).toThrow();
+    const run = await host().tick(job);
+    expect(run.verdict.status).toBe("UNKNOWN");
+    expect(run.checks).toContainEqual({
+      gate: "job:fix:work", executed: false, exitCode: null,
+      detail: "refused to start: AWS_CONTAINER_CREDENTIALS_FULL_URI is set in the work phase's container",
+    });
+  });
+
+  it("finds a webhook's token file even when its variable is scrubbed", () => {
+    const token = "/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token";
+    expect(injectedCloudIdentity({}, (path) => path === token)).toBe(`${token} is mounted in the work phase's container`);
+    expect(injectedCloudIdentity({ PATH: "/usr/bin" }, () => false)).toBeUndefined();
   });
 });
 

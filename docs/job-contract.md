@@ -687,6 +687,14 @@ since the publish phase runs as a different UID. The publish phase then refuses 
 the stage holds anything but directories and regular files: a staged symlink would resolve
 in the publish container, where it can name that container's own secrets.
 
+The work phase also refuses to start its body when its own container holds a credential
+the host did not hand it: an AWS credential variable (`AWS_ACCESS_KEY_ID`,
+`AWS_SESSION_TOKEN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_CONTAINER_CREDENTIALS_*`,
+`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`) or an IRSA, EKS Pod Identity or cluster token
+file at its well-known path. Scrubbing the body's environment would not be enough, since the
+token file stays readable. The record then says `executed: false` with the reason, and the
+publish phase reports the work gate as UNKNOWN.
+
 Refused beside `trigger.onRequest` (that run executes in the gateway's process) and
 `worker` (the dispatcher builds a single-container Pod).
 

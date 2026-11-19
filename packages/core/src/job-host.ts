@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fileFlags } from "node:fs";
+import { constants as fileFlags, existsSync } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, rm, writeFile } from "node:fs/promises";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -327,8 +327,43 @@ export interface JobHostOptions {
 const WorkPhaseSchema = z.object({
   executed: z.boolean(),
   exitCode: z.number().int().nullable(),
+  refused: z.string().max(300).optional(),
 }).strict();
 export type WorkPhaseResult = z.infer<typeof WorkPhaseSchema>;
+
+/** What an identity webhook (EKS IRSA, EKS Pod Identity) or a static key leaves in a container's environment. */
+const CLOUD_IDENTITY_ENV = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SESSION_TOKEN",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+] as const;
+
+/** Where those webhooks, and a mounted cluster token, put the token itself. */
+const CLOUD_IDENTITY_FILES = [
+  "/var/run/secrets/eks.amazonaws.com/serviceaccount/token",
+  "/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token",
+  "/var/run/secrets/kubernetes.io/serviceaccount/token",
+] as const;
+
+/**
+ * Names a credential the work phase's container was handed by something other than the
+ * host, or `undefined`. Scrubbing the body's environment is not enough: the token file is
+ * at a well-known path and the credential endpoint answers anyone holding it, so a work
+ * phase that finds one refuses to start rather than run its harness beside it.
+ */
+export function injectedCloudIdentity(
+  env: NodeJS.ProcessEnv,
+  exists: (path: string) => boolean = existsSync,
+): string | undefined {
+  const variable = CLOUD_IDENTITY_ENV.find((name) => env[name]);
+  if (variable) return `${variable} is set in the work phase's container`;
+  const file = CLOUD_IDENTITY_FILES.find((path) => exists(path));
+  if (file) return `${file} is mounted in the work phase's container`;
+  return undefined;
+}
 
 /** Where the host keeps the work phase's record, beside what the body staged. */
 export function workPhaseRecordPath(stageDir: string): string {
@@ -1609,6 +1644,9 @@ export class JobHost {
       return result;
     };
     if (job.suspend) return record({ executed: false, exitCode: null });
+    const hostEnv = this.opts.env ?? process.env;
+    const identity = injectedCloudIdentity(hostEnv);
+    if (identity) return record({ executed: false, exitCode: null, refused: `refused to start: ${identity}` });
 
     const work = job.run.work;
     const phase: ProcessJob = {
@@ -1620,7 +1658,6 @@ export class JobHost {
       jobSlug: job.slug, runId: randomUUID(), trigger: "schedule", requestedBy: null,
       startedAt: Date.now(), parameters: {},
     };
-    const hostEnv = this.opts.env ?? process.env;
     const noAutoMemory = hostEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY;
     // `envelope` less every credential and the verdict path: this phase proves nothing to
     // the host, and it is the phase the credentials are being kept from. `run.passthrough`
@@ -1661,8 +1698,8 @@ export class JobHost {
         const buffer = Buffer.alloc(1024);
         const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
         if (bytesRead === buffer.length) throw new Error("work phase record is too large");
-        const result = WorkPhaseSchema.parse(JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")));
-        return { gate, ...result };
+        const { refused, ...result } = WorkPhaseSchema.parse(JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")));
+        return { gate, ...result, ...(refused ? { detail: refused } : {}) };
       } finally {
         await file.close();
       }

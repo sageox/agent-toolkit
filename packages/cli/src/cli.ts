@@ -2143,7 +2143,7 @@ async function jobWorkCmd(argv: string[], dir: string, agentName: string, job: J
   const host = new JobHost({ ...jobWorkEvents(agentName), stageDir });
   const result = await host.work(job);
   const line = !result.executed
-    ? `${job.slug}: work phase did not run\n`
+    ? `${job.slug}: work phase did not run${result.refused ? `: ${result.refused}` : ""}\n`
     : `${job.slug}: work phase exited ${result.exitCode ?? "without an exit code"}\n`;
   if (process.env.AGENT_WORK_EVENTS === "1") writeJobDiagnostic("host", line);
   else process.stdout.write(line);
