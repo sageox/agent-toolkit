@@ -72,7 +72,7 @@
       "additionalProperties": false,
       "required": ["slug", "suspend", "trigger"],
       "if": { "required": ["prompt"] },
-      "then": { "properties": { "budget": false, "worker": false } },
+      "then": { "properties": { "budget": false, "worker": false, "work": false } },
       "else": { "required": ["budget"] },
       "properties": {
         "worker": {
@@ -122,6 +122,10 @@
           }
         },
         "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "work": {
+          "const": true,
+          "description": "Mirror a job whose agent.yaml declares `run.work`. Renders a `work` init container that runs the work phase as UID 10002 with no secrets, staging into an emptyDir the `job` container reads read-only before publishing. Not with `worker`."
+        },
         "prompt": {
           "const": true,
           "description": "Mirror a job whose agent.yaml body is `prompt:`. Renders no CronJob — its turn runs on a clock inside the gateway — and states no budget. Requires toolkit 0.5.1 or newer."
