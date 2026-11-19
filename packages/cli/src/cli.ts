@@ -2302,8 +2302,10 @@ async function profileNameDrift(
     `surface buzz: the directory record's display_name at ${opts.relayUrl} is ${JSON.stringify(record.display_name)} ` +
     `but the profile names it ${JSON.stringify(names[0])}, so a mention by the record's name does not resolve`;
   // Registration signs only with the bundle's BUZZ_NSEC, so it cannot repair a record another
-  // identity owns; naming it as the fix there would promise a repair it does not perform.
-  if (opts.identityRef !== "BUZZ_NSEC") {
+  // key owns; naming it as the fix there would promise a repair it does not perform. Compare
+  // the keys, not the refs: another ref can hold the same key, and then registration does fix it.
+  const registers = process.env.BUZZ_NSEC?.trim();
+  if (!registers || resolveSecret(opts.identityRef, { dir: opts.secretsDir })?.trim() !== registers) {
     return (
       `${drift} — \`sageox-agent identity register buzz\` publishes only BUZZ_NSEC's record, so it ` +
       `cannot fix this one (identity ${opts.identityRef}); republish the record from that identity`

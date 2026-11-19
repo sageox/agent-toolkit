@@ -39,7 +39,11 @@ describe("doctor compares the directory record's name with the agent's profile",
     rmSync(home, { recursive: true, force: true });
   });
 
-  async function doctor(backlog: Awaited<ReturnType<typeof signed>>[], identity = "BUZZ_NSEC") {
+  async function doctor(
+    backlog: Awaited<ReturnType<typeof signed>>[],
+    identity = "BUZZ_NSEC",
+    env: Record<string, string> = {},
+  ) {
     relay = await LocalRelay.start({ requireAuth: true, backlog });
     writeFileSync(
       join(home, "demo", "agent.yaml"),
@@ -55,7 +59,7 @@ surfaces:
       - { id: c1, reply: private }
 `,
     );
-    return doctorRun(home, { [identity]: key.nsec });
+    return doctorRun(home, { [identity]: key.nsec, ...env });
   }
 
   // Ron's case on buzz.test.sageox.ai: the profile was renamed and the record kept the old
@@ -95,5 +99,17 @@ surfaces:
     expect(stdout).toContain(`  warn  surface buzz: the directory record's display_name at ${relay.url}`);
     expect(stdout).toContain("publishes only BUZZ_NSEC's record, so it cannot fix this one (identity BUZZ_NSEC_TWO)");
     expect(stdout).not.toContain("re-run `sageox-agent identity register buzz`");
+  }, 30_000);
+
+  // A second ref to the bundle's own key owns the same record, so registration does fix it.
+  it("offers re-registration for a surface whose identity holds the BUZZ_NSEC key", async () => {
+    const { stdout } = await doctor(
+      [await record("Ron Weasley"), await signed(0, { name: "Ron" })],
+      "AGENT_NSEC",
+      { BUZZ_NSEC: key.nsec },
+    );
+    expect(stdout).toContain(`  warn  surface buzz: the directory record's display_name at ${relay.url}`);
+    expect(stdout).toContain("re-run `sageox-agent identity register buzz`");
+    expect(stdout).not.toContain("cannot fix this one");
   }, 30_000);
 });
