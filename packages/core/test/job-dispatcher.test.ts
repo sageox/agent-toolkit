@@ -344,6 +344,27 @@ describe("durable Kubernetes job lifecycle", () => {
     expect(pod.spec.containers[0]!.env).toContainEqual({ name: "TASK_TOKEN", valueFrom: { secretKeyRef: { name: "task-secret", key: "token" } } });
   });
 
+  it("schedules a worker Pod with its profile's nodeSelector and tolerations, and adds neither when unset (#151)", async () => {
+    const placed = new Cluster();
+    const tolerations = [{ key: "dedicated", operator: "Equal" as const, value: "agents", effect: "NoSchedule" as const }];
+    const a = new JobDispatcher({
+      api: placed, name: "demo-dispatcher", jobs: manifest().jobs, url: "http://dispatcher:8090",
+      profiles: { task: { serviceAccountName: "task-worker", secrets: { TASK_TOKEN: { name: "task-secret", key: "token" } }, resources: {},
+        nodeSelector: { pool: "agents" }, tolerations } },
+    });
+    const req = request(manifest().jobs[0]!);
+    await a.dispatch(req); await a.reconcile();
+    const spec = (placed.objects.get(`jobs/${runName(req.runId)}`)!.spec!.template as { spec: Record<string, unknown> }).spec;
+    expect(spec.nodeSelector).toEqual({ pool: "agents" });
+    expect(spec.tolerations).toEqual(tolerations);
+
+    const plain = new Cluster(), b = dispatcher(plain);
+    await b.dispatch(req); await b.reconcile();
+    const unplaced = (plain.objects.get(`jobs/${runName(req.runId)}`)!.spec!.template as { spec: Record<string, unknown> }).spec;
+    expect(unplaced).not.toHaveProperty("nodeSelector");
+    expect(unplaced).not.toHaveProperty("tolerations");
+  });
+
   it("retains the result after worker cleanup and dispatcher restart, then expires it without replay", async () => {
     const api = new Cluster(), a = dispatcher(api);
     const req = request(manifest().jobs[0]!);
