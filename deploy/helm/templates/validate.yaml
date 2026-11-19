@@ -144,6 +144,10 @@ Pod is the dispatcher's, and a prompt job has no process.
 {{- if has $volume.name (list "job-work" "job-stage") -}}
 {{- fail (printf "%s: sharedVolumes has a volume named %s, a name the chart gives job %s's work phase; rename it" $name $volume.name $job.slug) -}}
 {{- end -}}
+{{- $shared := $volume.mountPath | trimSuffix "/" -}}
+{{- if or (eq $shared "/stage") (hasPrefix "/stage/" $shared) (hasPrefix (printf "%s/" $shared) "/stage") -}}
+{{- fail (printf "%s: sharedVolumes[%s] mounts at %s, which overlaps /stage, where job %s's publish container reads the work phase's output; move it" $name $volume.name $volume.mountPath $job.slug) -}}
+{{- end -}}
 {{- end -}}
 {{- if or $job.worker (hasKey $job "prompt") -}}
 {{- fail (printf "%s: job %s has work: true, which only a scheduled local command job can have" $name $job.slug) -}}

@@ -786,6 +786,12 @@ refuses 'a work phase on a worker' 'job shift has work: true, which only a sched
 refuses 'a work phase on a mirrored prompt job' "at '/agents/harry/jobs/2/work': false schema" \
   --set 'agents.harry.jobs[2].work=true'
 grep -qF -- '/work/.gitconfig' <<<"$sweep" || fail 'the work phase has no HOME telling Git the read-only checkouts are safe'
+refuses 'a shared volume mounted over the stage' \
+  'ida: sharedVolumes[shared] mounts at /stage, which overlaps /stage, where job sweep'"'"'s publish container reads the work phase'"'"'s output; move it' \
+  "${phased[@]}" \
+  --set 'agents.ida.sharedVolumes[0].name=shared' \
+  --set 'agents.ida.sharedVolumes[0].mountPath=/stage' \
+  --set 'agents.ida.sharedVolumes[0].claimName=shared'
 refuses 'a shared volume named like the work stage' \
   "ida: sharedVolumes has a volume named job-stage, a name the chart gives job sweep's work phase; rename it" \
   "${phased[@]}" \
