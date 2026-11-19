@@ -763,6 +763,47 @@ describe("BuzzAdapter subscription shape", () => {
   });
 });
 
+describe("BuzzAdapter channel removal", () => {
+  // Leaving a membership-gated channel ends its REQ with CLOSED, and nostr-tools never
+  // re-fires a closed REQ, so an agent re-added to the channel stayed deaf until restart (#154).
+  it("re-subscribes a channel the relay closed, with backoff while refused, and hears it after re-add", async () => {
+    relay = await LocalRelay.start();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const got: InboundEvent[] = [];
+    const a = newAdapter({ channels: [{ id: "eng", reply: "private" }], since: now - 600, stallCheckIntervalMs: 0 });
+    await a.start((e) => got.push(e));
+    const live = () => chatReqs().filter((req) => (req.filters[0]["#h"] as string[])[0] === "eng");
+    await vi.waitFor(() => expect(live()).toHaveLength(1));
+
+    relay.closeChannel("eng", "restricted: not a member of this channel", true);
+    await vi.waitFor(() => expect(live()).toHaveLength(2), { timeout: 3000 });
+    const closes = () => warn.mock.calls.map((args) => String(args[0])).filter((line) => line.startsWith("subscription_closed"));
+    expect(closes()[0]).toContain("channel=eng");
+    expect(closes()[0]).toContain("retry_in_ms=1000");
+    await vi.waitFor(() => expect(closes()[1]).toContain("retry_in_ms=2000"));
+
+    relay.readmit("eng");
+    await vi.waitFor(() => expect(live()).toHaveLength(3), { timeout: 4000 });
+    expect(live()[2].filters[0].since).toBeGreaterThanOrEqual(now - 600);
+    const back = inChannel("eng", "are you there again?", now);
+    relay.backlog.push(back);
+    relay.emit(back);
+    await vi.waitFor(() => expect(got.map((e) => e.text)).toContain("are you there again?"));
+    await a.stop();
+  }, 15_000);
+
+  it("does not re-subscribe after stop", async () => {
+    relay = await LocalRelay.start();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const a = newAdapter({ channels: [{ id: "eng", reply: "private" }], stallCheckIntervalMs: 0 });
+    await a.start(() => {});
+    await vi.waitFor(() => expect(chatReqs()).toHaveLength(1));
+    await a.stop();
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(chatReqs()).toHaveLength(1);
+  });
+});
+
 describe("BuzzAdapter stall check", () => {
   const twoChannels = [
     { id: "hive", reply: "private" as const },
