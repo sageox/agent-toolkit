@@ -2298,11 +2298,20 @@ async function profileNameDrift(
   );
   // No profile name to compare with is a different fault, and not this record's.
   if (!names.length || names.includes(record.display_name)) return undefined;
+  const drift =
+    `surface buzz: the directory record's display_name at ${opts.relayUrl} is ${JSON.stringify(record.display_name)} ` +
+    `but the profile names it ${JSON.stringify(names[0])}, so a mention by the record's name does not resolve`;
+  // Registration signs only with the bundle's BUZZ_NSEC, so it cannot repair a record another
+  // identity owns; naming it as the fix there would promise a repair it does not perform.
+  if (opts.identityRef !== "BUZZ_NSEC") {
+    return (
+      `${drift} — \`sageox-agent identity register buzz\` publishes only BUZZ_NSEC's record, so it ` +
+      `cannot fix this one (identity ${opts.identityRef}); republish the record from that identity`
+    );
+  }
   return (
-    `surface buzz: the directory record's display_name is ${JSON.stringify(record.display_name)} ` +
-    `but the profile names it ${JSON.stringify(names[0])}, so a mention by the record's name ` +
-    "does not resolve — re-run `sageox-agent identity register buzz`, which publishes " +
-    "profile.json's display_name to both (a restart keeps the record's)"
+    `${drift} — re-run \`sageox-agent identity register buzz\` against ${opts.relayUrl}, which ` +
+    "publishes profile.json's display_name to both (a restart keeps the record's)"
   );
 }
 

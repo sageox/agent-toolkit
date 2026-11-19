@@ -22,8 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`doctor` warns when a Buzz agent's directory record and profile disagree on its name.**
   A rename that reached the kind-0 profile but not the record left the record's
   `display_name` binding to nobody, while `doctor` still called the agent mentionable. The
-  warning names both values and the fix: re-run `sageox-agent identity register buzz`. A
-  space in the name is not flagged — clients match multi-word names.
+  warning names both values, the relay, and the fix: re-run `sageox-agent identity register
+  buzz`, which publishes only the `BUZZ_NSEC` identity's record — for a surface on another
+  identity the warning says so instead. A space in the name is not flagged — clients match
+  multi-word names.
 
 ### Fixed
 

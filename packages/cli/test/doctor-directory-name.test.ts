@@ -39,7 +39,7 @@ describe("doctor compares the directory record's name with the agent's profile",
     rmSync(home, { recursive: true, force: true });
   });
 
-  async function doctor(backlog: Awaited<ReturnType<typeof signed>>[]) {
+  async function doctor(backlog: Awaited<ReturnType<typeof signed>>[], identity = "BUZZ_NSEC") {
     relay = await LocalRelay.start({ requireAuth: true, backlog });
     writeFileSync(
       join(home, "demo", "agent.yaml"),
@@ -50,12 +50,12 @@ respondTo: anyone
 surfaces:
   - kind: buzz
     relayUrl: ${relay.url}
-    identity: BUZZ_NSEC
+    identity: ${identity}
     channels:
       - { id: c1, reply: private }
 `,
     );
-    return doctorRun(home, { BUZZ_NSEC: key.nsec });
+    return doctorRun(home, { [identity]: key.nsec });
   }
 
   // Ron's case on buzz.test.sageox.ai: the profile was renamed and the record kept the old
@@ -65,7 +65,7 @@ surfaces:
       await record("Ron Weasley"),
       await signed(0, { name: "Ron" }),
     ]);
-    const drift = `surface buzz: the directory record's display_name is "Ron Weasley" but the profile names it "Ron"`;
+    const drift = `surface buzz: the directory record's display_name at ${relay.url} is "Ron Weasley" but the profile names it "Ron"`;
     // A warning, not a problem: the profile's name still reaches the agent, and a FAIL here
     // would block bring-up of an agent that can still be mentioned.
     expect(stdout).toContain(`  warn  ${drift}`);
@@ -82,6 +82,18 @@ surfaces:
       await signed(0, { name: "Paul Bunyan", display_name: "Paul Bunyan" }),
     ]);
     expect(stdout).toContain("surface buzz: directory record lists 1 channel(s), so it is mentionable");
-    expect(stdout).not.toContain("display_name is");
+    expect(stdout).not.toContain("display_name at");
+  }, 30_000);
+
+  // Registration signs only with BUZZ_NSEC, so for a surface on another identity the warning
+  // must not hand out a fix that leaves this record as it is.
+  it("does not offer re-registration for a surface that signs with another identity", async () => {
+    const { stdout } = await doctor(
+      [await record("Ron Weasley"), await signed(0, { name: "Ron" })],
+      "BUZZ_NSEC_TWO",
+    );
+    expect(stdout).toContain(`  warn  surface buzz: the directory record's display_name at ${relay.url}`);
+    expect(stdout).toContain("publishes only BUZZ_NSEC's record, so it cannot fix this one (identity BUZZ_NSEC_TWO)");
+    expect(stdout).not.toContain("re-run `sageox-agent identity register buzz`");
   }, 30_000);
 });

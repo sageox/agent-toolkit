@@ -93,7 +93,9 @@ mentionable" and hide the agent from the very person it answers.
 carries — a rename that reached the profile and not the record. Clients resolve a mention
 against the profile, so the record's stale name binds to nobody. A space in the name is fine;
 clients match multi-word names. Re-run registration to fix it: it publishes `profile.json`'s
-`display_name` to both, whereas a restart keeps whatever the record says.
+`display_name` to both, whereas a restart keeps whatever the record says. Registration signs
+only with `BUZZ_NSEC`, so for a surface on another identity the warning says it cannot fix
+that record instead of offering it.
 
 On a membership-gated relay, a new identity may be refused before it can publish that
 profile or list and join channels. Registration calls this out with the identity's npub
