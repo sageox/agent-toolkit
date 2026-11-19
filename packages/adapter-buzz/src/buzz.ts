@@ -395,7 +395,7 @@ export class BuzzAdapter implements SurfaceAdapter {
             // A REQ sent on a dropped socket rejects with nobody to catch it; wait for the
             // reconnect instead.
             if (!relay.connected) return retry();
-            const newest = subscribed === undefined ? undefined : this.heard.get(subscribed)?.newest;
+            const newest = subscribed === undefined ? this.since : this.heard.get(subscribed)?.newest;
             const since = Math.max(filter.since ?? 0, newest ?? 0);
             const resumed = since > 0 ? { ...filter, since } : filter;
             this.subscribeChannel(relay, resumed, subscribed, gate, generation, next + 1);
