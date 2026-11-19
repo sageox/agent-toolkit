@@ -13,7 +13,7 @@ import { doctorRun } from "./cli-harness.ts";
 const key = generateKeypair();
 
 async function signed(kind: number, content: Record<string, unknown>) {
-  const signer = await resolveBuzzSigner("BUZZ_NSEC", { env: { BUZZ_NSEC: key.nsec } });
+  const signer = await resolveBuzzSigner("BUZZ_NSEC", { dir: [], env: { BUZZ_NSEC: key.nsec } });
   return signer.signEvent({ kind, created_at: 1786000000, tags: [], content: JSON.stringify(content) });
 }
 

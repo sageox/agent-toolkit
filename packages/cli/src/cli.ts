@@ -2304,7 +2304,8 @@ async function profileNameDrift(
   // Registration signs only with the bundle's BUZZ_NSEC, so it cannot repair a record another
   // key owns; naming it as the fix there would promise a repair it does not perform. Compare
   // the keys, not the refs: another ref can hold the same key, and then registration does fix it.
-  const registers = process.env.BUZZ_NSEC?.trim();
+  // Resolved as registration's directory publish resolves it: a mounted BUZZ_NSEC first.
+  const registers = resolveSecret("BUZZ_NSEC", { env: { BUZZ_NSEC: process.env.BUZZ_NSEC } })?.trim();
   if (!registers || resolveSecret(opts.identityRef, { dir: opts.secretsDir })?.trim() !== registers) {
     return (
       `${drift} — \`sageox-agent identity register buzz\` publishes only BUZZ_NSEC's record, so it ` +
