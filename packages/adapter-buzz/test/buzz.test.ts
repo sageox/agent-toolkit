@@ -859,6 +859,25 @@ describe("BuzzAdapter stall check", () => {
     await a.stop();
   });
 
+  // Past the per-second id cap the check can't tell the extra ids from misses. It must stop
+  // asking about that second rather than report the same unrecorded id on every interval.
+  it("does not keep warning about a second that delivered more ids than it keeps", async () => {
+    relay = await LocalRelay.start();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { a, got } = await listening();
+
+    for (let i = 0; i <= 100; i++) publish(inChannel("eng", `flood ${i}`, now - 120));
+    await vi.waitFor(() => expect(got).toHaveLength(101), { timeout: 3000 });
+
+    const before = checksOf("eng").length;
+    await vi.waitFor(() => expect(checksOf("eng").length).toBeGreaterThanOrEqual(before + 3), {
+      timeout: 3000,
+    });
+    expect(warnings(warn, "subscription_stalled")).toEqual([]);
+    warn.mockRestore();
+    await a.stop();
+  });
+
   // A channel can be silent for a day. Quiet is not a stall, and neither is a channel that
   // delivered everything the relay holds.
   it("says nothing about a quiet channel or one that is still being fed", async () => {

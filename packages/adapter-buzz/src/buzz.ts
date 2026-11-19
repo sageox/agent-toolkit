@@ -88,8 +88,9 @@ const STALL_GRACE_SECONDS = 60;
 
 /**
  * Ids kept per channel for the newest second. Real chat stays far below this; past it a
- * sender flooding one backdated second can't grow memory or the check's `limit`, at the
- * cost of a possible false `subscription_stalled` line for that second.
+ * sender flooding one backdated second can't grow memory or the check's `limit`; the check
+ * then stops asking about that second (see {@link Heard.full}) instead of reporting an id it
+ * could not keep, so a miss in a flooded second goes unreported.
  */
 const MAX_IDS_AT_NEWEST = 100;
 
@@ -138,6 +139,11 @@ interface Heard {
    * seconds, so the check reads that second inclusively and these are what it excludes.
    */
   atNewest: Set<string>;
+  /**
+   * {@link atNewest} hit {@link MAX_IDS_AT_NEWEST} and an id was dropped, so it can no longer
+   * say which ids at {@link newest} were received: the check reads from the next second.
+   */
+  full: boolean;
   /** Wall-clock milliseconds of the last receipt, or of the subscription opening. */
   at: number;
 }
@@ -291,6 +297,7 @@ export class BuzzAdapter implements SurfaceAdapter {
         this.heard.set(subscribed, {
           newest: filter.since ?? 0,
           atNewest: new Set(),
+          full: false,
           at: Date.now(),
         });
       }
@@ -807,7 +814,8 @@ export class BuzzAdapter implements SurfaceAdapter {
       for (const [channel, heard] of this.heard) {
         if (Date.now() - heard.at < interval) continue;
         const until = Math.floor(Date.now() / 1000) - STALL_GRACE_SECONDS;
-        if (until < heard.newest) continue;
+        const since = heard.full ? heard.newest + 1 : heard.newest;
+        if (until < since) continue;
         // Stopped, or between reconnects: nostr-tools sends a REQ on a closed socket as an
         // unawaited promise, so the rejection would escape `query` as an unhandled one.
         // Skipping costs nothing — the next interval asks again.
@@ -816,7 +824,7 @@ export class BuzzAdapter implements SurfaceAdapter {
         // many, and only `atNewest.size` of them can be ones the REQ already delivered.
         const filter: Filter = {
           kinds: [BUZZ_DEFAULTS.kind],
-          since: heard.newest,
+          since,
           until,
           limit: heard.atNewest.size + 1,
         };
@@ -836,7 +844,7 @@ export class BuzzAdapter implements SurfaceAdapter {
           .filter(
             (e) =>
               e.created_at > heard.newest ||
-              (e.created_at === heard.newest && !heard.atNewest.has(e.id)),
+              (e.created_at === heard.newest && !heard.full && !heard.atNewest.has(e.id)),
           )
           .reduce<Event | undefined>((a, b) => (a && a.created_at >= b.created_at ? a : b), undefined);
         if (!newest) continue;
@@ -903,8 +911,10 @@ function markHeard(heard: Heard, event: Event): void {
   if (event.created_at > heard.newest) {
     heard.newest = event.created_at;
     heard.atNewest = new Set([event.id]);
-  } else if (event.created_at === heard.newest && heard.atNewest.size < MAX_IDS_AT_NEWEST) {
-    heard.atNewest.add(event.id);
+    heard.full = false;
+  } else if (event.created_at === heard.newest && !heard.atNewest.has(event.id)) {
+    if (heard.atNewest.size < MAX_IDS_AT_NEWEST) heard.atNewest.add(event.id);
+    else heard.full = true;
   }
 }
 
