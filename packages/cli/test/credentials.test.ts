@@ -533,9 +533,9 @@ mcpServers:
   });
 
   it("keeps a shared ref fatal when either feature cannot start without it", () => {
-    // A team brain's ox token degrades — `ox login` authenticates instead. Nothing else
-    // does, so a ref shared with a feature that has no fallback must not inherit the
-    // gentler reading and let an agent start into a credential it cannot do without.
+    // A team brain's ox token degrades — the agent starts without its team tools. A private
+    // checkout cannot do without its credential, so a ref shared with it must not inherit
+    // the gentler reading and let an agent start into a credential it cannot do without.
     const manifest = loadManifest(`
 name: gh-demo
 brain: { provider: claude-acp }
@@ -611,11 +611,10 @@ brains:
       ["DROVER_OX_TOKEN", "brains[0].token"],
     ]);
 
-    // Not fatal: `ox login` writes an auth.json that authenticates just as well, so a
-    // workstation legitimately has no token and the agent still starts.
+    // Not fatal: only the team brain fails without it, so the agent still starts.
     const degraded = requireDeclaredSecrets(named, { dir: secretsDir });
     expect(degraded.map((s) => s.name)).toEqual(["DROVER_OX_TOKEN"]);
-    expect(degraded[0].degraded).toMatch(/auth\.json authenticates instead/);
+    expect(degraded[0].degraded).toMatch(/team brain cannot search/);
   });
 
   it("says nothing when every declared ref is mounted", () => {
@@ -635,44 +634,5 @@ brains:
         dir: secretsDir,
       }),
     ).toEqual([]);
-  });
-});
-
-/**
- * The team brain's token is asked for on a workstation that `ox login` already
- * authenticates, because that login is not in the bundle — the container built from it has
- * no ambient credential and fails every `team_search`. Declining has to stay cheap, though:
- * local runs work on the login alone, so a blank answer must not end the interview.
- */
-describe("a credential whose absence degrades rather than breaks", () => {
-  it("returns empty on a blank answer instead of throwing", async () => {
-    const said: string[] = [];
-    const value = await requireCredential(
-      { ...spec, name: "SAGEOX_TOKEN", optional: true },
-      { ...interactive, ask: async () => "  ", envPath, log: (line) => said.push(line) },
-    );
-
-    expect(value).toBe("");
-    expect(said.join("")).toMatch(/skipped/);
-    // Nothing written: a skipped credential must not leave a blank line in .env that
-    // `readEnvValue` would later hand back as a set-but-empty token.
-    expect(existsSync(envPath)).toBe(false);
-  });
-
-  it("still refuses a blank answer for a credential nothing works without", async () => {
-    await expect(
-      requireCredential(spec, { ...interactive, ask: async () => "", envPath }),
-    ).rejects.toThrow(/still unset/);
-  });
-
-  it("reports rather than throws when there is no terminal to ask in", async () => {
-    const said: string[] = [];
-    const value = await requireCredential(
-      { ...spec, name: "SAGEOX_TOKEN", optional: true },
-      { ...headless, envPath, log: (line) => said.push(line) },
-    );
-
-    expect(value).toBe("");
-    expect(said.join("")).toContain(envPath);
   });
 });

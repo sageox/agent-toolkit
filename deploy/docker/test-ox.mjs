@@ -107,6 +107,30 @@ try {
     }
   }
 
+  // The team brain's hosted-ledger calls, as it issues them: no project, and a token only for
+  // the sync. With no receipt and no token each must refuse in its documented shape.
+  const version = run("ox", ["--version"]).stdout.match(/\bversion v?(\d+)\.(\d+)\.(\d+)/);
+  assert.ok(version && (Number(version[1]) > 0 || Number(version[2]) >= 17), "ledger sync needs ox 0.17.0 or newer");
+  const hosted = "repo_019ff2f5-2079-7be1-b05e-8caad2772e61";
+  const refuse = (args) => spawnSync("ox", args, {
+    cwd: root, env: { ...env, OX_PROJECT_ROOT: undefined }, encoding: "utf8", timeout: 60_000,
+  });
+  for (const args of [
+    ["session", "list", "--json", "--limit", "5", `--repo=${hosted}`],
+    ["glance", "--since", since, "--until", until, "--json", `--repo=${hosted}`],
+  ]) {
+    const read = refuse(args);
+    assert.equal(read.status, 1, `ox ${args.join(" ")}`);
+    assert.equal(read.stdout, "");
+    assert.equal(read.stderr.trim(), "Ledger read failed: interrupted");
+  }
+  const sync = refuse(["sync", "--read-only", `--repo=${hosted}`, "--timeout", "30m", "--json"]);
+  assert.equal(sync.status, 1);
+  const receipt = JSON.parse(sync.stdout);
+  assert.equal(receipt.schema_version, 1);
+  assert.equal(receipt.ready, false);
+  assert.equal(receipt.error_class, "denied");
+
   writeFileSync(join(repo, "main.go"), "package fixture\nfunc ScheduledWorkspaceMarker() string { return \"warm\" }\n");
   run("git", ["add", "."]);
   run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Index fixture"]);
@@ -143,7 +167,23 @@ try {
   assert.equal(matches.total, 1);
   assert.equal(matches.results[0].file, "main.go");
   assert.match(matches.results[0].snippet, /ScheduledWorkspaceMarker/);
-  console.log("ox compatibility passed: status, team list, session list, glance, code insights and search");
+  // The reason this image pins ox 0.25.0+: a job whose pod keeps only its home directory
+  // marks the machine disposable. An older ox rejects the key, so this fails on it.
+  run("ox", ["config", "set", "disposable_machine", "on"]);
+  const disposable = JSON.parse(run("ox", ["config", "get", "disposable_machine", "--json"]).stdout);
+  assert.deepEqual([disposable.value, disposable.source], ["on", "user"]);
+  // What a job needs to record its coding sessions: ox finds the agent with `ps`, reads the
+  // transcript through the adapter beside its binary, and the daemon runs `claude` to
+  // summarize a session before upload. Missing any one, sessions stop reaching the Ledger.
+  const adapters = ox(["adapter", "list", "--json"]);
+  const claudeAdapter = adapters.find((adapter) => adapter.name === "claude-code");
+  assert.deepEqual([claudeAdapter?.status, claudeAdapter?.binary_path], ["bundled", "/usr/local/bin/ox-adapter-claude-code"]);
+  assert.equal(run("ps", ["-o", "comm=", "-p", String(process.pid)]).stdout.trim(), "node");
+  assert.match(run("claude", ["--version"], { DISABLE_AUTOUPDATER: "1" }).stdout, /^\d+\.\d+\.\d+ \(Claude Code\)$/m);
+  // A root-owned npm cache in the agent's home makes every npx call fail with EACCES.
+  const npmCache = spawnSync("stat", ["-c", "%u", join(process.env.HOME, ".npm")], { encoding: "utf8" });
+  assert.ok(npmCache.status !== 0 || npmCache.stdout.trim() === String(process.getuid()), "~/.npm is not owned by the agent user");
+  console.log("ox compatibility passed: status, team list, session list, glance, hosted ledger reads and sync, code insights and search, disposable_machine, session recording prerequisites");
 } finally {
   run("chmod", ["-R", "u+w", root]);
   rmSync(root, { recursive: true, force: true });

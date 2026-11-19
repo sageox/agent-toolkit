@@ -1,15 +1,16 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import type { Relay } from "nostr-tools/relay";
 import { generateSecretKey } from "nostr-tools/pure";
 import { nip19 } from "nostr-tools";
-import { connectAuthenticated } from "../src/connect.ts";
+import { connectAuthenticated, ownerAuthTag } from "../src/connect.ts";
 import { resolveBuzzSigner } from "../src/identity.ts";
-import { FakeRelay } from "./fake-relay.ts";
+import { LocalRelay } from "../src/local-relay.ts";
 
-let relay: FakeRelay;
+let relay: LocalRelay;
 const opened: Relay[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const r of opened.splice(0)) r.close();
   await relay?.stop();
 });
@@ -27,7 +28,7 @@ async function connect(url: string, opts: { enableReconnect?: boolean } = {}) {
 
 describe("connectAuthenticated", () => {
   it("survives a relay that refuses the AUTH it verified, and reports the reason", async () => {
-    relay = await FakeRelay.start({ requireAuth: true, rejectAuth: true });
+    relay = await LocalRelay.start({ requireAuth: true, rejectAuth: true });
 
     // nostr-tools rethrows the refusal inside its own `.catch`, on a promise it never
     // returns. Node exits on that unless the toolkit answers the challenge itself; a
@@ -49,7 +50,7 @@ describe("connectAuthenticated", () => {
   });
 
   it("still reports a refusal the relay gave no reason for, rather than an empty one", async () => {
-    relay = await FakeRelay.start({ requireAuth: true, rejectAuth: true, rejectAuthReason: "" });
+    relay = await LocalRelay.start({ requireAuth: true, rejectAuth: true, rejectAuthReason: "" });
 
     const result = await connect(relay.url);
 
@@ -59,7 +60,7 @@ describe("connectAuthenticated", () => {
   });
 
   it("reports the relay's acceptance, not merely that we signed something", async () => {
-    relay = await FakeRelay.start({ requireAuth: true });
+    relay = await LocalRelay.start({ requireAuth: true });
 
     const result = await connect(relay.url);
 
@@ -69,7 +70,7 @@ describe("connectAuthenticated", () => {
   });
 
   it("answers the second challenge too — a reconnected socket is unauthenticated", async () => {
-    relay = await FakeRelay.start({ requireAuth: true });
+    relay = await LocalRelay.start({ requireAuth: true });
 
     const { relay: client } = await connect(relay.url, { enableReconnect: true });
     expect(relay.authEvents).toHaveLength(1);
@@ -83,12 +84,61 @@ describe("connectAuthenticated", () => {
   });
 
   it("returns without a challenge rather than waiting on a relay that never asks", async () => {
-    relay = await FakeRelay.start();
+    relay = await LocalRelay.start();
 
     const result = await connect(relay.url);
 
     expect(result.authenticated).toBe(false);
     expect(result.authRefusal).toBeUndefined();
     expect(relay.authEvent).toBeUndefined();
+  });
+});
+
+const VALID_TAG = ["auth", "a".repeat(64), "", "b".repeat(128)];
+
+describe("ownerAuthTag", () => {
+  it("parses a well-formed NIP-OA tag", () => {
+    expect(ownerAuthTag(JSON.stringify(VALID_TAG))).toEqual(VALID_TAG);
+  });
+  it("returns undefined for empty, missing, or non-JSON", () => {
+    // An `undefined` argument falls back to the environment, so a tag exported in the
+    // shell running the tests would otherwise be what this parses.
+    vi.stubEnv("BUZZ_AUTH_TAG", undefined);
+    expect(ownerAuthTag(undefined)).toBeUndefined();
+    expect(ownerAuthTag("")).toBeUndefined();
+    expect(ownerAuthTag("not json")).toBeUndefined();
+  });
+  it("rejects the wrong label, arity, hex widths, and non-string members", () => {
+    expect(ownerAuthTag(JSON.stringify(["p", "a".repeat(64), "", "b".repeat(128)]))).toBeUndefined();
+    expect(ownerAuthTag(JSON.stringify(["auth", "a".repeat(64), ""]))).toBeUndefined();
+    expect(ownerAuthTag(JSON.stringify(["auth", "xyz", "", "b".repeat(128)]))).toBeUndefined();
+    expect(ownerAuthTag(JSON.stringify(["auth", "a".repeat(64), "", "b".repeat(64)]))).toBeUndefined();
+    expect(ownerAuthTag(JSON.stringify(["auth", "a".repeat(64), "", 5]))).toBeUndefined();
+  });
+});
+
+describe("connectAuthenticated owner attestation", () => {
+  it("appends BUZZ_AUTH_TAG to the signed AUTH event, and it still verifies", async () => {
+    relay = await LocalRelay.start({ requireAuth: true });
+    vi.stubEnv("BUZZ_AUTH_TAG", JSON.stringify(VALID_TAG));
+
+    const result = await connect(relay.url);
+
+    // The relay verifyEvent'd the AUTH signature already (it authed us). The tag rides
+    // alongside the standard relay + challenge tags.
+    expect(result.authenticated).toBe(true);
+    expect(relay.authEvent?.tags).toContainEqual(VALID_TAG);
+    expect(relay.authEvent?.tags.some((t) => t[0] === "relay")).toBe(true);
+    expect(relay.authEvent?.tags.some((t) => t[0] === "challenge")).toBe(true);
+  });
+
+  it("adds no auth tag when BUZZ_AUTH_TAG is unset", async () => {
+    relay = await LocalRelay.start({ requireAuth: true });
+    vi.stubEnv("BUZZ_AUTH_TAG", undefined);
+
+    const result = await connect(relay.url);
+
+    expect(result.authenticated).toBe(true);
+    expect(relay.authEvent?.tags.some((t) => t[0] === "auth")).toBe(false);
   });
 });

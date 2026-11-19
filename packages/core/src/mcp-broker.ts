@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolveSecret } from "./secrets.ts";
 import { passthroughEnv } from "./brain-env.ts";
+import type { InboundEvent } from "./events.ts";
 import { scanForLeaks, strings } from "./guard.ts";
 import type { LeakPattern } from "./manifest.ts";
 import { auditToolCall, ToolRefused } from "./tool-audit.ts";
@@ -28,6 +29,63 @@ export interface McpServerConfig {
    * refused rather than allowed.
    */
   scope?: Record<string, string[]>;
+  /** Stamp the live turn into this server's `tools/call`s. See `McpServerSchema.stampTurn`. */
+  stampTurn?: boolean;
+}
+
+/**
+ * Where an opted-in server finds the live turn: `params._meta[TURN_META_KEY]`.
+ *
+ * `_meta` because MCP reserves it for exactly this — what the caller knows about a request
+ * that is not one of the tool's arguments — so a server reads it without its input schema
+ * changing, and the brain's arguments stay the brain's. Prefixed, as MCP asks of any key
+ * that is not its own.
+ */
+export const TURN_META_KEY = "sageox.ai/turn";
+
+/**
+ * The live turn, as an opted-in server receives it.
+ *
+ * Every field is from an event this gateway received, never from anything the brain said.
+ * `message` and `thread` are the surface's own references, unique on that surface — on
+ * Slack `<channel>:<ts>` — so a server can deduplicate on `message` without knowing which
+ * surface minted it.
+ */
+export interface TurnStamp {
+  surface: string;
+  channel: string;
+  message: string;
+  /** The thread the message sits in, when it is a reply in one. */
+  thread?: string;
+  author: { id: string; isAgent: boolean };
+}
+
+/** What a turn's event amounts to on the wire. */
+export function turnStamp(event: InboundEvent): TurnStamp {
+  return {
+    surface: event.surface,
+    channel: event.channel.id,
+    message: event.id.nativeId,
+    ...(event.threadRoot ? { thread: event.threadRoot.nativeId } : {}),
+    author: { id: event.author.id, isAgent: event.author.isAgent },
+  };
+}
+
+/**
+ * The call with the live turn written in, replacing whatever the brain put under that key.
+ *
+ * `null` when no single turn is live — none, or more than one at once — rather than the key
+ * left out. The server can then tell "the gateway does not know who is asking" from "this
+ * gateway does not stamp", which is the difference between refusing a write and falling
+ * back to an argument during a rollout. Every other `_meta` key is kept: the brain's
+ * harness puts its own there.
+ */
+function stampCall(params: unknown, event: InboundEvent | null): unknown {
+  const call = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
+  const meta = call._meta && typeof call._meta === "object" && !Array.isArray(call._meta)
+    ? (call._meta as Record<string, unknown>)
+    : {};
+  return { ...call, _meta: { ...meta, [TURN_META_KEY]: event ? turnStamp(event) : null } };
 }
 
 export interface McpConnection {
@@ -113,6 +171,16 @@ export interface McpBrokerOptions {
   leakPatterns?: readonly LeakPattern[];
   /** Called when a pinned tool's schema changes — a rug-pull is reported, not passed on. */
   onSchemaChange?: (tool: string, server: string) => void;
+  /**
+   * The message a call arriving now was made for, or `null` when that cannot be known.
+   *
+   * Read only for a server that sets `stampTurn`. A `tools/call` carries nothing about the
+   * turn that produced it, and the gateway is what knows — `run` wires this to
+   * `SurfaceEgress.callerEvent`, which names the live turn only while no other brain work
+   * (a prompt a timed-out turn left running, a scheduled tick) could have made the call.
+   * Absent, as it is with no surface to answer on, every stamp is `null`.
+   */
+  answering?: () => InboundEvent | null;
 }
 
 /**
@@ -217,7 +285,12 @@ export class McpBroker {
       const leak = scanForLeaks(strings(args), this.opts.leakPatterns ?? []);
       if (!leak.ok) throw new ToolRefused(`${tool} refused by ${leak.rule}: ${leak.reason}`);
 
-      return clipResult(await entry.conn.request(method, params));
+      // After every check, so a refused call never reads the turn, and only for a server that
+      // asked: one that did not gets the brain's params as they arrived, not a copy of them.
+      const sent = entry.server.stampTurn
+        ? stampCall(params, this.opts.answering?.() ?? null)
+        : params;
+      return clipResult(await entry.conn.request(method, sent));
     });
   }
 

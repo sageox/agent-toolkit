@@ -1,11 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 import { Gateway } from "../src/gateway.ts";
+import { auditToolCall } from "../src/tool-audit.ts";
+import { TurnClock } from "../src/turn-clock.ts";
 import { SurfaceEgress } from "../src/surface-egress.ts";
 import { MockBrain } from "../src/brain.ts";
 import { loadManifest } from "../src/manifest.ts";
 import type { SurfaceAdapter } from "../src/adapter.ts";
-import type { Brain, BrainStep, GuardFeedback } from "../src/brain.ts";
-import type { InboundEvent, GuardedMessage, ChannelRef } from "../src/events.ts";
+import type { Brain, BrainContext, BrainStep, GuardFeedback } from "../src/brain.ts";
+import type { InboundEvent, GuardedMessage, ChannelRef, ThreadReply } from "../src/events.ts";
 
 function fakeAdapter() {
   let emit!: (e: InboundEvent) => void;
@@ -1148,6 +1150,71 @@ describe("Gateway.tick", () => {
     expect(f.posts).toHaveLength(0);
   });
 
+  it("admits a tick's own answer through the same caps, and starts no turn for it", async () => {
+    const f = postingAdapter([HIVE]);
+    const brain: Brain = {
+      // eslint-disable-next-line require-yield
+      async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        throw new Error("a host-written line must not start a brain turn");
+      },
+    };
+    const gw = new Gateway({
+      manifest: ticking("limits: {perChannelPerMinute: 1}\n"),
+      adapters: [f.adapter],
+      brain,
+    });
+    await gw.start();
+    const to = { surface: "slack", channel: "C01" };
+
+    expect(await gw.say(tickEv("nothing to report"), to, "quiet day")).toEqual({ asked: 1, sent: 1 });
+    // The cap a digest tick meets in this channel, so one job's output is admitted one way
+    // whether a turn wrote it or the host did.
+    expect(await gw.say(tickEv("nothing to report"), to, "quiet day")).toEqual({
+      asked: 0,
+      sent: 0,
+      skipped: "limit:perChannelPerMinute",
+    });
+    gw.stopServing("operator");
+    expect(await gw.say(tickEv("nothing to report"), to, "quiet day")).toEqual({
+      asked: 0,
+      sent: 0,
+      skipped: "kill_switch",
+    });
+    expect(f.posts.map((post) => post.msg.text)).toEqual(["quiet day"]);
+  });
+
+  it("drops a line whose tick ran out of clock while the channel was busy", async () => {
+    const f = postingAdapter([HIVE]);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let chatStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      chatStarted = resolve;
+    });
+    const brain: Brain = {
+      async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        chatStarted();
+        await held;
+        yield { type: "reply", msg: { text: "done" } };
+      },
+    };
+    const gw = new Gateway({ manifest: ticking("", "anyone"), adapters: [f.adapter], brain });
+    await gw.start();
+
+    // The channel is busy, so the line waits — and its tick's clock is running while it does.
+    f.inject({ ...tickEv("a message"), author: { surface: "slack", id: "u1", isSelf: false, isAgent: false } });
+    await started;
+    const said = gw.say(tickEv("nothing to report"), { surface: "slack", channel: "C01" }, "quiet day", 20);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    release();
+
+    expect(await said).toEqual({ asked: 0, sent: 0, skipped: "deadline" });
+    // Only the chat turn's own reply was attempted; the stale line never reached the surface.
+    expect(f.posts).toHaveLength(0);
+  });
+
   it("answers a turn that never finished with the tally and the failure", async () => {
     const f = postingAdapter([HIVE]);
     const brain: Brain = {
@@ -1166,5 +1233,340 @@ describe("Gateway.tick", () => {
     const outcome = await gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" });
     expect(outcome.sent).toBe(0);
     expect((outcome.error as Error).message).toMatch(/turn timed out/);
+  });
+});
+
+/**
+ * What a turn leaves running when it stops listening.
+ *
+ * A tool call already in flight when the turn times out keeps going and answers into
+ * nothing: the queue slot is released, the generator is returned, and the call's own audit
+ * line — written whenever it finally lands — says `outcome=ok`, because from the call's
+ * side that is true. Issue #44 is what that costs. Nothing in the gateway's log said the
+ * result reached nobody, so the only trace was the message the brain had already sent.
+ */
+describe("Gateway names what a turn left running", () => {
+  const ticking = (extra: string) =>
+    loadManifest(
+      "name: t\nbrain: {provider: mock}\nrespondTo: owner-only\nowner: [U08NOBODY]\n" +
+        "surfaces: [{kind: slack, channels: [{id: C01, name: hive, reply: private}]}]\n" +
+        extra,
+    );
+
+  /** Captures the gateway's own lines while `work` runs. */
+  async function logged(work: () => Promise<unknown>): Promise<string[]> {
+    const lines: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((l) => void lines.push(String(l)));
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await work();
+      return lines;
+    } finally {
+      warn.mockRestore();
+      info.mockRestore();
+    }
+  }
+
+  /** A turn that will not end on its own, so only its own clock can end it. */
+  const hangs: Brain = {
+    // eslint-disable-next-line require-yield
+    async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+      await new Promise(() => {});
+    },
+  };
+
+  /** One call the gateway is serving, registered exactly as a real one is. */
+  function serving(tool: string) {
+    let land!: () => void;
+    const held = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    return { call: auditToolCall({ tool }, () => held), land };
+  }
+
+  it("names the call a timed-out turn abandoned", async () => {
+    const f = postingAdapter([HIVE]);
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain: hangs,
+    });
+    await gw.start();
+    const held = serving("mcp__jobs__job_run");
+
+    const lines = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+
+    const stranded = lines.filter((line) => line.startsWith("tool_call_stranded"));
+    expect(stranded).toHaveLength(1);
+    // The tool and how long it has been running, and deliberately no turn ids: nothing here
+    // can say which turn a `tools/call` came from, so a line naming one would be a guess.
+    expect(stranded[0]).toContain('tool="mcp__jobs__job_run"');
+    expect(stranded[0]).toMatch(/^tool_call_stranded tool="mcp__jobs__job_run" ms=\d+$/);
+
+    held.land();
+    await held.call;
+  });
+
+  it("takes its deadline off the clock when the turn ends", async () => {
+    // The countdown `job_run` reads. A turn that left its deadline behind would leave the
+    // job tool weighing every later call against a bound that expired — and, once two have
+    // piled up, against nothing at all, which is silently the old behaviour back.
+    const f = postingAdapter([HIVE]);
+    const turnClock = new TurnClock();
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain: hangs,
+      turnClock,
+    });
+    await gw.start();
+
+    await gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" });
+    // Null because it holds nothing. One left behind would answer with a number.
+    expect(turnClock.remaining()).toBeNull();
+  });
+
+  it("says nothing about a turn that left nothing running", async () => {
+    const f = postingAdapter([HIVE]);
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain: hangs,
+    });
+    await gw.start();
+
+    const lines = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+    expect(lines.filter((line) => line.startsWith("tool_call_stranded"))).toEqual([]);
+  });
+
+  it("names a call that outlives several turns once", async () => {
+    // The registry holds a call until it settles, so every later turn that ended would find
+    // it again. Three lines about one slow call read as three slow calls, and an operator
+    // has to work out which — so the call is reported at the first moment the claim is true
+    // and not again.
+    const f = postingAdapter([HIVE]);
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain: hangs,
+    });
+    await gw.start();
+    const held = serving("mcp__jobs__job_run");
+
+    const first = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+    const again = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+
+    expect(first.filter((line) => line.startsWith("tool_call_stranded"))).toHaveLength(1);
+    expect(again.filter((line) => line.startsWith("tool_call_stranded"))).toEqual([]);
+
+    held.land();
+    await held.call;
+  });
+
+  it("stays quiet while a second gateway in this process is mid-turn", async () => {
+    // The calls belong to the process, not to a gateway: `auditToolCall` is what every
+    // hosted and brokered server funnels through, and there is one of it. A gateway that
+    // counted only its own turns would speak for a call another gateway was still waiting
+    // on — and, worse, mark it told, so the gateway that owned it never reported it.
+    const f = postingAdapter([HIVE]);
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const manifest = ticking("limits: {turnTimeoutMs: 20}\n");
+    const holding = new Gateway({
+      manifest,
+      adapters: [postingAdapter([HIVE]).adapter],
+      brain: {
+        // eslint-disable-next-line require-yield
+        async *runTurn(): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+          started();
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        },
+      },
+    });
+    const gw = new Gateway({ manifest, adapters: [f.adapter], brain: hangs });
+    await holding.start();
+    await gw.start();
+
+    const long = holding.tick(tickEv("watch"), { surface: "slack", channel: "C01" }, 60_000);
+    await running;
+    const held = serving("mcp__jobs__job_run");
+
+    const during = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+    expect(during.filter((line) => line.startsWith("tool_call_stranded"))).toEqual([]);
+
+    // And the call is still there to be named once the holder lets go, rather than having
+    // been consumed and marked by the gateway that did not own it. Named by the holder,
+    // because the claim belongs to whichever turn is last to end anywhere in the process.
+    const after = await logged(async () => {
+      release();
+      await long;
+    });
+    expect(after.filter((line) => line.startsWith("tool_call_stranded"))).toHaveLength(1);
+
+    held.land();
+    await held.call;
+  });
+
+  it("stays quiet while another turn is running, because a call names no turn", async () => {
+    // The line claims nobody is left to read the answer, and while a second turn is running
+    // that is not yet true — the call in flight may well be its. Said later rather than
+    // wrongly: the next turn to end with nothing after it is the one that says so.
+    const f = postingAdapter([HIVE]);
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    // One brain, two turns: the one on the channel with time left holds open, and the one
+    // under test hangs until its own 20ms runs out.
+    const brain: Brain = {
+      // eslint-disable-next-line require-yield
+      async *runTurn(e: InboundEvent): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+        if (e.channel.id !== "C02") return void (await new Promise(() => {}));
+        started();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+    };
+    const gw = new Gateway({
+      manifest: ticking("limits: {turnTimeoutMs: 20}\n"),
+      adapters: [f.adapter],
+      brain,
+    });
+    await gw.start();
+
+    // A second channel, so the queue runs them at once, and a timeout it will not reach.
+    const long = gw.tick(
+      { ...tickEv("watch"), channel: { ...HIVE, id: "C02" } },
+      { surface: "slack", channel: "C01" },
+      60_000,
+    );
+    await running;
+    const held = serving("mcp__jobs__job_run");
+
+    const lines = await logged(() => gw.tick(tickEv("summarize"), { surface: "slack", channel: "C01" }));
+    expect(lines.filter((line) => line.startsWith("tool_call_stranded"))).toEqual([]);
+
+    release();
+    await long;
+    held.land();
+    await held.call;
+  });
+});
+
+describe("Gateway hands the brain the thread a mention was posted in", () => {
+  /** Answers every turn, keeping what each one was handed. */
+  class RecordingBrain implements Brain {
+    readonly seen: BrainContext[] = [];
+    async *runTurn(
+      _e: InboundEvent,
+      ctx: BrainContext,
+    ): AsyncGenerator<BrainStep, void, GuardFeedback | undefined> {
+      this.seen.push(ctx);
+      yield { type: "reply", msg: { text: "ok" } };
+    }
+  }
+
+  const inThread = (): InboundEvent => ({
+    ...ev("summarize this thread"),
+    threadRoot: { surface: "console", nativeId: "root" },
+  });
+  const earlier: ThreadReply[] = [
+    {
+      author: { surface: "console", id: "u2", isSelf: false, isAgent: false },
+      text: "the deploy failed on db-3",
+      ts: "2026-08-12T23:59:00.000Z",
+    },
+  ];
+
+  /** One served event, with the gateway's own log lines. */
+  async function serveThreaded(
+    readThreadBefore: SurfaceAdapter["readThreadBefore"],
+    event: InboundEvent,
+    settle: (gw: Gateway) => Promise<void> = (gw) => gw.drain(),
+  ) {
+    const f = fakeAdapter();
+    f.adapter.readThreadBefore = readThreadBefore;
+    const brain = new RecordingBrain();
+    const gw = new Gateway({ manifest: serving, adapters: [f.adapter], brain });
+    const lines: string[] = [];
+    const info = vi.spyOn(console, "info").mockImplementation((l) => void lines.push(String(l)));
+    const warn = vi.spyOn(console, "warn").mockImplementation((l) => void lines.push(String(l)));
+    try {
+      await gw.start();
+      f.inject(event);
+      await settle(gw);
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+    }
+    return { brain, sent: f.sent, lines: lines.filter((l) => l.startsWith("thread_read")) };
+  }
+
+  it("reads the thread before the turn, hands it over, and logs how much it read", async () => {
+    const asked: InboundEvent[] = [];
+    const { brain, sent, lines } = await serveThreaded(async (e) => {
+      asked.push(e);
+      return earlier;
+    }, inThread());
+
+    expect(asked.map((e) => e.id.nativeId)).toEqual(["1"]);
+    expect(brain.seen[0].thread).toEqual(earlier);
+    expect(sent.map((s) => s.msg.text)).toEqual(["ok"]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^thread_read surface=console channel=local event=1 messages=1 ms=\d+$/);
+  });
+
+  it("reads nothing for a message in no thread", async () => {
+    const read = vi.fn(async () => earlier);
+    const { brain, lines } = await serveThreaded(read, ev("hello"));
+    expect(read).not.toHaveBeenCalled();
+    expect(brain.seen[0].thread).toBeUndefined();
+    expect(lines).toEqual([]);
+  });
+
+  it("answers without the thread when the read fails, and names the failure", async () => {
+    const { brain, sent, lines } = await serveThreaded(async () => {
+      throw new Error("ratelimited");
+    }, inThread());
+
+    expect(brain.seen[0].thread).toBeUndefined();
+    expect(sent.map((s) => s.msg.text)).toEqual(["ok"]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^thread_read_failed .* error="ratelimited"$/);
+  });
+
+  it("stops waiting on a read that never answers, answers without it, and tells it to stop", async () => {
+    // Slack's client waits out a rate limit and retries for half an hour; a read that has not
+    // answered by the bound is given up on, not waited out with the channel held behind it.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let signal: AbortSignal | undefined;
+    try {
+      const { brain, sent, lines } = await serveThreaded(
+        (_e, given) => {
+          signal = given;
+          return new Promise(() => {});
+        },
+        inThread(),
+        async (gw) => {
+          await vi.advanceTimersByTimeAsync(10_000);
+          await gw.drain();
+        },
+      );
+      expect(brain.seen).toHaveLength(1);
+      expect(brain.seen[0].thread).toBeUndefined();
+      expect(sent.map((s) => s.msg.text)).toEqual(["ok"]);
+      expect(lines[0]).toMatch(/^thread_read_failed .* error="the thread read did not finish/);
+      // Nothing reads its answer now, so a read still paging is told to stop.
+      expect(signal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -13,6 +13,7 @@ export * from "./guard.ts";
 export * from "./policy.ts";
 export * from "./queue.ts";
 export * from "./gateway.ts";
+export * from "./turn-clock.ts";
 export * from "./tool-policy.ts";
 export * from "./tool-audit.ts";
 export * from "./mcp-broker.ts";

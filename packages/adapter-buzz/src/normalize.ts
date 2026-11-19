@@ -115,8 +115,10 @@ function toActorRef(event: Event, opts: NormalizeOptions): ActorRef {
  * is untrusted channel content.
  */
 export function toThreadReply(event: Event, opts: NormalizeOptions): ThreadReply {
+  const author = toActorRef(event, opts);
+  const name = opts.agents?.get(event.pubkey);
   return {
-    author: toActorRef(event, opts),
+    author: name ? { ...author, name } : author,
     text: event.content,
     ts: new Date(event.created_at * 1000).toISOString(),
   };

@@ -519,6 +519,31 @@ describe("reacting to the message a turn is answering", () => {
     expect(egress.asking()).toBeNull();
   });
 
+  // The stamp's question is stricter than the job door's: not who the live turn is from,
+  // but whether a call arriving now can only have come from it.
+  it("names the caller only while the live turn's own prompt is the only work running", () => {
+    const buzz = adapter("buzz", [...hive, { surface: "buzz", id: "town", isPublic: false }]);
+    const egress = new SurfaceEgress({ manifest: manifest(), adapters: [buzz.value] });
+    const live = event("buzz", "hive");
+
+    const turn = egress.answers(live);
+    expect(egress.callerEvent()).toBeNull(); // live, but no prompt running that could call
+    const prompt = egress.prompting(live);
+    expect(egress.callerEvent()).toBe(live);
+
+    // A scheduled tick runs a prompt with no live turn of its own: its calls are not this
+    // person's, and neither are the live turn's while it runs, since a call names neither.
+    const tick = egress.prompting(event("buzz", "town", false, "tick"));
+    expect(egress.answeringEvent()).toBe(live);
+    expect(egress.callerEvent()).toBeNull();
+    tick();
+    expect(egress.callerEvent()).toBe(live);
+
+    prompt();
+    turn.close();
+    expect(egress.callerEvent()).toBeNull();
+  });
+
   // A closer removes only its own event: a superseded turn must not delete the live one.
   it("keeps the live target when a finished turn's closer runs late", async () => {
     const buzz = adapter("buzz", hive);

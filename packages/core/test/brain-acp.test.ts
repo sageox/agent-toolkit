@@ -35,6 +35,7 @@ function fakeAgent(
   const permissionOutcomes: unknown[] = [];
   const calls: string[] = [];
   const closed: string[] = [];
+  const opened: Record<string, unknown>[] = [];
   let initParams: Record<string, unknown> | undefined;
   let i = 0;
 
@@ -51,9 +52,10 @@ function fakeAgent(
       closed.push(ctx.params.sessionId);
       return {};
     })
-    .onRequest(AGENT_METHODS.session_new, async () => {
+    .onRequest(AGENT_METHODS.session_new, async (ctx) => {
       calls.push("session/new");
-      return { sessionId: "session-1" };
+      opened.push(ctx.params as unknown as Record<string, unknown>);
+      return { sessionId: `session-${opened.length}` };
     })
     .onRequest(AGENT_METHODS.session_prompt, async (ctx) => {
       const blocks = ctx.params.prompt as Array<{ type: string; text?: string }>;
@@ -95,6 +97,7 @@ function fakeAgent(
     permissionOutcomes,
     calls,
     closed,
+    opened,
     initParams: () => initParams,
   };
 }
@@ -356,6 +359,45 @@ describe.each(["claude-acp", "codex-acp"] as const)("%s brain", (provider) => {
 
     expect(f.permissionOutcomes[0]).toEqual({ outcome: "selected", optionId: "no" });
     await brain.stop();
+  });
+
+  it("runs a sealed turn in a session of its own, with no tool it could post through", async () => {
+    // The post tool is attached and allowlisted, so an ordinary turn could use it — which is
+    // what a sealed turn must not be able to do, since its reply is checked before posting.
+    const post = "mcp__surface-egress__post_message";
+    const f = fakeAgent(["a digest", "ordinary"], {
+      askPermission: true,
+      permissionTool: post,
+      supportsClose: true,
+      mcpApproval: provider === "codex-acp",
+    });
+    const brain = makeBrain({
+      target: f.app,
+      mcpServers: [{ type: "http", name: "surface-egress", url: "http://127.0.0.1:1234/mcp", headers: [] }],
+      toolPolicy: loadToolPolicy(
+        JSON.stringify({
+          permissions: { defaultMode: "acceptEdits", allow: [post], deny: ["Read(//mnt/secrets-store/**)"] },
+        }),
+      ),
+    });
+    try {
+      const turn = brain.runTurn(ev("{\"ref\":1}"), { agentName: "tester", sealed: "Summarize." });
+      const sealed: string[] = [];
+      for await (const step of turn) sealed.push(step.msg.text);
+      await drain(brain, ev("hi"), () => undefined);
+
+      expect(sealed).toEqual(["a digest"]);
+      expect(f.opened[0]).toMatchObject({ mcpServers: [], _meta: { disableBuiltInTools: true } });
+      // Refused in the sealed session, and still allowed in the channel's own one.
+      expect(f.permissionOutcomes).toEqual([
+        { outcome: "selected", optionId: "no" },
+        { outcome: "selected", optionId: "yes" },
+      ]);
+      // Closed once the turn ended, and never reused: the ordinary turn opened its own.
+      expect(f.closed).toEqual(["session-1"]);
+      expect(f.opened[1]).toMatchObject({ mcpServers: [{ name: "surface-egress" }] });
+      expect(f.opened[1]!._meta).toBeUndefined();
+    } finally { await brain.stop(); }
   });
 
   it("rejects tool permission requests — the brain can talk, not act", async () => {

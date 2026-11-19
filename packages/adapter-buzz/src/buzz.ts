@@ -357,6 +357,31 @@ export class BuzzAdapter implements SurfaceAdapter {
   }
 
   /**
+   * The thread an inbound message is in, up to it: the root, then each reply before it.
+   *
+   * Two REQs, because the root carries no `e` tag naming itself. Both are held to the
+   * message's channel, so a reply published elsewhere under the same root is not read in.
+   * `until` is inclusive and whole seconds, so a reply in the message's own second is kept
+   * whichever side of it it fell; the message itself is dropped by id.
+   */
+  async readThreadBefore(event: InboundEvent): Promise<readonly ThreadReply[]> {
+    const relay = this.relay;
+    if (!relay) throw new Error("BuzzAdapter.start() must be called before readThreadBefore()");
+    const root = event.threadRoot?.nativeId;
+    if (!root) return [];
+
+    const inChannel = { [`#${BUZZ_DEFAULTS.channelTag}`]: [event.channel.id] };
+    const underRoot = { [`#${BUZZ_DEFAULTS.replyTag}`]: [root] };
+    const until = Date.parse(event.ts) / 1000;
+    const [roots, replies] = await Promise.all([
+      this.query(relay, { kinds: [BUZZ_DEFAULTS.kind], ids: [root], ...inChannel }),
+      this.query(relay, { kinds: [BUZZ_DEFAULTS.kind], until, ...inChannel, ...underRoot }),
+    ]);
+    // Root first, so a sort that is stable keeps it ahead of a reply from the same second.
+    return this.ordered([...roots, ...replies.filter((reply) => reply.id !== event.id.nativeId)]);
+  }
+
+  /**
    * The channels this agent is in, which on Buzz takes both halves being true.
    *
    * It hears a channel because `start` opened a REQ for a configured one, and it can be

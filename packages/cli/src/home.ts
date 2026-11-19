@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { isInteractive, promptLine } from "./prompt.ts";
@@ -70,7 +70,8 @@ export async function selectedPaths(argv: string[]): Promise<ReturnType<typeof a
 
 export function ensureAgentDir(name: string): string {
   const dir = agentDir(name);
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
   return dir;
 }
 

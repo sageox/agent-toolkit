@@ -56,6 +56,18 @@ describe("buildAdapters Slack wiring", () => {
     expect(adapters[0]).toBeInstanceOf(SlackAdapter);
     expect((adapters[0] as SlackAdapter).postTargets()).toEqual([]);
   });
+
+  it("hands `wakeInOwnThreads` to the adapter, off unless the surface says so", async () => {
+    process.env.TEST_SLACK_BOT_TOKEN = "xoxb-test";
+    process.env.TEST_SLACK_APP_TOKEN = "xapp-test";
+    const wakes = async (yaml: string) =>
+      ((await buildAdapters(loadManifest(yaml)))[0] as unknown as { wakeInOwnThreads: boolean })
+        .wakeInOwnThreads;
+
+    expect(await wakes(config)).toBe(false);
+    expect(await wakes(`${config}    wakeInOwnThreads: true\n`)).toBe(true);
+    await expect(buildAdapters(loadManifest(`${config}    wakeInOwnThreads: "yes"\n`))).rejects.toThrow();
+  });
 });
 /**
  * The capability `validate` and `doctor` answer without building anything, held against the

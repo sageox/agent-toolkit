@@ -39,7 +39,7 @@ reviews:
       instructions: >-
         The root is a private pnpm workspace, not a publishable package. Keep
         Node and pnpm versions aligned with CI and .mise.toml, and keep the
-        Apache-2.0 license consistent with package manifests and LICENSE.
+        MIT license consistent with package manifests and LICENSE.
     - path: ".github/workflows/**"
       instructions: >-
         Keep third-party actions pinned to commit SHAs, permissions least

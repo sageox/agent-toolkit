@@ -447,6 +447,12 @@ describe("brains", () => {
     ).toThrow(/not the token itself/);
   });
 
+  it("refuses the retired configHome by name, rather than dropping the credential it named", () => {
+    expect(() =>
+      loadManifest(`${base}brains:\n  - preset: team\n    team: team_x\n    configHome: /mnt/secrets-store/ox`),
+    ).toThrow(/configHome is retired[\s\S]*token/);
+  });
+
   it("refuses a second team brain, which would wire to the same server and be unreachable", () => {
     expect(() =>
       loadManifest(
@@ -497,6 +503,25 @@ describe("mcpServers scope", () => {
 
   it("refuses a key nobody implements, rather than ignoring it", () => {
     expect(() => loadManifest(server("    allowFlags: true"))).toThrow();
+  });
+});
+
+describe("mcpServers stampTurn", () => {
+  const base = "name: x\nbrain: {provider: mock}\nsurfaces: [{kind: console}]\nrespondTo: anyone\n";
+  const server = (extra: string) =>
+    `${base}mcpServers:\n  - name: gtm\n    command: node\n    args: [gtm.js]\n${extra}`;
+
+  it("is off unless written down, so no existing server starts receiving ids", () => {
+    expect(resolveMcpServer(loadManifest(server("")).mcpServers[0]!).stampTurn).toBe(false);
+  });
+
+  it("is on for a server that asks for it", () => {
+    const decl = loadManifest(server("    stampTurn: true")).mcpServers[0]!;
+    expect(resolveMcpServer(decl).stampTurn).toBe(true);
+  });
+
+  it("refuses anything but a boolean, rather than reading a string as yes", () => {
+    expect(() => loadManifest(server('    stampTurn: "yes"'))).toThrow();
   });
 });
 
@@ -1117,6 +1142,63 @@ describe("a job whose body is a prompt", () => {
         withJob({ prompt: undefined, run: "{command: node}", report: undefined, budget: undefined }),
       ),
     ).toThrow(/`run` body but no `budget`/);
+  });
+
+  it("takes a source as read_channel's arguments, with a window and an empty notice", () => {
+    const source = "{surface: slack, channel: C01, withinHours: 24, empty: 'Quiet day.'}";
+    expect(loadManifest(withJob({ source })).jobs[0]!.source).toEqual({
+      surface: "slack",
+      channel: "C01",
+      withinHours: 24,
+      empty: "Quiet day.",
+      // The layout from before a job could choose one.
+      line: "• {text} — {authors}",
+      byAuthor: false,
+    });
+    for (const bad of [
+      "{surface: slack, channel: C01, empty: 'Quiet day.'}", // no window for an empty read to be about
+      "{surface: slack, channel: C01, withinHours: 24}", // nothing to post for an empty window
+      "{surface: slack, channel: C01, withinHours: 9000, empty: x}", // over read_channel's year
+      "{surface: slack, channel: C01, withinHours: 24, empty: x, since: 3}", // not an argument it takes
+    ]) {
+      expect(() => loadManifest(withJob({ source: bad })), bad).toThrow();
+    }
+    expect(() =>
+      loadManifest(
+        withJob({ prompt: undefined, run: "{command: node}", budget: "{wallClockMs: 1000}", source }),
+      ),
+    ).toThrow(/`run` body, so it declares no `source`/);
+  });
+
+  it("refuses a layout naming a field the host does not fill, which would post as nothing", () => {
+    for (const [layout, why] of [
+      ["line: '{txt}'", /`\{txt\}` is not filled in here; line takes \{text\}, \{authors\}, \{author\}/],
+      ["line: '{text} {author-name}'", /`\{author-name\}` is not filled in here/],
+      ["line: '{author}: {text}'", /`\{author\}` needs `byAuthor: true`/],
+      ["title: 'Digest for {authors}'", /title takes nothing/],
+      ["quiet: 'Quiet: {text}'", /quiet takes \{authors\}/],
+    ] as const) {
+      const source = `{surface: slack, channel: C01, withinHours: 24, empty: x, ${layout}}`;
+      expect(() => loadManifest(withJob({ source })), layout).toThrow(why);
+    }
+    const source =
+      "{surface: slack, channel: C01, withinHours: 24, empty: x, byAuthor: true, " +
+      "line: '{author}: {text}', quiet: 'Quiet: {authors}'}";
+    expect(() => loadManifest(withJob({ source }))).not.toThrow();
+  });
+
+  it("refuses a source on the brain whose turn cannot be sealed", () => {
+    // Codex takes its MCP servers from the process config whatever a session declares, and
+    // asks about commands and file changes rather than each tool call — so a turn there
+    // would keep `post_message` and could post an answer that never passed the check.
+    const source = "{surface: slack, channel: C01, withinHours: 24, empty: 'Quiet day.'}";
+    const codex = (yaml: string) => yaml.replace("provider: mock", "provider: codex-acp");
+    expect(() => loadManifest(codex(withJob({ source })))).toThrow(/codex-acp brain cannot/);
+    // The same agent without one is unaffected, and so is Claude with one.
+    expect(() => loadManifest(codex(withJob()))).not.toThrow();
+    expect(() =>
+      loadManifest(withJob({ source }).replace("provider: mock", "provider: claude-acp")),
+    ).not.toThrow();
   });
 
   it("refuses every field that belongs to a process body, by name", () => {

@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import {
   teamBrainHandler,
   formatPassages,
@@ -107,15 +107,33 @@ echo '{"team_context":{"results":[]}}'`,
           await expect(brain.search("team", 1)).resolves.toEqual([]);
           return readFileSync(join(bin, "seen"), "utf8");
         },
-        () => ({ token: () => "scoped-fixture-token", configHome: "/mounted-auth" }),
+        () => ({ token: () => "scoped-fixture-token" }),
       );
       for (const key of excluded) expect(env).not.toMatch(new RegExp(`^${key}$`, "m"));
       expect(env).toContain("SAGEOX_TOKEN=scoped-fixture-token\n");
-      expect(env).toContain("XDG_CONFIG_HOME=/mounted-auth\n");
+      expect(env).toContain(`XDG_CONFIG_HOME=${devNull}\n`);
       expect(env).toContain("SAGEOX_DAEMON=false\n");
       expect(env).toContain("OX_NO_DAEMON=1\n");
       expect(process.env.SAGEOX_TOKEN).toBe("ambient-fixture-token");
       expect(process.env.FUTURE_SERVICE_SECRET).toBe("fixture-value");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("gives a team brain built without a token provider no credential, never the operator's", async () => {
+    try {
+      vi.stubEnv("SAGEOX_TOKEN", "operator-token");
+      vi.stubEnv("XDG_CONFIG_HOME", "/home/operator/.config");
+      const { value: seen } = await withFakeOx(
+        `printf '%s\\n' "SAGEOX_TOKEN=$SAGEOX_TOKEN" "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" > ./seen
+echo '{"team_context":{"results":[]}}'`,
+        async (brain, bin) => {
+          await brain.search("team", 1);
+          return readFileSync(join(bin, "seen"), "utf8");
+        },
+      );
+      expect(seen).toBe(`SAGEOX_TOKEN=\nXDG_CONFIG_HOME=${devNull}\n`);
     } finally {
       vi.unstubAllEnvs();
     }
@@ -312,42 +330,106 @@ describe("team status (#24)", () => {
   });
 });
 
-describe("repository ledger readers (#24)", () => {
-  const SCRIPT = [
-    'printf "%s\\n" "$PWD|$*|$XDG_DATA_HOME" >> "${0%/*}/calls"',
-    'printf "%s\\n" "$OX_PROJECT_ROOT|$XDG_CACHE_HOME" > ./scope-seen',
-    'case "$1 $2" in',
-    '  "query team")',
-    '    if [ -f ./required-token ] && [ "$SAGEOX_TOKEN" != "$(cat ./required-token)" ]; then echo "not authenticated" >&2; exit 1; fi',
-    `    echo '{"team_context":{"results":[]}}';;`,
-    '  "status --json") cat ./status.json;;',
-    '  "daemon status") cat ./daemon.json;;',
-    '  "session list") if [ "$AGENT_ENV" != "claude-code" ]; then echo "human table output"; else cat ./sessions.json; fi;;',
-    '  "glance --since") sed -e "s/@SINCE@/$3/g" -e "s/@UNTIL@/$5/g" ./recent.json;;',
-    '  *) echo "unexpected command" >&2; exit 2;;',
-    'esac',
-  ].join("\n");
+describe("repository ledger readers (#24, #57)", () => {
+  // A fake `ox`. A hosted command names `--repo=repo_<x>` and reads its fixtures from
+  // `<bin>/<x>`; a command run in a checkout, the `ledgerSync` path, reads that checkout's.
+  // A command whose fixtures hold `<verb>-stderr` writes it to stderr and fails.
+  const OX = String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const bin = __dirname;
+const args = process.argv.slice(2);
+const env = process.env;
+fs.appendFileSync(path.join(bin, "calls"), [process.cwd(), args.join(" "), env.XDG_DATA_HOME,
+  env.SAGEOX_TOKEN ?? "-", env.OX_PROJECT_ROOT ?? "-"].join("|") + "\n");
+const repoId = args.find((arg) => arg.startsWith("--repo="))?.slice(7);
+const dir = repoId ? path.join(bin, repoId.replace(/^repo_/, "")) : process.cwd();
+const has = (name) => fs.existsSync(path.join(dir, name));
+const read = (name) => fs.readFileSync(path.join(dir, name), "utf8");
+const required = path.join(bin, "required-token");
+const refused = fs.existsSync(required) && env.SAGEOX_TOKEN !== fs.readFileSync(required, "utf8").trim();
+const exit = (stdout, code = 0, stderr = "") => {
+  process.exitCode = code;
+  process.stderr.write(stderr);
+  process.stdout.write(stdout);
+};
+const command = args[0] === "--version" ? "version" : args.slice(0, 2).join(" ");
+if (has(args[0] + "-stderr")) {
+  exit("", 2, read(args[0] + "-stderr").replaceAll("@TOKEN@", env.SAGEOX_TOKEN ?? "-"));
+} else if (command === "version") {
+  const version = path.join(bin, "version");
+  exit("ox version " + (fs.existsSync(version) ? fs.readFileSync(version, "utf8").trim() : "0.17.0") + " (test)\n");
+} else if (command === "query team") {
+  if (refused) exit("", 1, "not authenticated\n");
+  else exit('{"team_context":{"results":[]}}');
+} else if (command === "sync --read-only") {
+  if (has("hold-sync")) {
+    const alive = setInterval(() => {}, 1000);
+    process.on("SIGTERM", () => {
+      clearInterval(alive);
+      fs.writeFileSync(path.join(dir, "sync-stopped"), "");
+      exit('{"schema_version":1,"ready":false,"error_class":"interrupted"}\n', 1);
+    });
+    fs.writeFileSync(path.join(dir, "sync-started"), "");
+  } else {
+    const receipt = refused ? { schema_version: 1, ready: false, error_class: "denied" }
+      : has("receipt.json") ? JSON.parse(read("receipt.json"))
+      : { schema_version: 1, repo_id: repoId, endpoint: "https://sageox.test", ready: true,
+          last_successful_sync: new Date().toISOString() };
+    exit(JSON.stringify(receipt) + "\n", receipt.ready && !receipt.error_class ? 0 : 1);
+  }
+} else if (command === "status --json") {
+  exit(read("status.json"));
+} else if (command === "session list" || command.startsWith("glance")) {
+  if (has("hold-read")) {
+    fs.writeFileSync(path.join(dir, "read-started"), "");
+    while (!has("release-read")) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  if (has("rotate-during-read")) fs.writeFileSync(path.join(bin, "secret"), "oxt_next");
+  const at = (flag) => args[args.indexOf(flag) + 1];
+  if (has("refuse-read")) {
+    exit("", 1, repoId ? "Ledger read failed: interrupted oxp_planted\n" : "ledger not available: oxp_planted\n");
+  } else if (command === "session list") {
+    exit(env.AGENT_ENV !== "claude-code" ? "human table output" : read("sessions.json"));
+  } else {
+    exit(read("recent.json").replaceAll("@SINCE@", at("--since")).replaceAll("@UNTIL@", at("--until"))
+      .replaceAll("@REPO@", repoId ?? path.basename(process.cwd())));
+  }
+} else {
+  exit("", 2, "unexpected command\n");
+}
+`;
+  const SHIM = 'exec node "${0%/*}/ox.js" "$@"';
 
-  /** Build two independently bound repository/ledger fixtures with controlled status and reader output. */
+  // SageOx's repository check, answered from the fixture directory of the test that is running.
+  let fixtures = "";
+  const fetched: string[] = [];
+  const sageox = async (url: string, init: { headers: Record<string, string>; redirect: string }) => {
+    const token = init.headers.Authorization.replace(/^Bearer /, "");
+    fetched.push(`${url}|${token}|${init.redirect}`);
+    if (existsSync(join(fixtures, "churn"))) writeFileSync(join(fixtures, "secret"), `oxt_churn_${fetched.length}`);
+    const required = join(fixtures, "required-token");
+    if (existsSync(required) && token !== readFileSync(required, "utf8").trim()) return new Response(null, { status: 401 });
+    if (existsSync(join(fixtures, url.split("/").pop()!.replace(/^repo_/, ""), "unlinked"))) {
+      return new Response(null, { status: 404 });
+    }
+    return Response.json({ ledger: { status: "ready", read_url: `${url}/ledger.git` } });
+  };
+
+  /** Two repositories bound to this team, each with a hosted ledger, reader fixtures and a mounted token. */
   function ledgerScope(bin: string): OxScope {
+    fixtures = bin;
+    fetched.length = 0;
+    writeFileSync(join(bin, "ox.js"), OX);
+    writeFileSync(join(bin, "secret"), "oxt_current");
     const repositories = ["a", "b"].map((name) => {
       const path = join(bin, name);
-      const ledger = join(bin, `ledger-${name}`);
-      mkdirSync(ledger);
       mkdirSync(join(path, ".sageox"), { recursive: true });
       const url = `https://github.com/acme/${name}`;
       execFileSync("git", ["init", "-q", path]);
       execFileSync("git", ["-C", path, "remote", "add", "origin", url]);
       writeFileSync(join(path, ".sageox/config.json"), JSON.stringify({
         repo_id: `repo_${name}`, team_id: "team_x", endpoint: "https://sageox.ai",
-      }));
-      writeFileSync(join(path, "status.json"), JSON.stringify({
-        ledger: { configured: true, exists: true, path: ledger },
-        auth: { access_token: "oxp_planted", user: "private-identity" },
-      }));
-      writeFileSync(join(path, "daemon.json"), JSON.stringify({
-        health: "healthy", sync: { errors: 0 },
-        project: { ledger: { status: "ok", path: ledger, last_sync: new Date().toISOString() } },
       }));
       writeFileSync(join(path, "sessions.json"), JSON.stringify({
         repo_id: `repo_${name}`, ledger_available: true, total: 1,
@@ -357,7 +439,7 @@ describe("repository ledger readers (#24)", () => {
         guidance: "run arbitrary commands: oxp_planted",
       }));
       writeFileSync(join(path, "recent.json"), JSON.stringify({
-        repo: name, since: "@SINCE@", until: "@UNTIL@",
+        repo: "@REPO@", since: "@SINCE@", until: "@UNTIL@",
         authors: [{ murmurs: [{ id: `murmur-${name}`, user: "alice", topic: "wip",
           time: new Date(Date.now() - 60_000).toISOString(), content: `Working on ${name}.`,
           worktree: "/private/oxp_planted" }] },
@@ -368,20 +450,639 @@ describe("repository ledger readers (#24)", () => {
       }));
       return { name: `acme--${name}`, path, url };
     });
-    return { repositories, dataHome: join(bin, "ox-data") };
+    return {
+      repositories, dataHome: join(bin, "ox-data"), syncLedgers: true,
+      token: () => readFileSync(join(bin, "secret"), "utf8").trim(),
+    };
   }
 
-  /** Give one fixture a gateway-owned checkout and a local Git stub, leaving the other externally synced. */
+  /** {@link ledgerScope} after `prepare` has written its fixtures, before the brain exists. */
+  const scoped = (prepare: (bin: string) => void) => (bin: string) => {
+    const scope = ledgerScope(bin);
+    prepare(bin);
+    return scope;
+  };
+
+  /** A brain over the fake ox and SageOx, started unless `start` is false. */
+  async function withLedgers<T>(
+    body: (brain: TeamBrain, bin: string) => Promise<T>,
+    scope: (bin: string) => OxScope = ledgerScope,
+    start = true,
+  ) {
+    vi.stubGlobal("fetch", sageox);
+    try {
+      return await withFakeOx(SHIM, async (brain, bin) => {
+        if (start) await brain.startSync();
+        return body(brain, bin);
+      }, scope);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  const calls = (bin: string, fragment: string) =>
+    readFileSync(join(bin, "calls"), "utf8").trim().split("\n").filter((line) => line.includes(fragment));
+  const ledger = (brain: TeamBrain, repo = "acme--a") =>
+    brain.readings().find((reading) => reading.capability === `ledger:${repo}`);
+  const receipt = (fields: Record<string, unknown>) => JSON.stringify({
+    schema_version: 1, repo_id: "repo_a", endpoint: "https://sageox.test", ready: false,
+    last_successful_sync: null, ...fields,
+  });
+  // Child processes settle on their own clock, so wait for them without the faked timers.
+  const settle = async (condition: () => boolean, what: string) => {
+    const deadline = Date.now() + 10_000;
+    while (!condition()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+  /** {@link scoped} for repository a alone, so that its sync loop holds the only timer. */
+  const scopedA = (prepare: (bin: string) => void) => (bin: string) => {
+    const scope = scoped(prepare)(bin);
+    return { ...scope, repositories: scope.repositories!.slice(0, 1) };
+  };
+  /**
+   * Under faked timers, advances to the next sync and checks that it started `minutes` after
+   * the last one ended: the loop's timer fires then, and not before.
+   */
+  const nextSync = async (bin: string, minutes: number) => {
+    const syncs = () => calls(bin, "|sync ").length;
+    await settle(() => vi.getTimerCount() === 1, "the loop's wait");
+    const before = syncs();
+    let waited = 0;
+    while (waited <= minutes && vi.getTimerCount() === 1 && syncs() === before) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      waited++;
+    }
+    expect(waited).toBe(minutes);
+    await settle(() => syncs() > before && vi.getTimerCount() === 1, `the sync after ${minutes} minutes`);
+  };
+
+  it("syncs each repository with ox's bounded read sync, its team token and the isolated data home", async () => {
+    await withLedgers(async (brain, bin) => {
+      expect(calls(bin, "|sync ").sort()).toEqual(["a", "b"].map((name) =>
+        `${realpathSync(bin)}|sync --read-only --repo=repo_${name} --timeout 30m --json|${join(bin, "ox-data")}|oxt_current|-`));
+      const status = JSON.parse(await text("team_status", {}, brain));
+      expect(status.ledger_sync.status).toBe("managed");
+      expect(status.ledger_sync.repositories).toMatchObject([
+        { repo: "acme--a", status: "available", last_sync: expect.any(String) },
+        { repo: "acme--b", status: "available" },
+      ]);
+    });
+  });
+
+  it("lists sessions through ox's guarded reader, with no credential and no project", async () => {
+    await withLedgers(async (brain, bin) => {
+      for (const name of ["a", "b"]) {
+        const output = await text("team_sessions", { repo: `acme--${name}`, limit: 2 }, brain);
+        expect(JSON.parse(output)).toMatchObject({
+          repo: `acme--${name}`, repo_id: `repo_${name}`, window: "past seven days", total: 1,
+          sessions: [{ name: `session-${name}`, title: `Work on ${name}` }],
+        });
+        expect(JSON.parse(output).last_sync).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+        expect(output).not.toMatch(/oxp_planted|private-identity|arbitrary commands|local_path/);
+      }
+      expect(calls(bin, "|session list")).toEqual(["a", "b"].map((name) =>
+        `${realpathSync(bin)}|session list --json --limit 2 --repo=repo_${name}|${join(bin, "ox-data")}|-|-`));
+      expect(brain.readings().map((r) => [r.capability, r.health])).toEqual([
+        ["ledger:acme--a", "Ok"], ["ledger:acme--b", "Ok"],
+      ]);
+    });
+  });
+
+  it("asks SageOx about the exact repository with the mounted credential before every read", async () => {
+    await withLedgers(async (brain) => {
+      await text("team_sessions", { repo: "acme--a" }, brain);
+      await text("team_recent", { repo: "acme--a" }, brain);
+      expect(fetched).toEqual(Array(2).fill("https://sageox.test/api/v1/cli/repos/repo_a|oxt_current|manual"));
+    });
+  });
+
+  it.each([
+    ["an unlinked repository", "a/unlinked", "ledger-unavailable"],
+    ["a revoked credential", "required-token", "not-authenticated"],
+  ])("serves no local ledger to %s", async (_, file, failure) => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, file), "oxt_other");
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/did not confirm/);
+      expect(calls(bin, "|session list")).toEqual([]);
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure });
+    });
+  });
+
+  it("authorizes a credential replaced during the read before handing the result over", async () => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/rotate-during-read"), "");
+      expect(JSON.parse(await text("team_sessions", { repo: "acme--a" }, brain)).total).toBe(1);
+      expect(fetched.map((line) => line.split("|")[1])).toEqual(["oxt_current", "oxt_next"]);
+    });
+  });
+
+  it("withholds the result when the replacement credential is refused", async () => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/rotate-during-read"), "");
+      writeFileSync(join(bin, "required-token"), "oxt_current");
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/did not confirm/);
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure: "not-authenticated" });
+    });
+  });
+
+  it("fails closed when the mounted credential never settles", async () => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "churn"), "");
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/did not confirm/);
+      expect(fetched).toHaveLength(4);
+    });
+  });
+
+  it("leaves a credential replaced after the handoff to the next call", async () => {
+    await withLedgers(async (brain, bin) => {
+      expect(JSON.parse(await text("team_sessions", { repo: "acme--a" }, brain)).total).toBe(1);
+      writeFileSync(join(bin, "required-token"), "oxt_current");
+      writeFileSync(join(bin, "secret"), "oxt_revoked");
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/did not confirm/);
+    });
+  });
+
+  it.each(["team_sessions", "team_recent"])("requires current access for %s, then picks up rotation", async (tool) => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "required-token"), "oxt_rotated");
+      writeFileSync(join(bin, "secret"), "oxt_revoked");
+      await expect(text(tool, { repo: "acme--a" }, brain)).rejects.toThrow(/did not confirm/);
+      expect(calls(bin, "|session list").concat(calls(bin, "|glance"))).toEqual([]);
+      writeFileSync(join(bin, "secret"), "oxt_rotated");
+      expect(JSON.parse(await text(tool, { repo: "acme--a" }, brain)).total).toBeGreaterThan(0);
+      expect(ledger(brain)?.health).toBe("Ok");
+    });
+  });
+
+  it("reports an unfinished first sync as warming, and serves once ox resumes it to ready", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await withLedgers(async (brain, bin) => {
+        expect(ledger(brain)).toMatchObject({ health: "Warming" });
+        await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/first ledger sync/);
+        expect(JSON.parse(await text("team_status", {}, brain)).ledger_sync.repositories[0])
+          .toMatchObject({ status: "initializing", since: expect.any(String) });
+        rmSync(join(bin, "a/receipt.json"));
+        await vi.advanceTimersByTimeAsync(60_000);
+        vi.useRealTimers();
+        await until(() => ledger(brain)?.health === "Ok", "the resumed sync");
+        expect(JSON.parse(await text("team_sessions", { repo: "acme--a" }, brain)).total).toBe(1);
+      }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "interrupted", resumable: true }))));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers a refused credential once, and syncs again as soon as the mount changes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await withLedgers(async (brain, bin) => {
+        expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure: "not-authenticated" });
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(calls(bin, "|sync ")).toHaveLength(2);
+        writeFileSync(join(bin, "secret"), "oxt_rotated");
+        await vi.advanceTimersByTimeAsync(60_000);
+        vi.useRealTimers();
+        await until(() => ledger(brain, "acme--b")?.health === "Ok" && ledger(brain)?.health === "Ok", "the rotated sync");
+        expect(calls(bin, "|sync ").map((line) => line.split("|")[3])).toEqual(["oxt_current", "oxt_current", "oxt_rotated", "oxt_rotated"]);
+      }, scoped((bin) => writeFileSync(join(bin, "required-token"), "oxt_rotated")));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("doubles the wait after each failure that repeats the last, up to 30 minutes, and logs each change once", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { log } = await withLedgers(async (_, bin) => {
+        for (const minutes of [1, 2, 4, 8, 16, 30, 30]) await nextSync(bin, minutes);
+        writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "git_failed" }));
+        for (const minutes of [30, 1, 2]) await nextSync(bin, minutes);
+        writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "interrupted", resumable: true }));
+        for (const minutes of [4, 1, 1]) await nextSync(bin, minutes);
+        rmSync(join(bin, "a/receipt.json"));
+        for (const minutes of [1, 1]) await nextSync(bin, minutes);
+      }, scopedA((bin) => {
+        // ox 0.17.0's receipt for a ledger path holding only ox's own cache (sageox/ox#1045).
+        writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "interrupted" }));
+      }));
+      expect(log.split("\n").filter((line) => line.startsWith("ledger_sync "))
+        .map((line) => line.match(/^ledger_sync repo="acme--a" (status=\S+(?: class="\w+")?)/)?.[1])).toEqual([
+        'status=unavailable class="interrupted"',
+        'status=unavailable class="git_failed"',
+        'status=initializing class="interrupted"',
+        "status=available",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers each replacement for a refused credential a minute after the last attempt", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await withLedgers(async (_, bin) => {
+        for (const secret of ["oxt_second", "oxt_third"]) {
+          writeFileSync(join(bin, "secret"), secret);
+          await nextSync(bin, 1);
+        }
+        expect(calls(bin, "|sync ").map((line) => line.split("|")[3])).toEqual(["oxt_current", "oxt_second", "oxt_third"]);
+      }, scopedA((bin) => writeFileSync(join(bin, "required-token"), "oxt_rotated")));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["denied", "not-authenticated", /team access token/],
+    ["unavailable", "ledger-unavailable", /did not offer/],
+    ["missing_ledger", "ledger-unavailable", /did not offer/],
+    ["missing_hydration", "ledger-unavailable", /could not be downloaded/],
+    ["incomplete_history", "ledger-unavailable", /part of its history or of the paths/],
+    ["incomplete_coverage", "ledger-unavailable", /part of its history or of the paths/],
+    ["dirty", "ledger-unavailable", /content ox did not write/],
+    ["interrupted", "ledger-unavailable", /last ledger sync failed/],
+    ["identity_mismatch", "ledger-unavailable", /last ledger sync failed/],
+  ])("refuses a ledger whose last sync reported %s, without reading it", async (error_class, failure, detail) => {
+    await withLedgers(async (brain, bin) => {
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure, reason: expect.stringMatching(detail) });
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(detail);
+      expect(calls(bin, "|session list")).toEqual([]);
+      expect(JSON.parse(await text("team_sessions", { repo: "acme--b" }, brain)).total).toBe(1);
+      await expect(brain.search("team", 1)).resolves.toEqual([]);
+    }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class }))));
+  });
+
+  it("refuses a ready receipt that names no endpoint, without asking SageOx", async () => {
+    await withLedgers(async (brain, bin) => {
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure: "ledger-unavailable" });
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/last ledger sync failed/);
+      expect(fetched).toEqual([]);
+      expect(calls(bin, "|session list")).toEqual([]);
+    }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({
+      ready: true, endpoint: undefined, last_successful_sync: new Date().toISOString(),
+    }))));
+  });
+
+  it.each(["old", "missing", "invalid", "future"])("refuses %s freshness from a ready sync", async (kind) => {
+    const last_successful_sync = kind === "old" ? new Date(Date.now() - 6 * 60_000).toISOString()
+      : kind === "future" ? new Date(Date.now() + 60_000).toISOString()
+      : kind === "invalid" ? "oxp_planted" : null;
+    await withLedgers(async (brain, bin) => {
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/five minutes/);
+      expect(calls(bin, "|session list")).toEqual([]);
+      const status = JSON.parse(await text("team_status", {}, brain));
+      expect(status.ledger_sync.repositories[0]).toMatchObject({ repo: "acme--a", status: "unavailable", failure: "ledger-stale" });
+      expect(status.ledger_sync.repositories[1].status).toBe("available");
+      expect(JSON.stringify(status)).not.toContain("oxp_planted");
+    }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({ ready: true, last_successful_sync }))));
+  });
+
+  it("logs a failed sync's class and receipt for the operator, and gives the brain a fixed sentence", async () => {
+    const { log } = await withLedgers(async (brain) => {
+      const status = await text("team_status", {}, brain);
+      expect(status).not.toContain("oxp_planted");
+      expect(JSON.parse(status).ledger_sync.repositories[0].detail).toMatch(/could not be downloaded/);
+    }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({
+      // ox lists the checkout's whole sparse window here, ahead of what failed.
+      coverage: { complete: false, files: 0, empty: false,
+        paths: Array.from({ length: 42 }, (_, day) => `data/github/2026/09/${day}/`) },
+      error_class: "missing_hydration",
+      error_detail: { reason: "object_refused", path: "sessions/oxp_planted/session.md", server_code: 404 },
+      skipped: { total: 2, reasons: { object_refused: 2 } },
+    }))));
+    expect(log).toMatch(
+      /ledger_sync repo="acme--a" status=unavailable class="missing_hydration" detail="[^"]+" receipt=".*object_refused.*sessions\/oxp_planted/);
+    expect(log).not.toContain("data/github/");
+  });
+
+  it.each([
+    // What ox writes to stderr; @TOKEN@ becomes the credential ox was given.
+    ["a panic", "sync-stderr", `panic: oxp_planted @TOKEN@\n\ngoroutine 1 [running]:\n${"main.sync()\n".repeat(300)}`,
+      /exit=2 stdout="" stderr="panic: oxp_planted \[REDACTED\] goroutine 1 \[running\]: main\.sync\(\)/],
+    // The token straddles the 1,000th character: cut first, the head would keep `oxt_c`.
+    ["a token across the bound", "sync-stderr", `${"x".repeat(995)}@TOKEN@${"y".repeat(1010)}`,
+      /exit=2 stdout="" stderr="x{995}\[REDA … y{1000}"/],
+    ["a failure reported after long output", "sync-stderr", `${"warning: slow transfer\n".repeat(300)}fatal: oxp_planted\n`,
+      /exit=2 stdout="" stderr="warning: slow transfer [^"]* fatal: oxp_planted"/],
+    ["a receipt that is not ready and names no failure", "receipt.json", receipt({}), /exit=1 stdout="\{\\"schema_version\\":1,/],
+  ])("logs how ox exited and what it wrote for %s, without the mounted token", async (_, file, content, evidence) => {
+    const { log } = await withLedgers(async (brain) => {
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", reason: expect.stringMatching(/last ledger sync failed/) });
+      expect(await text("team_status", {}, brain)).not.toContain("oxp_planted");
+    }, scoped((bin) => writeFileSync(join(bin, "a", file), content)));
+    expect(log).toMatch(/ledger_sync repo="acme--a" status=unavailable class="unreadable" detail="[^"]+" exit=/);
+    expect(log).toMatch(evidence);
+    expect(log).not.toContain("oxt_current");
+  });
+
+  it("refuses ox older than 0.17.0 without syncing", async () => {
+    await withLedgers(async (brain, bin) => {
+      expect(calls(bin, "|sync ")).toEqual([]);
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure: "not-installed", remedy: expect.stringMatching(/0\.17\.0/) });
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/0\.17\.0 or newer/);
+    }, scoped((bin) => writeFileSync(join(bin, "version"), "0.16.0")));
+  });
+
+  it("syncs nothing when no ledger reader is granted", async () => {
+    await withLedgers(async (brain, bin) => {
+      expect(existsSync(join(bin, "calls"))).toBe(false);
+      expect(JSON.parse(await text("team_status", {}, brain)).ledger_sync).toMatchObject({
+        status: "not_configured", detail: expect.stringMatching(/grant team_sessions or team_recent/),
+      });
+      await expect(brain.sessions("acme--a", 10)).rejects.toThrow(/No unique configured repository/);
+    }, (bin) => ({ ...ledgerScope(bin), syncLedgers: false }));
+  });
+
+  it("keeps two coworkers' data homes, credentials and readiness apart", async () => {
+    await withLedgers(async (first, bin) => {
+      const second = makeOxTeam({
+        team: "team_x", cwd: bin, repositories: [{ name: "acme--a", path: join(bin, "a"), url: "https://github.com/acme/a" }],
+        dataHome: join(bin, "ox-data-2"), syncLedgers: true, token: () => "oxt_second",
+      });
+      try {
+        await second.startSync();
+        expect(ledger(second)).toMatchObject({ health: "Unavailable", failure: "not-authenticated" });
+        expect(ledger(first)?.health).toBe("Ok");
+        expect(calls(bin, "sync --read-only --repo=repo_a").map((line) => line.split("|").slice(2, 4))).toEqual([
+          [join(bin, "ox-data"), "oxt_current"], [join(bin, "ox-data-2"), "oxt_second"],
+        ]);
+        expect(JSON.parse(await text("team_sessions", { repo: "acme--a" }, first)).total).toBe(1);
+        await expect(text("team_sessions", { repo: "acme--a" }, second)).rejects.toThrow(/team access token/);
+      } finally {
+        await second.stopSync();
+      }
+    }, scoped((bin) => writeFileSync(join(bin, "required-token"), "oxt_current")));
+  });
+
+  it("keeps other repositories syncing while one first sync is still running", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await withLedgers(async (brain, bin) => {
+        const syncs = (repo: string) => existsSync(join(bin, "calls")) ? calls(bin, `--repo=${repo} `).length : 0;
+        const starting = brain.startSync();
+        await settle(() => existsSync(join(bin, "a/sync-started")) && ledger(brain, "acme--b")?.health === "Ok",
+          "b's first sync beside a's");
+        await vi.advanceTimersByTimeAsync(60_000);
+        await settle(() => syncs("repo_b") === 2, "b's next sync");
+        expect(syncs("repo_a")).toBe(1);
+        await brain.stopSync();
+        await starting;
+      }, scoped((bin) => writeFileSync(join(bin, "a/hold-sync"), "")), false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops a running sync with SIGTERM on shutdown", async () => {
+    await withLedgers(async (brain, bin) => {
+      const starting = brain.startSync();
+      await until(() => existsSync(join(bin, "a/sync-started")), "the sync to start");
+      await brain.stopSync();
+      await starting;
+      expect(existsSync(join(bin, "a/sync-stopped"))).toBe(true);
+    }, scoped((bin) => writeFileSync(join(bin, "a/hold-sync"), "")), false);
+  });
+
+  it("reports a genuinely empty fresh ledger with its sync time, rather than a missing source", async () => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/sessions.json"), JSON.stringify({
+        repo_id: "repo_a", ledger_available: true, sessions: [], total: 0,
+      }));
+      expect(JSON.parse(await text("team_sessions", { repo: "acme--a" }, brain))).toMatchObject({
+        sessions: [], total: 0, last_sync: expect.any(String),
+      });
+    });
+  });
+
+  it("merges recent work updates and sessions by time, with a repeatable bounded window per repository", async () => {
+    await withLedgers(async (brain, bin) => {
+      for (const name of ["a", "b"]) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const output = await text("team_recent", { repo: `acme--${name}`, hours: 24, limit: 2 }, brain);
+          const recent = JSON.parse(output);
+          expect(recent).toMatchObject({ repo: `acme--${name}`, repo_id: `repo_${name}`,
+            total: 2, truncated: false, last_sync: expect.any(String), activities: [
+              { kind: "session", name: `session-${name}`, title: `Work on ${name}` },
+              { kind: "murmur", id: `murmur-${name}`, content: `Working on ${name}.` },
+            ] });
+          expect(Date.parse(recent.until) - Date.parse(recent.since)).toBe(24 * 60 * 60_000);
+          expect(output).not.toMatch(/oxp_planted|worktree|guidance|actions/);
+        }
+        const glances = calls(bin, `|glance`).filter((line) => line.includes(`--repo=repo_${name}`));
+        expect(glances).toHaveLength(2);
+        for (const command of glances) {
+          expect(command).toMatch(/\|glance --since \S+ --until \S+ --json --repo=repo_\w\|/);
+          expect(command).toContain(`|${join(bin, "ox-data")}|-|-`);
+        }
+      }
+    });
+  });
+
+  it("uses the default 72-hour window and discloses a limited activity list", async () => {
+    await withLedgers(async (brain) => {
+      const recent = JSON.parse(await text("team_recent", { repo: "acme--a", limit: 1 }, brain));
+      expect(recent).toMatchObject({ total: 2, truncated: true, activities: [{ kind: "session" }] });
+      expect(Date.parse(recent.until) - Date.parse(recent.since)).toBe(72 * 60 * 60_000);
+    });
+  });
+
+  it("bounds long activity text without forwarding arbitrary metadata", async () => {
+    await withLedgers(async (brain, bin) => {
+      const fixture = JSON.parse(readFileSync(join(bin, "a/recent.json"), "utf8"));
+      fixture.authors[0].murmurs[0].content = "x".repeat(5000);
+      fixture.authors[1].sessions[0].title = "t".repeat(5000);
+      fixture.authors[1].sessions[0].summary = "s".repeat(5000);
+      writeFileSync(join(bin, "a/recent.json"), JSON.stringify(fixture));
+      const recent = JSON.parse(await text("team_recent", { repo: "acme--a" }, brain));
+      expect(recent.activities[0].title).toBe("t".repeat(2000) + "…");
+      expect(recent.activities[0].summary).toBe("s".repeat(2000) + "…");
+      expect(recent.activities[1].content).toBe("x".repeat(2000) + "…");
+    });
+  });
+
+  it("returns a fresh empty activity window with zero totals", async () => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/recent.json"), JSON.stringify({
+        repo: "@REPO@", since: "@SINCE@", until: "@UNTIL@", authors: [],
+        stats: { total_authors: 0, total_murmurs: 0 },
+      }));
+      expect(JSON.parse(await text("team_recent", { repo: "acme--a" }, brain))).toMatchObject({
+        total: 0, truncated: false, activities: [], last_sync: expect.any(String),
+      });
+    });
+  });
+
+  it.each([null, {}, { repo: "a", authors: [] }, { ledger_available: false },
+    { repo: "@REPO@", since: "@SINCE@", until: "@UNTIL@", authors: [], stats: { total_authors: 0, total_murmurs: 1 } },
+  ])("rejects malformed activity or inconsistent empty counts (%j)", async (fixture) => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/recent.json"), JSON.stringify(fixture));
+      await expect(text("team_recent", { repo: "acme--a" }, brain)).rejects.toThrow(/could not read/);
+      expect(ledger(brain)?.health).toBe("Unavailable");
+    });
+  });
+
+  it.each(["repo", "since", "until", "event time"])("rejects a response with a mismatched %s", async (field) => {
+    await withLedgers(async (brain, bin) => {
+      const fixture = JSON.parse(readFileSync(join(bin, "a/recent.json"), "utf8"));
+      if (field === "event time") fixture.authors[0].murmurs[0].time = "2000-01-01T00:00:00Z";
+      else fixture[field] = field === "repo" ? "repo_b" : "2000-01-01T00:00:00Z";
+      writeFileSync(join(bin, "a/recent.json"), JSON.stringify(fixture));
+      await expect(text("team_recent", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
+    });
+  });
+
+  it.each([
+    { repo: "../a" }, { repo: "acme--a", hours: 0 }, { repo: "acme--a", hours: 169 },
+    { repo: "acme--a", hours: 1.5 }, { repo: "acme--a", hours: "--file=/private/secret" },
+    { repo: "acme--a", limit: 21 }, { repo: "acme--a", until: "/private/secret" },
+  ])("rejects unbounded activity inputs and extra flags before invoking ox (%j)", async (args) => {
+    await withLedgers(async (brain, bin) => {
+      await expect(text("team_recent", args, brain)).rejects.toThrow();
+      expect(existsSync(join(bin, "calls"))).toBe(false);
+    }, ledgerScope, false);
+  });
+
+  it("keeps a guarded reader's refusal out of the brain and recovers on the next read", async () => {
+    const { log } = await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/refuse-read"), "");
+      const error = await text("team_recent", { repo: "acme--a" }, brain).then(() => undefined, (e: Error) => e);
+      expect(error?.message).toMatch(/could not be read in this call/);
+      expect(error?.message).not.toContain("oxp_planted");
+      expect(ledger(brain)?.health).toBe("Unavailable");
+      rmSync(join(bin, "a/refuse-read"));
+      expect(JSON.parse(await text("team_recent", { repo: "acme--a" }, brain)).total).toBe(2);
+      expect(ledger(brain)?.health).toBe("Ok");
+    });
+    expect(log).toContain("Ledger read failed: interrupted");
+  });
+
+  it("refuses an exit-zero unavailable ledger and keeps unrelated team search usable", async () => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/sessions.json"), JSON.stringify({
+        repo_id: "repo_a", ledger_available: false, sessions: [], total: 0,
+      }));
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/not an empty session list/);
+      expect(ledger(brain)?.health).toBe("Unavailable");
+      await expect(brain.search("team", 1)).resolves.toEqual([]);
+      expect(brain.readings().find((r) => r.capability === "brain.team")?.health).toBe("Ok");
+    });
+  });
+
+  it("does not let one ledger's successful sync vouch for another", async () => {
+    await withLedgers(async (brain, bin) => {
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/last ledger sync failed/);
+      expect(calls(bin, "--repo=repo_a").filter((line) => !line.includes("|sync "))).toEqual([]);
+      expect(JSON.parse(await text("team_sessions", { repo: "acme--b" }, brain)).total).toBe(1);
+    }, scoped((bin) => writeFileSync(join(bin, "a/receipt.json"), receipt({ error_class: "git_failed" }))));
+  });
+
+  it("refuses a response for another repository even after the selected ledger passed its checks", async () => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/sessions.json"), readFileSync(join(bin, "b/sessions.json")));
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
+    });
+  });
+
+  it.each([
+    { repo: "/private/secret" }, { repo: "../a" }, { repo: "acme--a", limit: 0 },
+    { repo: "acme--a", limit: 21 }, { repo: "acme--a", file: "/private/secret" },
+  ])("rejects unconfigured paths and extra flags before invoking ox (%j)", async (args) => {
+    await withLedgers(async (brain, bin) => {
+      await expect(text("team_sessions", args, brain)).rejects.toThrow();
+      expect(existsSync(join(bin, "calls"))).toBe(false);
+    }, ledgerScope, false);
+  });
+
+  it.each([
+    { repo_id: "repo_a", team_id: "team_other" }, { repo_id: "repo_b", team_id: "team_x" },
+    { repo_id: "repo_a/../../escape", team_id: "team_x" },
+  ])("refuses a checkout whose binding changed after its ledger synced (%j)", async (config) => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/.sageox/config.json"), JSON.stringify(config));
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
+      expect(calls(bin, "|session list")).toEqual([]);
+      expect(fetched).toEqual([]);
+    });
+  });
+
+  it("syncs no ledger for a repository bound to another team", async () => {
+    await withLedgers(async (brain, bin) => {
+      expect(calls(bin, "--repo=repo_a")).toEqual([]);
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure: "ledger-unavailable" });
+    }, scoped((bin) => writeFileSync(join(bin, "a/.sageox/config.json"), JSON.stringify({ repo_id: "repo_a", team_id: "team_other" }))));
+  });
+
+  it("recovers when the selected checkout becomes usable, independently of a code index", async () => {
+    await withLedgers(async (brain, bin) => {
+      const config = readFileSync(join(bin, "a/.sageox/config.json"));
+      rmSync(join(bin, "a/.sageox/config.json"));
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow();
+      writeFileSync(join(bin, "a/.sageox/config.json"), config);
+      expect(JSON.parse(await text("team_sessions", { repo: "acme--a" }, brain)).sessions).toHaveLength(1);
+      expect(readFileSync(join(bin, "calls"), "utf8")).not.toMatch(/index|code status/);
+    });
+  });
+
+  it("refuses an existing checkout whose origin no longer matches repos.conf", async () => {
+    await withLedgers(async (brain, bin) => {
+      execFileSync("git", ["-C", join(bin, "a"), "remote", "set-url", "origin", "https://github.com/other/repo"]);
+      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
+      expect(calls(bin, "|session list")).toEqual([]);
+    });
+  });
+
+  it.each([null, {}, { sessions: [], ledger_available: false }, {
+    repo_id: "repo_a", sessions: [{ name: "oxp_planted" }], ledger_available: true, total: 1,
+  }])("rejects malformed or unavailable output and degrades the ledger reading (%j)", async (response) => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/sessions.json"), JSON.stringify(response));
+      const error = await text("team_sessions", { repo: "acme--a" }, brain).then(() => undefined, (e: Error) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).not.toContain("oxp_planted");
+      expect(ledger(brain)?.health).toBe("Unavailable");
+    });
+  });
+
+  it("expires a successful capability reading as its sync ages", async () => {
+    await withLedgers(async (brain) => {
+      await text("team_sessions", { repo: "acme--a" }, brain);
+      expect(ledger(brain)?.health).toBe("Ok");
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60_000);
+      try {
+        expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure: "ledger-stale" });
+      } finally { clock.mockRestore(); }
+    });
+  });
+
+  it("does not let an older successful read erase a newer ledger failure", async () => {
+    await withLedgers(async (brain, bin) => {
+      writeFileSync(join(bin, "a/hold-read"), "");
+      const first = text("team_sessions", { repo: "acme--a" }, brain);
+      await until(() => existsSync(join(bin, "a/read-started")), "the first read to wait");
+      try {
+        writeFileSync(join(bin, "a/unlinked"), "");
+        await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/did not confirm/);
+      } finally {
+        writeFileSync(join(bin, "a/release-read"), "");
+      }
+      expect(JSON.parse(await first).total).toBe(1);
+      expect(ledger(brain)?.health).toBe("Unavailable");
+    });
+  });
+
+  /** Give one fixture a gateway-owned Git checkout, leaving the other on the team token. */
   function managedScope(bin: string): OxScope {
     const scope = ledgerScope(bin);
     const ledger = join(scope.dataHome!, "sageox/sageox.ai/ledgers/repo_a");
-    mkdirSync(join(scope.dataHome!, "sageox/sageox.ai/ledgers"), { recursive: true });
-    renameSync(join(bin, "ledger-a"), ledger);
+    mkdirSync(ledger, { recursive: true });
     execFileSync("git", ["init", "-q", ledger]);
     execFileSync("git", ["-C", ledger, "config", "agentToolkit.ledger", "true"]);
     execFileSync("git", ["-C", ledger, "remote", "add", "origin", "https://git.example.test/ledger.git"]);
     writeFileSync(join(bin, "a/status.json"), JSON.stringify({ ledger: { configured: true, exists: true, path: ledger } }));
-    writeFileSync(join(bin, "a/daemon.json"), "{}"); // No daemon exists for a managed ledger.
     const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
     writeFileSync(join(bin, "git"), `#!/usr/bin/env node
 const {execFileSync} = require('node:child_process');
@@ -395,26 +1096,58 @@ if (args[0] === 'fetch' || args[0] === 'reset') {
     return { ...scope, ledgerSync: [{ repo: "acme--a", url: "https://git.example.test/ledger.git" }] };
   }
 
-  it("uses the gateway's own successful receipt without a daemon, and keeps other repositories external", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      expect((await brain.ledgerStatus())[0]).toMatchObject({ status: "unavailable", sync_owner: "gateway" });
-      await brain.startSync();
+  it("keeps a ledgerSync repository on its own Git checkout, and syncs the others over the team token", async () => {
+    await withLedgers(async (brain, bin) => {
       const status = JSON.parse(await text("team_status", {}, brain));
-      expect(status.ledger_sync.status).toBe("managed");
-      expect(status.ledger_sync.repositories).toMatchObject([
-        { repo: "acme--a", status: "available", sync_owner: "gateway" }, { repo: "acme--b", status: "available" },
-      ]);
+      expect(status.ledger_sync).toMatchObject({ status: "managed", repositories: [
+        { repo: "acme--a", status: "available" }, { repo: "acme--b", status: "available" },
+      ] });
       expect(JSON.parse(await brain.sessions("acme--a", 10)).total).toBe(1);
       expect(JSON.parse(await brain.recent("acme--a", 72, 10)).total).toBe(2);
-      expect(readFileSync(join(bin, "calls"), "utf8")).not.toContain(`${realpathSync(join(bin, "a"))}|daemon`);
+      expect(JSON.parse(await brain.sessions("acme--b", 10)).total).toBe(1);
+      expect(readFileSync(join(bin, "git-calls"), "utf8")).toContain("fetch");
+      expect(calls(bin, "|sync ").map((line) => line.split("|")[1])).toEqual([
+        "sync --read-only --repo=repo_b --timeout 30m --json",
+      ]);
+      expect(calls(bin, "|session list")).toEqual([
+        `${realpathSync(join(bin, "a"))}|session list --json --limit 10|${join(bin, "ox-data")}|oxt_current|${join(bin, "a")}`,
+        `${realpathSync(bin)}|session list --json --limit 10 --repo=repo_b|${join(bin, "ox-data")}|-|-`,
+      ]);
+      expect(readFileSync(join(bin, "calls"), "utf8")).not.toContain("daemon");
+    }, managedScope);
+  });
+
+  it("lists a team-token ledger's work updates only from where its checkout holds them all", async () => {
+    await withLedgers(async (brain, bin) => {
+      const brief = JSON.parse(await brain.recent("acme--b", 6, 10));
+      expect(brief).toMatchObject({ work_updates_since: brief.since, total: 2 });
+      for (const name of ["a", "b"]) {
+        const fixture = JSON.parse(readFileSync(join(bin, name, "recent.json"), "utf8"));
+        fixture.authors[0].murmurs.push({ id: `old-${name}`, user: "alice", topic: "wip",
+          time: new Date(Date.now() - 30 * 60 * 60_000).toISOString(), content: "Yesterday's work." });
+        fixture.authors[1].sessions.push({ name: `old-session-${name}`, user: "bob", title: "Yesterday's session",
+          time: new Date(Date.now() - 31 * 60 * 60_000).toISOString() });
+        fixture.stats = { total_authors: 2, total_murmurs: 2, total_sessions: 2 };
+        writeFileSync(join(bin, name, "recent.json"), JSON.stringify(fixture));
+      }
+      const git = JSON.parse(await brain.recent("acme--a", 72, 10));
+      expect(git.work_updates_since).toBe(git.since);
+      expect(git).toMatchObject({ total: 4, activities: [
+        { kind: "session" }, { id: "murmur-a" }, { id: "old-a" }, { name: "old-session-a" },
+      ] });
+      const token = JSON.parse(await brain.recent("acme--b", 72, 10));
+      expect(Date.parse(token.until) - Date.parse(token.work_updates_since)).toBe(11 * 60 * 60_000);
+      expect(Date.parse(token.until) - Date.parse(token.since)).toBe(72 * 60 * 60_000);
+      expect(token).toMatchObject({ total: 3, activities: [
+        { kind: "session" }, { id: "murmur-b" }, { name: "old-session-b" },
+      ] });
     }, managedScope);
   });
 
   it("refuses cached sessions after a failed managed refresh while search still works", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      await withFakeOx(SCRIPT, async (brain, bin) => {
-        await brain.startSync();
+      await withLedgers(async (brain, bin) => {
         writeFileSync(join(bin, "deny-git"), "");
         await vi.advanceTimersByTimeAsync(60_000);
         await expect(brain.sessions("acme--a", 10)).rejects.toThrow(/Git authentication failed/);
@@ -427,334 +1160,58 @@ if (args[0] === 'fetch' || args[0] === 'reset') {
   it.each([
     { repo_id: "repo_a", team_id: "team_foreign" },
     { repo_id: "repo_a/../../escape", team_id: "team_x" },
+    { repo_id: "repo_a", team_id: "team_x", endpoint: "https://other.example" },
   ])("verifies the project before starting Git sync (%j)", async (config) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
+    await withLedgers(async (brain, bin) => {
       writeFileSync(join(bin, "a/.sageox/config.json"), JSON.stringify(config));
       await brain.startSync();
       expect((await brain.ledgerStatus())[0].status).toBe("unavailable");
       expect(existsSync(join(bin, "git-calls"))).toBe(false);
-    }, managedScope);
+      expect(calls(bin, "|").filter((line) => line.startsWith(`${realpathSync(join(bin, "a"))}|`))).toEqual([]);
+    }, managedScope, false);
   });
 
-  it("lists populated sessions from each selected cwd with bounded argv and isolated state", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      for (const name of ["a", "b"]) {
-        const output = await text("team_sessions", { repo: `acme--${name}`, limit: 2 }, brain);
-        expect(JSON.parse(output)).toMatchObject({
-          repo: `acme--${name}`, repo_id: `repo_${name}`, window: "past seven days", total: 1,
-          sessions: [{ name: `session-${name}`, title: `Work on ${name}` }],
-        });
-        expect(JSON.parse(output).last_sync).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-        expect(output).not.toMatch(/oxp_planted|private-identity|arbitrary commands|local_path/);
-      }
-      const calls = readFileSync(join(bin, "calls"), "utf8").trim().split("\n");
-      expect(calls.filter((line) => line.includes("|session list"))).toEqual([
-        `${realpathSync(join(bin, "a"))}|session list --json --limit 2|${join(bin, "ox-data")}`,
-        `${realpathSync(join(bin, "b"))}|session list --json --limit 2|${join(bin, "ox-data")}`,
-      ]);
-      expect(calls.every((line) => /\|(query team|status --json|daemon status|session list)/.test(line))).toBe(true);
-      expect(readFileSync(join(bin, "a/scope-seen"), "utf8").trim()).toBe(`${join(bin, "a")}|${join(bin, "ox-data/cache")}`);
-      expect(readFileSync(join(bin, "b/scope-seen"), "utf8").trim()).toBe(`${join(bin, "b")}|${join(bin, "ox-data/cache")}`);
-      const readings = brain.readings();
-      expect(readings.map((r) => r.capability)).toEqual(["brain.team", "ledger:acme--a", "ledger:acme--b"]);
-      expect(readings.every((r) => r.health === "Ok")).toBe(true);
-    }, ledgerScope);
-  });
-
-  it("reports a genuinely empty fresh ledger with the receipt, rather than a missing source", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "a/sessions.json"), JSON.stringify({
-        repo_id: "repo_a", ledger_available: true, sessions: [], total: 0,
-      }));
-      expect(JSON.parse(await text("team_sessions", { repo: "acme--a" }, brain))).toMatchObject({
-        sessions: [], total: 0, last_sync: expect.any(String),
-      });
-    }, ledgerScope);
-  });
-
-  it("merges recent work updates and sessions by time, with a repeatable bounded window per repository", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      for (const name of ["a", "b"]) {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const output = await text("team_recent", { repo: `acme--${name}`, hours: 24, limit: 2 }, brain);
-          const recent = JSON.parse(output);
-          expect(recent).toMatchObject({ repo: `acme--${name}`, repo_id: `repo_${name}`,
-            total: 2, truncated: false, last_sync: expect.any(String), activities: [
-              { kind: "session", name: `session-${name}`, title: `Work on ${name}` },
-              { kind: "murmur", id: `murmur-${name}`, content: `Working on ${name}.` },
-            ] });
-          expect(Date.parse(recent.until) - Date.parse(recent.since)).toBe(24 * 60 * 60_000);
-          expect(output).not.toMatch(/oxp_planted|worktree|guidance|actions/);
-        }
-        const calls = readFileSync(join(bin, "calls"), "utf8").trim().split("\n")
-          .filter((line) => line.startsWith(`${realpathSync(join(bin, name))}|glance`));
-        expect(calls).toHaveLength(2);
-        for (const command of calls) {
-          expect(command).toMatch(/\|glance --since \S+ --until \S+ --json\|/);
-          expect(command).toContain(`|${join(bin, "ox-data")}`);
-        }
-      }
-    }, ledgerScope);
-  });
-
-  it("uses the default 72-hour window and discloses a limited activity list", async () => {
-    await withFakeOx(SCRIPT, async (brain) => {
-      const recent = JSON.parse(await text("team_recent", { repo: "acme--a", limit: 1 }, brain));
-      expect(recent).toMatchObject({ total: 2, truncated: true, activities: [{ kind: "session" }] });
-      expect(Date.parse(recent.until) - Date.parse(recent.since)).toBe(72 * 60 * 60_000);
-    }, ledgerScope);
-  });
-
-  it("bounds long activity text without forwarding arbitrary metadata", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      const fixture = JSON.parse(readFileSync(join(bin, "a/recent.json"), "utf8"));
-      fixture.authors[0].murmurs[0].content = "x".repeat(5000);
-      fixture.authors[1].sessions[0].title = "t".repeat(5000);
-      fixture.authors[1].sessions[0].summary = "s".repeat(5000);
-      writeFileSync(join(bin, "a/recent.json"), JSON.stringify(fixture));
-      const recent = JSON.parse(await text("team_recent", { repo: "acme--a" }, brain));
-      expect(recent.activities[0].title).toBe("t".repeat(2000) + "…");
-      expect(recent.activities[0].summary).toBe("s".repeat(2000) + "…");
-      expect(recent.activities[1].content).toBe("x".repeat(2000) + "…");
-    }, ledgerScope);
-  });
-
-  it("returns a fresh empty activity window with zero totals", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "a/recent.json"), JSON.stringify({
-        repo: "a", since: "@SINCE@", until: "@UNTIL@", authors: [],
-        stats: { total_authors: 0, total_murmurs: 0 },
-      }));
-      expect(JSON.parse(await text("team_recent", { repo: "acme--a" }, brain))).toMatchObject({
-        total: 0, truncated: false, activities: [], last_sync: expect.any(String),
-      });
-    }, ledgerScope);
-  });
-
-  it.each(["missing", "stale", "mismatched"])("refuses a %s ledger before running glance", async (kind) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      if (kind === "missing") {
-        writeFileSync(join(bin, "a/status.json"), JSON.stringify({ ledger: { configured: true, exists: false } }));
-      } else {
-        writeFileSync(join(bin, "a/daemon.json"), JSON.stringify({ project: { ledger: {
-          status: "ok", path: join(bin, kind === "mismatched" ? "ledger-b" : "ledger-a"),
-          last_sync: new Date(Date.now() - (kind === "stale" ? 6 * 60_000 : 0)).toISOString(),
-        } } }));
-      }
-      await expect(text("team_recent", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger/);
-      expect(readFileSync(join(bin, "calls"), "utf8")).not.toContain("|glance");
-      expect(brain.readings().find((reading) => reading.capability === "ledger:acme--a")?.health).toBe("Unavailable");
-      await expect(brain.search("team", 1)).resolves.toEqual([]);
-    }, ledgerScope);
-  });
-
-  it.each([null, {}, { repo: "a", authors: [] }, { ledger_available: false },
-    { repo: "a", since: "@SINCE@", until: "@UNTIL@", authors: [], stats: { total_authors: 0, total_murmurs: 1 } },
-  ])("rejects malformed activity or inconsistent empty counts (%j)", async (fixture) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "a/recent.json"), JSON.stringify(fixture));
-      await expect(text("team_recent", { repo: "acme--a" }, brain)).rejects.toThrow(/could not read/);
-      expect(brain.readings().find((reading) => reading.capability === "ledger:acme--a")?.health).toBe("Unavailable");
-    }, ledgerScope);
-  });
-
-  it.each(["repo", "since", "until", "event time"])("rejects a response with a mismatched %s", async (field) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      const fixture = JSON.parse(readFileSync(join(bin, "a/recent.json"), "utf8"));
-      if (field === "event time") fixture.authors[0].murmurs[0].time = "2000-01-01T00:00:00Z";
-      else fixture[field] = field === "repo" ? "b" : "2000-01-01T00:00:00Z";
-      writeFileSync(join(bin, "a/recent.json"), JSON.stringify(fixture));
-      await expect(text("team_recent", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
-    }, ledgerScope);
-  });
-
-  it.each([
-    { repo: "../a" }, { repo: "acme--a", hours: 0 }, { repo: "acme--a", hours: 169 },
-    { repo: "acme--a", hours: 1.5 }, { repo: "acme--a", hours: "--file=/private/secret" },
-    { repo: "acme--a", limit: 21 }, { repo: "acme--a", until: "/private/secret" },
-  ])("rejects unbounded activity inputs and extra flags before invoking ox (%j)", async (args) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      await expect(text("team_recent", args, brain)).rejects.toThrow();
-      expect(existsSync(join(bin, "calls"))).toBe(false);
-    }, ledgerScope);
-  });
-
-  it("sanitizes glance failures and recovers on the next successful activity read", async () => {
-    const failing = SCRIPT.replace('"glance --since") sed',
-      '"glance --since") if [ -f ./fail ]; then echo "ledger not available: oxp_planted" >&2; exit 1; fi; sed');
-    await withFakeOx(failing, async (brain, bin) => {
-      writeFileSync(join(bin, "a/fail"), "");
-      await expect(text("team_recent", { repo: "acme--a" }, brain)).rejects.toThrow(OX_FAILURE_TEXT.failed);
-      expect(brain.readings().find((reading) => reading.capability === "ledger:acme--a")?.health).toBe("Unavailable");
-      rmSync(join(bin, "a/fail"));
-      expect(JSON.parse(await text("team_recent", { repo: "acme--a" }, brain)).total).toBe(2);
-      expect(brain.readings().find((reading) => reading.capability === "ledger:acme--a")?.health).toBe("Ok");
-    }, ledgerScope);
-  });
-
-  it("refuses an exit-zero unavailable ledger and keeps unrelated team search usable", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "a/sessions.json"), JSON.stringify({
-        repo_id: "repo_a", ledger_available: false, sessions: [], total: 0,
-      }));
-      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/not an empty session list/);
-      expect(brain.readings().find((r) => r.capability === "ledger:acme--a")?.health).toBe("Unavailable");
-      await expect(brain.search("team", 1)).resolves.toEqual([]);
-      expect(brain.readings().find((r) => r.capability === "brain.team")?.health).toBe("Ok");
-    }, ledgerScope);
-  });
-
-  it.each(["old", "missing", "invalid", "future"])("refuses %s freshness even with a healthy daemon", async (kind) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      const last_sync = kind === "old" ? new Date(Date.now() - 6 * 60_000).toISOString()
-        : kind === "future" ? new Date(Date.now() + 60_000).toISOString()
-        : kind === "invalid" ? "oxp_planted" : undefined;
-      writeFileSync(join(bin, "a/daemon.json"), JSON.stringify({
-        health: "healthy", sync: { errors: 0 }, last_sync: new Date().toISOString(),
-        project: { ledger: { status: "ok", path: join(bin, "ledger-a"), last_sync } },
-      }));
-      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/five minutes/);
-      expect(readFileSync(join(bin, "calls"), "utf8")).not.toContain("|session list");
-      const status = JSON.parse(await text("team_status", {}, brain));
-      expect(status.ledger_sync.status).toBe("external");
-      expect(status.ledger_sync.repositories[0]).toMatchObject({ repo: "acme--a", status: "unavailable", failure: "ledger-stale" });
-      expect(status.ledger_sync.repositories[1].status).toBe("available");
-      expect(JSON.stringify(status)).not.toContain("oxp_planted");
-    }, ledgerScope);
-  });
-
-  it.each(["not_cloned", "not_synced", "syncing", "error"])("refuses a ledger whose own state is %s", async (status) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "a/daemon.json"), JSON.stringify({
-        health: "healthy", project: { ledger: { status, path: join(bin, "ledger-a"), last_sync: new Date().toISOString() } },
-      }));
-      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
-      expect(readFileSync(join(bin, "calls"), "utf8")).not.toContain("|session list");
-    }, ledgerScope);
-  });
-
-  it("does not use another ledger's recent sync to authorize a read", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "a/daemon.json"), readFileSync(join(bin, "b/daemon.json")));
-      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
-      expect(readFileSync(join(bin, "calls"), "utf8")).not.toContain("|session list");
-    }, ledgerScope);
-  });
-
-  it.skipIf(process.getuid?.() === 0)("refuses an unreadable sessions directory even if ox would report an empty ledger", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      const sessions = join(bin, "ledger-a/sessions");
+  it.skipIf(process.getuid?.() === 0)("refuses an unreadable managed sessions directory even if ox would report an empty ledger", async () => {
+    await withLedgers(async (brain, bin) => {
+      const sessions = join(bin, "ox-data/sageox/sageox.ai/ledgers/repo_a/sessions");
       mkdirSync(sessions, { mode: 0o300 });
       writeFileSync(join(bin, "a/sessions.json"), JSON.stringify({
         repo_id: "repo_a", ledger_available: true, sessions: [], total: 0,
       }));
       try {
         await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
-        expect(readFileSync(join(bin, "calls"), "utf8")).not.toContain("|session list");
+        expect(calls(bin, "|session list")).toEqual([]);
       } finally {
         chmodSync(sessions, 0o700);
       }
-    }, ledgerScope);
-  });
-
-  it("refuses a response for another repository even after the selected ledger passed its probe", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "a/sessions.json"), readFileSync(join(bin, "b/sessions.json")));
-      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
-    }, ledgerScope);
+    }, managedScope);
   });
 
   it.each([
-    { repo: "/private/secret" }, { repo: "../a" }, { repo: "acme--a", limit: 0 },
-    { repo: "acme--a", limit: 21 }, { repo: "acme--a", file: "/private/secret" },
-  ])("rejects unconfigured paths and extra flags before invoking ox (%j)", async (args) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      await expect(text("team_sessions", args, brain)).rejects.toThrow();
-      expect(existsSync(join(bin, "calls"))).toBe(false);
-    }, ledgerScope);
-  });
-
-  it.each([
-    { team_id: "team_other" }, { endpoint: "https://other.example" },
-  ])("rejects a foreign project binding before invoking ox in that cwd (%j)", async (override) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "a/.sageox/config.json"), JSON.stringify({ repo_id: "repo_a", team_id: "team_x", ...override }));
-      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
-      expect(readFileSync(join(bin, "calls"), "utf8")).not.toContain(`${realpathSync(join(bin, "a"))}|`);
-    }, ledgerScope);
-  });
-
-  it("recovers when the selected checkout becomes usable, independently of a code index", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      const config = readFileSync(join(bin, "a/.sageox/config.json"));
-      rmSync(join(bin, "a/.sageox/config.json"));
-      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow();
-      writeFileSync(join(bin, "a/.sageox/config.json"), config);
-      expect(JSON.parse(await text("team_sessions", { repo: "acme--a" }, brain)).sessions).toHaveLength(1);
-      expect(readFileSync(join(bin, "calls"), "utf8")).not.toMatch(/index|code status/);
-    }, ledgerScope);
-  });
-
-  it("refuses an existing checkout whose origin no longer matches repos.conf", async () => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      execFileSync("git", ["-C", join(bin, "a"), "remote", "set-url", "origin", "https://github.com/other/repo"]);
-      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
-      expect(readFileSync(join(bin, "calls"), "utf8")).not.toContain(`${realpathSync(join(bin, "a"))}|`);
-    }, ledgerScope);
-  });
-
-  it.each([null, {}, { sessions: [], ledger_available: false }, {
-    repo_id: "repo_a", sessions: [{ name: "oxp_planted" }], ledger_available: true, total: 1,
-  }])("rejects malformed or unavailable output and degrades the ledger reading (%j)", async (response) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "a/sessions.json"), JSON.stringify(response));
-      const error = await text("team_sessions", { repo: "acme--a" }, brain).then(() => undefined, (e: Error) => e);
-      expect(error).toBeInstanceOf(Error);
-      expect(error?.message).not.toContain("oxp_planted");
-      expect(brain.readings().find((r) => r.capability === "ledger:acme--a")?.health).toBe("Unavailable");
-    }, ledgerScope);
-  });
-
-  it("expires a successful capability reading as its refresh receipt ages", async () => {
-    await withFakeOx(SCRIPT, async (brain) => {
-      await text("team_sessions", { repo: "acme--a" }, brain);
-      expect(brain.readings().find((r) => r.capability === "ledger:acme--a")?.health).toBe("Ok");
-      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60_000);
-      try {
-        expect(brain.readings().find((r) => r.capability === "ledger:acme--a")).toMatchObject({ health: "Unavailable", failure: "ledger-stale" });
-      } finally { clock.mockRestore(); }
-    }, ledgerScope);
-  });
-
-  it("does not let an older successful probe erase a newer ledger failure", async () => {
-    const held = SCRIPT.replace('"daemon status") cat ./daemon.json;;',
-      '"daemon status") if [ -f ./hold ]; then : > ./blocked; while [ ! -f ./release ]; do sleep 0.02; done; fi; cat ./daemon.json;;');
-    await withFakeOx(held, async (brain, bin) => {
-      writeFileSync(join(bin, "a/hold"), "");
-      const first = brain.ledgerStatus();
-      await until(() => existsSync(join(bin, "a/blocked")), "the first ledger probe to wait");
-      try {
-        writeFileSync(join(bin, "a/status.json"), JSON.stringify({ ledger: { configured: false, exists: false } }));
-        await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow();
-      } finally {
-        writeFileSync(join(bin, "a/release"), "");
-        await first;
+    ["kept whole", "Error: @TOKEN@ was refused\n", "Error: [REDACTED] was refused"],
+    // The token starts five characters short of the bound: cut first, it would leave `oxt_c`.
+    ["cut by the bound", `${"x".repeat(495)}@TOKEN@`, `${"x".repeat(495)}[REDA`],
+  ])("logs what a failed ox call wrote, %s, without the token that call was given", async (_, stderr, detail) => {
+    const { value: told, log } = await withLedgers(async (brain, bin) => {
+      const failures: Array<[string, () => Promise<unknown>]> = [
+        ["query-stderr", () => brain.search("team", 1)],
+        ["a/status-stderr", () => brain.sessions("acme--a", 10)],
+        ["a/session-stderr", () => brain.sessions("acme--a", 10)],
+        ["a/glance-stderr", () => brain.recent("acme--a", 72, 10)],
+      ];
+      const told: string[] = [];
+      for (const [file, lookup] of failures) {
+        writeFileSync(join(bin, file), stderr);
+        told.push(await lookup().then(() => "answered", (e: Error) => e.message));
+        rmSync(join(bin, file));
       }
-      expect(brain.readings().find((r) => r.capability === "ledger:acme--a")?.health).toBe("Unavailable");
-    }, ledgerScope);
-  });
-
-  it.each(["team_sessions", "team_recent"])("requires current credential access for %s, then picks up rotation", async (tool) => {
-    await withFakeOx(SCRIPT, async (brain, bin) => {
-      writeFileSync(join(bin, "required-token"), "oxt_rotated");
-      writeFileSync(join(bin, "secret"), "oxt_revoked");
-      await expect(text(tool, { repo: "acme--a" }, brain)).rejects.toThrow(/not authenticated/);
-      expect(readFileSync(join(bin, "calls"), "utf8")).not.toMatch(/\|(session list|glance)/);
-      expect(brain.readings()[0].health).toBe("Unavailable");
-      writeFileSync(join(bin, "secret"), "oxt_rotated");
-      expect(JSON.parse(await text(tool, { repo: "acme--a" }, brain)).total).toBeGreaterThan(0);
-      expect(brain.readings()[0].health).toBe("Ok");
-    }, (bin) => ({ ...ledgerScope(bin), token: () => readFileSync(join(bin, "secret"), "utf8").trim() }));
+      return told;
+    }, managedScope);
+    expect(log.split("\n").filter((line) => line.startsWith("ox_failed "))).toEqual(["query", "status", "session", "glance"]
+      .map((verb) => `ox_failed verb="${verb}" class=failed detail=${JSON.stringify(detail)}`));
+    expect(log).not.toContain("oxt_current");
+    expect(told).toEqual([`ox query: ${OX_FAILURE_TEXT.failed}`, expect.stringMatching(/ledger could not be verified/),
+      `ox session: ${OX_FAILURE_TEXT.failed}`, `ox glance: ${OX_FAILURE_TEXT.failed}`]);
   });
 });
 

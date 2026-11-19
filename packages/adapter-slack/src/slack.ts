@@ -1,6 +1,6 @@
 import { ConsoleLogger } from "@slack/logger";
 import { SocketModeClient } from "@slack/socket-mode";
-import { WebClient } from "@slack/web-api";
+import { WebClient, type FetchFunction } from "@slack/web-api";
 import type {
   ActorRef,
   ChannelDecl,
@@ -82,11 +82,19 @@ export interface SlackApiClient {
     cursor?: string;
     limit?: number;
   }): Promise<SlackHistoryPage>;
+  /**
+   * `latest` is exclusive, as Slack takes it: a message at exactly that `ts` is not returned.
+   *
+   * `once` is for a read that must not wait: one attempt, a rate limit rejected rather than
+   * waited out, and nothing else held up behind it. The thread-ownership lookup uses it.
+   */
   replies(args: {
     channel: string;
     ts: string;
     oldest: string;
+    latest?: string;
     cursor?: string;
+    once?: boolean;
   }): Promise<SlackHistoryPage>;
   /** Who a member id is, or `undefined` when Slack will not say. */
   user(id: string): Promise<SlackUser | undefined>;
@@ -116,6 +124,20 @@ export interface SlackAdapterOptions {
   channels: readonly ChannelDecl[];
   /** Resume point persisted by the CLI; Slack timestamps are Unix seconds. */
   since?: number;
+  /**
+   * Wake on an untagged reply in a thread this agent has posted in. Off unless set.
+   *
+   * Without it a channel thread works like any channel message: someone has to tag the bot
+   * again on every reply, even in the thread it started or answered in. With it, a person's
+   * reply there is a direct address the way a DM is — unless it tags somebody else and not
+   * this bot, which addresses them. Another agent's reply still has to tag: two agents that
+   * woke on each other's untagged replies would talk until a cap stopped them.
+   *
+   * A thread anyone else started and the agent never posted in stays mention-only. It also
+   * needs the app subscribed to `message.channels` (and `message.groups` for private
+   * channels), which is how an untagged message reaches this adapter at all.
+   */
+  wakeInOwnThreads?: boolean;
   api?: SlackApiClient;
   socket?: SlackSocketClient;
 }
@@ -172,19 +194,61 @@ const MAX_HISTORY_PAGES = 5;
  * caller's `limit` had it backwards — a small ask made small pages, so the notices that a
  * page can be made of were more likely to fill it, not less.
  *
- * **It is a ceiling, and on some installations a distant one.** Slack cut non-Marketplace
- * distributed apps to 1 request per minute and 15 objects per request for this endpoint —
- * new installs from 2025-05-29, and every such install from 2026-03-03. An internal
- * customer-built app, which is what `docs/guide/chat-surfaces.md` walks an operator
- * through, is unaffected and still serves a thousand. So a page here comes back anywhere
- * between 15 and 200 depending on how the app was distributed, the walk has to read
- * whatever arrives rather than what it asked for, and nothing may be concluded from a page
- * being short.
+ * **It is a ceiling, and on some installations a distant one.** Slack cut apps distributed
+ * commercially outside the Marketplace to 1 request per minute and 15 objects per request for
+ * this endpoint. That covers every installation made since 2025-05-29. For earlier ones
+ * Slack's pages disagree: its legacy changelog brings them under the limit from 2026-03-03,
+ * and its current rate-limit reference exempts them. An internal customer-built app, which is
+ * what `docs/guide/chat-surfaces.md` walks an operator through, is unaffected and still serves
+ * a thousand. So a page here comes back anywhere between 15 and 200 depending on how the app
+ * was distributed, the walk has to read whatever arrives rather than what it asked for, and
+ * nothing may be concluded from a page being short.
  */
 const HISTORY_PAGE = 200;
 
 /** A dedup key only has to outlive Slack's retries and the backfill/live overlap. */
 const SEEN_LIMIT = 2_048;
+
+/**
+ * How many threads' ownership one run remembers, each way. Enough for every thread a busy
+ * agent is in over a day; one that falls out costs one `conversations.replies` to relearn.
+ */
+const THREAD_LIMIT = 2_048;
+
+/**
+ * How long one thread-ownership lookup may hold its conversation.
+ *
+ * The lookup runs inside the conversation's ordered `accept` chain, before the gateway sees
+ * the event, so every message behind it in that channel waits on it — an explicit mention
+ * included. Slack's client waits out a rate limit and retries for far longer than that wait
+ * is worth: past this, the reply is treated as untagged, which is what it was before
+ * `wakeInOwnThreads` existed. Two seconds is several `conversations.replies` round trips.
+ */
+const OWN_THREAD_LOOKUP_MS = 2_000;
+
+/**
+ * How long a channel asks Slack nothing about thread ownership after a lookup there timed
+ * out or was rate-limited.
+ *
+ * Without it every untagged reply in an unknown thread repeats the wait while Slack is slow,
+ * each holding the channel's mentions behind it. During the pause such a reply needs a tag,
+ * which is the answer a timed-out lookup gives anyway; threads already known still answer
+ * from memory, and nothing is recorded as not owned, so the thread is asked about again
+ * after.
+ */
+const OWN_THREAD_PAUSE_MS = 30_000;
+
+/** Adds to an insertion-ordered set, dropping the oldest entry once it is over `limit`. */
+function remember(set: Set<string>, key: string, limit: number): void {
+  set.delete(key);
+  set.add(key);
+  if (set.size > limit) set.delete(set.values().next().value!);
+}
+
+/** The `ts` of the thread an event sits in. Only for an event that has a `threadRoot`. */
+function rootTs(event: InboundEvent): string {
+  return parseSlackEventId(event.threadRoot!.nativeId).ts;
+}
 
 /** Reads a reply target straight off the event, which is where it was all along. */
 function contextOf(event: InboundEvent): SlackInboundContext {
@@ -212,6 +276,21 @@ export class SlackAdapter implements SurfaceAdapter {
   /** One entry per channel, for a reply with no triggering event to thread onto. */
   private readonly lastByChannel = new Map<string, SlackInboundContext>();
   private readonly seen = new Set<string>();
+  /** `wakeInOwnThreads`, as constructed. Every use of the two sets below is behind it. */
+  private readonly wakeInOwnThreads: boolean;
+  /**
+   * Threads this agent has posted in, as `channel:root ts` — learned from its own sends and
+   * posts, from its own messages arriving on the socket, and from a lookup when a reply
+   * lands in a thread it has no answer about.
+   */
+  private readonly ownThreads = new Set<string>();
+  /**
+   * Threads a lookup found it had not posted in, so the next reply there spends no call.
+   * Cleared for a thread the moment it posts there — only a post of its own can change it.
+   */
+  private readonly otherThreads = new Set<string>();
+  /** Per channel, until when no ownership lookup is made there. See `OWN_THREAD_PAUSE_MS`. */
+  private readonly ownerReadsPaused = new Map<string, number>();
   /**
    * Member id to name, filled as messages mention people and never expired. A rename goes
    * unnoticed until restart — the alternative, `users.list` at boot, spends a whole
@@ -271,6 +350,7 @@ export class SlackAdapter implements SurfaceAdapter {
       opts.channels.flatMap((channel) => (channel.name ? [[channel.id, channel.name]] : [])),
     );
     this.since = opts.since;
+    this.wakeInOwnThreads = opts.wakeInOwnThreads ?? false;
     this.api = opts.api ?? new WebSlackApi(opts.botToken);
     this.socket =
       opts.socket ??
@@ -385,6 +465,7 @@ export class SlackAdapter implements SurfaceAdapter {
     const threadTs =
       target.threadTs ?? (this.dmChannels.has(channel.id) ? undefined : target.eventTs);
     await this.api.postMessage({ channel: channel.id, text, threadTs });
+    if (threadTs) this.postedIn(channel.id, threadTs);
   }
 
   postTargets(): ChannelRef[] {
@@ -424,6 +505,9 @@ export class SlackAdapter implements SurfaceAdapter {
       text: address(mentions) + text,
       threadTs: root?.ts,
     });
+    // A top-level post is the root of the thread its answers will start.
+    const thread = root?.ts ?? ts;
+    if (thread) this.postedIn(channel.id, thread);
     return ts ? { surface: SLACK_SURFACE, nativeId: slackEventId(channel.id, ts) } : undefined;
   }
 
@@ -438,6 +522,30 @@ export class SlackAdapter implements SurfaceAdapter {
    */
   async readThread(root: EventRef, limit?: number): Promise<readonly ThreadReply[]> {
     if (!this.started) throw new Error("SlackAdapter.start() must be called before readThread()");
+    const at = this.threadAt(root);
+    const replies = await this.threadLines(at, (ts) => ts !== at.ts);
+    return limit === undefined ? replies : replies.slice(0, limit);
+  }
+
+  /**
+   * The thread an inbound message is in, up to it — the same walk, keeping the parent and
+   * cutting at the message's own `ts`, which is exact where the ISO `ts` on a line is not.
+   */
+  async readThreadBefore(
+    event: InboundEvent,
+    signal?: AbortSignal,
+  ): Promise<readonly ThreadReply[]> {
+    if (!this.started) {
+      throw new Error("SlackAdapter.start() must be called before readThreadBefore()");
+    }
+    if (!event.threadRoot) return [];
+    const at = this.threadAt(event.threadRoot);
+    const before = parseSlackEventId(event.id.nativeId).ts;
+    return this.threadLines(at, (ts) => Number(ts) < Number(before), before, signal);
+  }
+
+  /** Where a thread root is, refusing one outside the conversations this adapter serves. */
+  private threadAt(root: EventRef): { channel: string; ts: string } {
     if (root.surface !== SLACK_SURFACE) {
       throw new Error(`a ${root.surface} thread root names no Slack thread`);
     }
@@ -447,32 +555,50 @@ export class SlackAdapter implements SurfaceAdapter {
         "a Slack thread root must name a message in a conversation this agent serves",
       );
     }
+    return at;
+  }
 
-    const messages = await this.collect((cursor) =>
-      this.api.replies({ channel: at.channel, ts: at.ts, oldest: "0", cursor }),
+  /**
+   * One thread's messages whose `ts` passes `keep`, oldest first, as lines read back.
+   *
+   * `latest` stops the walk there, so a read cut at a message does not page through what came
+   * after it. `keep` is still what the result is held to. A fired `signal` stops the walk at its
+   * next page and the name lookups at their next message.
+   */
+  private async threadLines(
+    at: { channel: string; ts: string },
+    keep: (ts: string) => boolean,
+    latest?: string,
+    signal?: AbortSignal,
+  ): Promise<ThreadReply[]> {
+    const messages = await this.collect(
+      (cursor) =>
+        this.api.replies({
+          channel: at.channel,
+          ts: at.ts,
+          oldest: "0",
+          ...(latest ? { latest } : {}),
+          cursor,
+        }),
+      () => !signal?.aborted,
     );
 
     // Sorted on the Slack `ts` rather than the ISO string it becomes: `ts` carries
     // microseconds and the ISO form is truncated to milliseconds, so two replies inside one
     // millisecond would tie and come back in whatever order the pages happened to arrive.
     const ordered = messages
-      .filter((message) => message.ts !== at.ts)
+      .filter((message) => keep(message.ts ?? ""))
       .sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0));
     // The same directory the inbound path fills, filled the same way before rendering.
     // Sharing the map without sharing the lookup is what makes one mention read two ways
     // depending on which door it came through — and a probe tallying replies is exactly
     // the caller that would then disagree with the channel it is reading.
-    for (const message of ordered) await this.learnNames(message.text ?? "");
+    for (const message of ordered) {
+      signal?.throwIfAborted();
+      await this.learnNames(message.text ?? "");
+    }
 
-    const replies = ordered
-      .flatMap((message) => {
-        const event = toSlackInboundEvent(
-          { ...message, type: message.type ?? "message", channel: at.channel },
-          this.normalizeOptions(),
-        );
-        return event ? [{ author: event.author, text: event.text, ts: event.ts }] : [];
-      });
-    return limit === undefined ? replies : replies.slice(0, limit);
+    return ordered.flatMap((message) => this.toChannelLine(message, at.channel) ?? []);
   }
 
   /**
@@ -822,8 +948,20 @@ export class SlackAdapter implements SurfaceAdapter {
     // is a name the brain never saw.
     await this.learnNames(message.text ?? "");
     if (generation !== this.generation) return;
-    const normalized = toSlackInboundEvent(message, this.normalizeOptions());
+    let normalized = toSlackInboundEvent(message, this.normalizeOptions());
     if (!normalized) return;
+    // A duplicate is dropped before the ownership lookup below, not after it: a Slack retry
+    // or the backfill/live overlap of a reply whose first lookup failed must not spend a
+    // second `conversations.replies` read only to be discarded.
+    if (this.seen.has(normalized.id.nativeId)) return;
+    if (this.wakeInOwnThreads && normalized.author.isSelf) {
+      // Its own message, however it got here — this process, another one posting as the
+      // same bot, or a backfill. A top-level one roots the thread its answers start.
+      this.postedIn(message.channel, normalized.threadRoot ? rootTs(normalized) : message.ts!);
+    } else if (this.wakeInOwnThreads && (await this.repliedToMe(normalized, message, generation))) {
+      normalized = { ...normalized, mentionsMe: true };
+    }
+    if (generation !== this.generation) return;
 
     const key = normalized.id.nativeId;
     if (this.seen.has(key)) return;
@@ -840,6 +978,130 @@ export class SlackAdapter implements SurfaceAdapter {
       this.lastByChannel.set(normalized.channel.id, context);
     }
     this.onEvent?.(normalized);
+  }
+
+  /** Records that this agent has posted in a thread, when it was asked to care. */
+  private postedIn(channel: string, rootTs: string): void {
+    if (!this.wakeInOwnThreads) return;
+    const key = slackEventId(channel, rootTs);
+    this.otherThreads.delete(key);
+    remember(this.ownThreads, key, THREAD_LIMIT);
+  }
+
+  /**
+   * Whether an untagged message is a person's reply in a thread this agent has posted in —
+   * the one case `wakeInOwnThreads` adds to the wake rule.
+   *
+   * Everything cheap is decided first, so the lookup is spent only on a reply that would
+   * wake if the answer is yes. A reply that tags somebody else and not this bot is talking
+   * to them. Another agent still has to tag, so two agents cannot wake each other forever.
+   */
+  private async repliedToMe(
+    event: InboundEvent,
+    message: SlackMessage,
+    generation: number,
+  ): Promise<boolean> {
+    if (event.mentionsMe || !event.threadRoot) return false;
+    if (event.author.isAgent) return false;
+    if (addressesSomeoneElse(message.text ?? "", this.botUserId)) return false;
+    return this.ownsThread(message.channel!, rootTs(event), generation);
+  }
+
+  /**
+   * Whether this agent has posted in a thread, asking Slack only when nothing here knows.
+   *
+   * A restart forgets every thread it was in, and a reply in one of those must not go deaf
+   * until somebody tags the bot again — so an unknown thread is read and the answer kept. A
+   * lookup that fails, or runs past {@link OWN_THREAD_LOOKUP_MS}, is not kept and answers
+   * no: the reply then needs a tag, which is what it needed before this option existed. It
+   * is logged either way, so an unreadable thread is not mistaken for one the agent never
+   * joined.
+   */
+  private async ownsThread(channel: string, root: string, generation: number): Promise<boolean> {
+    const key = slackEventId(channel, root);
+    if (this.ownThreads.has(key)) return true;
+    if (this.otherThreads.has(key)) return false;
+
+    const paused = this.ownerReadsPaused.get(channel);
+    if (paused !== undefined) {
+      if (paused > Date.now()) return false;
+      this.ownerReadsPaused.delete(channel);
+    }
+
+    const where = `surface=${SLACK_SURFACE} channel=${channel} thread=${root}`;
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const lookup = this.findOwnPost(channel, root, () => !expired && generation === this.generation);
+    const deadline = new Promise<"expired">((resolve) => {
+      timer = setTimeout(() => resolve("expired"), OWN_THREAD_LOOKUP_MS);
+    });
+    let found: boolean | undefined | "expired";
+    try {
+      found = await Promise.race([lookup, deadline]);
+    } catch (error) {
+      // The reason is Slack's own error code, or the client's: a closed vocabulary, never the
+      // message text, never the token.
+      const reason = slackTimedOut(error) ? "timeout" : slackFailure(error);
+      const slow = reason === "timeout" || reason === "ratelimited" ||
+        reason === "slack_webapi_rate_limited_error";
+      const pause = slow ? this.pauseOwnerReads(channel, generation) : "";
+      console.warn(`thread_owner_read_failed ${where} reason=${JSON.stringify(reason)}${pause}`);
+      return false;
+    } finally {
+      // Whichever won, nothing reads another page: a lookup nobody waits on would only spend
+      // Slack's quota on an answer nobody reads.
+      expired = true;
+      clearTimeout(timer);
+    }
+    if (found === "expired") {
+      console.warn(
+        `thread_owner_read_failed ${where} reason="timeout" ms=${OWN_THREAD_LOOKUP_MS}` +
+          this.pauseOwnerReads(channel, generation),
+      );
+      return false;
+    }
+    // Stopped before the last page for a reason other than an answer — a moved generation.
+    if (found === undefined || generation !== this.generation) return false;
+    if (found) remember(this.ownThreads, key, THREAD_LIMIT);
+    else remember(this.otherThreads, key, THREAD_LIMIT);
+    return found;
+  }
+
+  /**
+   * Stops ownership lookups in `channel` for {@link OWN_THREAD_PAUSE_MS}, and says so for the
+   * log line — unless the lookup belongs to a run that has ended, which has no say over the
+   * run serving now.
+   */
+  private pauseOwnerReads(channel: string, generation: number): string {
+    if (generation !== this.generation) return "";
+    this.ownerReadsPaused.set(channel, Date.now() + OWN_THREAD_PAUSE_MS);
+    return ` paused_ms=${OWN_THREAD_PAUSE_MS}`;
+  }
+
+  /**
+   * Pages a thread until a post of this agent's turns up.
+   *
+   * `true` at the first page holding one, without reading the rest — and without a later
+   * page's failure discarding it. `false` only once the cursor has run out, which is the one
+   * answer worth keeping as "never posted here". `undefined` when `live` stopped the walk
+   * first, which is no answer at all.
+   */
+  private async findOwnPost(
+    channel: string,
+    root: string,
+    live: () => boolean,
+  ): Promise<boolean | undefined> {
+    let cursor: string | undefined;
+    do {
+      const page = await this.api.replies({ channel, ts: root, oldest: "0", cursor, once: true });
+      const mine = (page.messages ?? []).some(
+        (m) => m.user === this.botUserId || (!!this.botId && m.bot_id === this.botId),
+      );
+      if (mine) return true;
+      cursor = page.nextCursor || undefined;
+      if (cursor && !live()) return undefined;
+    } while (cursor);
+    return false;
   }
 
   /** What the privacy answers resolved at startup amount to. Only valid once `started`. */
@@ -904,8 +1166,9 @@ export class SlackAdapter implements SurfaceAdapter {
    *
    * Two Slack facts shape this. `conversations.history` returns thread parents but never
    * their replies, and this agent answers *in* threads — so a threaded mention is exactly
-   * the kind most likely to be missed. And both endpoints page newest-first, so sorting a
-   * single page restores nothing: the whole gap is collected before any of it is replayed.
+   * the kind most likely to be missed. And the two endpoints page in opposite directions,
+   * history newest first and replies oldest first, so the pages of a gap arrive in no one
+   * order: the whole gap is collected and sorted before any of it is replayed.
    *
    * What remains missed is a reply under a parent older than the cursor. That parent is
    * outside the history window, and Slack offers no way to enumerate the threads that
@@ -913,25 +1176,44 @@ export class SlackAdapter implements SurfaceAdapter {
    */
   private async backfill(oldest: number, session: number): Promise<void> {
     const live = () => session === this.generation;
+    // A refusal no restart will change costs the read it refused, not the launch: `start`
+    // rethrows, so `not_in_channel` from one channel the app was never invited to stopped
+    // the agent on every restart. Anything else still throws, so the next start retries.
+    const skip = (error: unknown, where: string): void => {
+      if (!live() || !PERMANENT_READ_FAILURES.has(slackErrorCode(error) ?? "")) throw error;
+      console.warn(
+        `backfill_read_failed surface=${SLACK_SURFACE} ${where} ` +
+          `reason=${JSON.stringify(slackFailure(error))}`,
+      );
+    };
     // Built before the walk it guards: enumerating DMs pages too, and a `stop` landing in
     // the middle of that is the same waste as one landing in the middle of a history page.
     for (const channel of [...this.allowedChannels, ...(await this.directChannels(live))]) {
       if (!live()) return;
-      const parents = await this.collect(
-        (cursor) => this.api.history({ channel, oldest: String(oldest), cursor }),
-        live,
-      );
+      // Filled page by page, so a read refused partway still replays what it got.
+      const missed: SlackMessage[] = [];
+      try {
+        await this.collect(
+          (cursor) => this.api.history({ channel, oldest: String(oldest), cursor }),
+          live,
+          missed,
+        );
+      } catch (error) {
+        skip(error, `channel=${channel}`);
+      }
 
-      const missed = [...parents];
-      for (const parent of parents) {
+      for (const parent of [...missed]) {
         if (!live()) return;
         if (!hasRepliesSince(parent, oldest)) continue;
-        missed.push(
-          ...(await this.collect(
+        try {
+          await this.collect(
             (cursor) => this.api.replies({ channel, ts: parent.ts!, oldest: String(oldest), cursor }),
             live,
-          )),
-        );
+            missed,
+          );
+        } catch (error) {
+          skip(error, `channel=${channel} thread=${parent.ts}`);
+        }
       }
 
       // `conversations.replies` can hand back the thread parent whatever `oldest` says, so
@@ -979,16 +1261,19 @@ export class SlackAdapter implements SurfaceAdapter {
   }
 
   /**
-   * Drains one cursor-paged endpoint. Slack pages backwards in time; the caller sorts.
+   * Drains one cursor-paged endpoint. History pages newest first and replies oldest first, so
+   * the caller sorts.
    *
-   * `live` is asked between pages, so a walk whose run has ended stops. A backfill passes
-   * it; a thread read does not, being a caller's request rather than background work.
+   * `live` is asked between pages, so a walk nobody is waiting on stops: a backfill's, once
+   * its run has ended, and a thread read's, once the gateway has stopped waiting for it.
+   * Pages are appended to `messages` as they arrive, so a caller that passes its own array
+   * keeps what was read before a later page failed.
    */
   private async collect(
     page: (cursor?: string) => Promise<SlackHistoryPage>,
     live: () => boolean = () => true,
+    messages: SlackMessage[] = [],
   ): Promise<SlackMessage[]> {
-    const messages: SlackMessage[] = [];
     let cursor: string | undefined;
     do {
       const result = await page(cursor);
@@ -1077,9 +1362,27 @@ export function privacyOf(
  */
 export class WebSlackApi implements SlackApiClient {
   private readonly client: WebClient;
+  /**
+   * The same token on a client of its own, for a read asked for `once`.
+   *
+   * Its own because `WebClient` answers a 429 by pausing its whole request queue until the
+   * `Retry-After` has passed: a rate-limited read on the shared client would hold the name
+   * lookups and `chat.postMessage` behind it even after its caller had stopped waiting. This
+   * one rejects a rate limit at once, tries once, and gives up on a slow answer at
+   * {@link OWN_THREAD_LOOKUP_MS}.
+   */
+  private readonly once: WebClient;
 
-  constructor(botToken: string) {
-    this.client = new WebClient(botToken);
+  /** `fetch` replaces the network, for a test; nothing in production passes it. */
+  constructor(botToken: string, opts: { fetch?: FetchFunction } = {}) {
+    const transport = opts.fetch ? { fetch: opts.fetch } : {};
+    this.client = new WebClient(botToken, transport);
+    this.once = new WebClient(botToken, {
+      ...transport,
+      rejectRateLimitedCalls: true,
+      retryConfig: { retries: 0 },
+      timeout: OWN_THREAD_LOOKUP_MS,
+    });
   }
 
   async authTest(): Promise<{ userId?: string; botId?: string }> {
@@ -1137,12 +1440,15 @@ export class WebSlackApi implements SlackApiClient {
     channel: string;
     ts: string;
     oldest: string;
+    latest?: string;
     cursor?: string;
+    once?: boolean;
   }): Promise<SlackHistoryPage> {
-    const response = await this.client.conversations.replies({
+    const response = await (args.once ? this.once : this.client).conversations.replies({
       channel: args.channel,
       ts: args.ts,
       oldest: args.oldest,
+      ...(args.latest ? { latest: args.latest } : {}),
       ...(args.cursor ? { cursor: args.cursor } : {}),
     });
     return {
@@ -1265,6 +1571,19 @@ const PERMANENT_NAME_FAILURES = new Set([
   "account_inactive",
 ]);
 
+/**
+ * `conversations.history` and `conversations.replies` refusals that no restart changes: the
+ * app is not in the conversation, the conversation or thread is gone, or the token may not
+ * read it. Deliberately short, like {@link PERMANENT_NAME_FAILURES}: `invalid_cursor`,
+ * `internal_error` and a network fault fail the backfill, so the next start retries the gap.
+ */
+const PERMANENT_READ_FAILURES = new Set([
+  "not_in_channel",
+  "channel_not_found",
+  "thread_not_found",
+  "missing_scope",
+]);
+
 function isPermanentNameFailure(error: unknown): boolean {
   const code = slackErrorCode(error);
   return code !== undefined && PERMANENT_NAME_FAILURES.has(code);
@@ -1277,6 +1596,38 @@ function isPermanentNameFailure(error: unknown): boolean {
 function slackErrorCode(error: unknown): string | undefined {
   const code = (error as { data?: { error?: unknown } } | null)?.data?.error;
   return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * What a failed Web API call may say about itself on a log line: Slack's error code, or the
+ * client's own (`slack_webapi_request_error`, `slack_webapi_rate_limited_error`, …). Both
+ * are closed vocabularies. A message is prose that can carry anything, so it is not used.
+ */
+function slackFailure(error: unknown): string {
+  const client = (error as { code?: unknown } | null)?.code;
+  return slackErrorCode(error) ?? (typeof client === "string" ? client : "unknown");
+}
+
+/**
+ * Whether a Web API call failed by running out of time: the client's own `timeout`, which
+ * it reports as a request error wrapping the `TimeoutError` its `AbortSignal` rejected with.
+ */
+function slackTimedOut(error: unknown): boolean {
+  const failure = error as { code?: unknown; original?: { name?: unknown } } | null;
+  return failure?.code === "slack_webapi_request_error" && failure.original?.name === "TimeoutError";
+}
+
+/**
+ * Whether a message tags somebody that is not this bot — a member, or a user group — and so
+ * is talking to them.
+ *
+ * A user group (`<!subteam^S…>`) counts even though it might include the bot: nothing here
+ * can tell, and a reply aimed at `@sales` is aimed at sales. A tag of the bot itself is a
+ * mention and never reaches this rule.
+ */
+function addressesSomeoneElse(text: string, botUserId: string | undefined): boolean {
+  if (slackMentionedMembers(text).some((id) => id !== botUserId)) return true;
+  return /<!subteam\^[A-Z0-9]+(?:\|[^>]*)?>/.test(text);
 }
 
 /** `already_reacted` — the one `reactions.add` failure that means the call succeeded. */

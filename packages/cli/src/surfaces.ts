@@ -30,6 +30,12 @@ const SlackSurfaceSchema = z.object({
   appToken: z.string().min(1),
   /** Channels to listen and reply in. None means it answers DMs only. */
   channels: z.array(ChannelSchema).default([]),
+  /**
+   * Wake on a person's untagged reply in a thread this agent has posted in. Off unless set;
+   * needs the app subscribed to `message.channels` / `message.groups`. See
+   * `SlackAdapterOptions.wakeInOwnThreads`.
+   */
+  wakeInOwnThreads: z.boolean().optional(),
 });
 
 export interface BuildOptions {
@@ -131,6 +137,7 @@ export async function buildAdapters(
             appToken,
             channels: cfg.channels,
             since: opts.since?.slack,
+            wakeInOwnThreads: cfg.wakeInOwnThreads,
           }),
         );
         break;

@@ -205,13 +205,52 @@ Create a Slack app, enable **Socket Mode**, and create an app-level token with
   every mention keeps rendering as its id, which is what it did before.
 - the matching history and read scopes for the conversations you configure
   (`channels:history`/`channels:read`, `groups:history`/`groups:read`,
-  `im:history`/`im:read`, or `mpim:history`/`mpim:read`)
+  `im:history`/`im:read`, or `mpim:history`/`mpim:read`). The history scope is also how the
+  agent reads the thread it was mentioned in.
 
 Subscribe the bot to `app_mention` and `message.im`, invite it into each channel, then run:
 
 ```bash
 sageox-agent surface slack --channels C0123,G0456 --private-channels G0456
 ```
+
+**Replies in its own threads, without a tag.** By default a thread is like the rest of the
+channel: every reply has to tag the bot again, even in a thread the bot started or answered
+in. Set `wakeInOwnThreads: true` on the Slack surface, and also subscribe the app to
+`message.channels` (and `message.groups` for private channels), and a person's untagged
+reply in a thread the bot has posted in wakes it the way a DM does:
+
+```yaml
+surfaces:
+  - kind: slack
+    identity: SLACK_BOT_TOKEN
+    appToken: SLACK_APP_TOKEN
+    channels: [{ id: C0LEADS, reply: public }]
+    wakeInOwnThreads: true
+```
+
+What still needs a tag:
+
+- A reply in a thread the bot never posted in. Someone else's conversation stays theirs.
+- A reply that tags somebody else and not the bot, or tags a user group such as `@sales`.
+  It is talking to them.
+- A reply from another agent. Two agents that woke on each other's untagged replies would
+  talk until a rate cap stopped them.
+
+The bot knows which threads are its own from what it posts, and from its own messages as
+they arrive. After a restart it knows none of them, so the first untagged reply in a thread
+it has no answer about costs a `conversations.replies` read, and the answer is kept. The
+read stops at the first page that shows a post of the bot's, and gives up after two seconds,
+because messages behind it in that channel wait for it. It runs on a Slack client of its
+own that rejects a rate limit rather than waiting it out, so a rate-limited read cannot
+pause the bot's replies or name lookups. After a read times out or is rate-limited, that
+channel makes no more of these reads for 30 seconds: an untagged reply in a thread the bot
+does not already know needs a tag until then. If the read fails or runs out of
+time, the reply needs a tag, which is what it needed before, and the log says so with
+`thread_owner_read_failed` (channel, thread, Slack's error code or `timeout`, and
+`paused_ms` when the channel pauses). The extra
+subscription also means every message in its channels reaches the adapter. Only the ones
+above wake the agent. The rest are dropped exactly as an untagged message is today.
 
 The command asks for the `xoxb-` bot token and `xapp-` Socket Mode token with hidden input,
 stores them as `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`, and adds only their references to
@@ -416,6 +455,13 @@ which DMs are open so it can do the same for those. Two gaps remain: a reply und
 older than the cursor stays missed — that parent is outside the history window, and Slack
 cannot enumerate the threads that moved in a period — and, without `im:read`, every DM,
 since the adapter then has no list of them until they speak.
+
+A read Slack refuses for good costs only what it refused, a channel's gap or one thread's
+replies, and is logged as `backfill_read_failed` with Slack's error code: `not_in_channel`
+for a public channel nobody invited the app to, `channel_not_found` for a private one,
+`thread_not_found` for a deleted thread, `missing_scope` for one the token may not read. Any
+other failure while reading channel history or thread replies still stops the start, so the
+next one retries that gap.
 
 ### Publish its face on Slack
 
@@ -627,6 +673,30 @@ of carrying them, so it takes either spelling — `:tada:`, `tada`, or one of th
 characters the adapter knows a name for — and refuses a character it cannot name rather
 than letting Slack reject it with `invalid_name`.
 
+### A mention in a thread brings the thread
+
+A message posted in a thread arrives with its thread. Before the turn, the gateway reads the
+thread up to that message, starting with the message that opened it. The brain gets it above
+the message, fenced as untrusted like the message, with the agent's own earlier replies marked
+as its own. There is nothing to configure on either surface: on Slack it is one
+`conversations.replies` walk under the history scope above, and on Buzz two reads of the relay
+the agent is already connected to. What was said in the channel outside the thread is not
+included; that is `read_channel`, below.
+
+Everyone who wrote in the thread reaches the brain, not only the people `respondTo` lets wake
+it. An owner-only agent still answers only its owner, and it reads what anyone else wrote in
+the thread it was asked in, as data.
+
+A thread over 200 messages is handed over as its first message and the most recent 199, and
+the brain is told how many were left out. A read that fails, or has not finished in 10
+seconds, costs the thread and not the answer: the brain is told the thread could not be read,
+and the log says why.
+
+```text
+thread_read surface=slack channel=C0123 event=C0123:1790000180.000400 messages=3 ms=212
+thread_read_failed surface=slack channel=C0123 event=C0123:1790000240.000500 ms=10001 error="the thread read did not finish in 10000ms"
+```
+
 ### Let the agent read the surface it is on
 
 Everything above is the agent speaking. There are three questions it eventually gets asked
@@ -702,13 +772,17 @@ an id. On Buzz they are reads of the same relay socket the agent is already auth
 on. Either way the credential never leaves the gateway.
 
 One Slack quota is worth knowing before you rely on `read_channel`. Slack restricts
-`conversations.history` for apps **distributed commercially outside the Marketplace** to one
-request per minute returning at most 15 messages — new installations since 2025-05-29, and
-every such installation since 2026-03-03. The app the setup above walks you through is an
-*internal* one built for your own workspace, which is not affected and still serves a
-thousand messages a request. If your agent runs on an unlisted distributed app instead,
-`read_channel` still works and is simply slow and shallow, and `limit` behaves as the
-ceiling it is documented to be: you will often get fewer messages than you asked for.
+`conversations.history` and `conversations.replies` for apps **distributed commercially outside
+the Marketplace** to one request per minute returning at most 15 messages. That covers every
+installation made since 2025-05-29. For earlier ones Slack's pages disagree: its legacy
+changelog brings them under the limit from 2026-03-03, and its current rate-limit reference
+exempts them. The app the setup above walks you through is an *internal* one built for your own
+workspace, which is not affected and still serves a thousand messages a request. If your agent
+runs on an unlisted distributed app instead, `read_channel` still works and is simply slow and
+shallow, and `limit` behaves as the ceiling it is documented to be: you will often get fewer
+messages than you asked for. A thread read that hits the same limit waits it out. After 10
+seconds the agent answers without the thread, and Slack's client holds that reply until the limit
+clears.
 
 **Ask for a period with `withinHours`, never by reading a channel and filtering it.**
 `read_channel(surface: "slack", channel: "status", withinHours: 24)` is the last day, cut by
@@ -720,6 +794,23 @@ open a window that starts after the newest message in the channel, and report th
 day the channel has had as silence. The read succeeds, the job passes, and the only artifact is a
 summary that says the opposite of the truth. The window also keeps the answer small, which
 is the difference between a result the agent reads and one it has to slice up first.
+
+A scheduled digest should not leave the read to the agent at all. A prompt job that declares
+`source` has the host make this same read before the brain is woken, so a turn that skipped
+it cannot pass — see
+[a job that reads before it speaks](../job-contract.md#a-job-that-reads-before-it-speaks).
+
+Message count is not result size. `read_channel` therefore returns compact
+`{from, text, ts}` messages rather than repeating the transport-qualified actor object on
+every line. `from` is the author's display name when the surface knows it, or the first
+twelve characters of its id followed by `…`; it is an attribution label, not an id to pass
+to another tool. A caller with a fixed context budget can also pass `maxTextChars`: each
+message's text is shortened to that many characters, and only a shortened message carries
+`truncated: true`. This does not change `more`, which still says whether older messages were
+omitted rather than whether text was shortened. The result remains valid JSON, with each
+message on its own physical line. If a brain harness spills a large answer to a file, its
+line-based reader can therefore recover it a message at a time; newlines inside message
+text are JSON-escaped and do not split a message across lines.
 
 That is why `read_channel` answers `more` beside its `messages`. A short list and a quiet
 channel are the same list, and only that field separates them — `more: true` means there

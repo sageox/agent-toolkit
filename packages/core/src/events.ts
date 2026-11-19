@@ -33,10 +33,10 @@ export interface ActorRef {
   /**
    * The name people use for this id, when the surface was asked and put one to it.
    *
-   * Presentation only, and absent on the author of a message: nothing on the inbound path
-   * looks a name up, and `SurfaceAdapter.displayName` is how one is rendered there. Filled
-   * by the reads that do ask — `listMembers` and `describeActor` — because a roster of
-   * bare ids answers nobody's question about who is in a channel.
+   * Presentation only, and absent on the author of an inbound message: nothing on that path
+   * looks a name up, and `SurfaceAdapter.displayName` is how one is rendered there. Reads
+   * fill it when they ask or already hold a vouched name; a roster or channel history of
+   * bare ids answers nobody's question about who spoke.
    */
   name?: string;
   /**

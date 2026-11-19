@@ -103,6 +103,11 @@ surface-neutral on purpose: the same agent can run on Buzz, Slack, Discord, and 
 at once, so naming its home after any one of them would be wrong. Set
 `AGENT_TOOLKIT_HOME` to move it.
 
+Initialization creates agent directories at mode `0700` (owner-only access) and enforces
+that mode when reusing an existing directory. Check the selected home's ownership,
+permissions, and ACLs, including its ancestors, so untrusted local accounts cannot traverse
+the agent directory or replace its parents.
+
 That layout means the agent data is independent of the current repository or working
 directory, and nothing an agent owns lands in the source tree. With only one agent you can
 leave the name off. The source wrapper itself is invoked from this repository root.
@@ -120,8 +125,11 @@ the profile. No credential is stored; a console agent itself needs none.
 ./bin/sageox-agent run
 ```
 
-It prompts for the key (input hidden) and writes it to `.env` at mode 600 — you never edit
-a dotfile. An existing key is kept, never overwritten.
+It prompts for the key (input hidden) and writes it to `.env` — you never edit a dotfile.
+The CLI creates the file at mode `0600` (owner-only read/write) and enforces that mode on
+the open file before writing any secret bytes, including when appending to an existing
+file. If setting permissions fails, no credential is written. An existing key is kept,
+never overwritten.
 
 **Under a service manager there is no terminal**, so instead of hanging on a prompt it
 exits naming the variable to set. Same for `run`.

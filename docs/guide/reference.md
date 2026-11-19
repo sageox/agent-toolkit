@@ -83,13 +83,21 @@ that published no record. A job that declares
 refused at the call if they do not match; they reach the body as `JOB_PARAM_<NAME>` in its
 environment. They name a **target** — which issue, which document, which environment — and
 never a behaviour: a job whose work a caller can switch is two jobs with two slugs. See
-[the job body contract](../job-contract.md). A job short enough to finish inside a turn is
-waited for and the tool answers with its verdict; a job whose `wallClockMs +
-deadlineHeadroomMs` is longer than `limits.turnTimeoutMs` is **started** instead, and the
+[the job body contract](../job-contract.md). A job short enough to finish in **what is left
+of the turn** is waited for and the tool answers with its verdict; a job whose `wallClockMs +
+deadlineHeadroomMs` is longer than that is **started** instead, and the
 tool answers with the run id and nothing that reads as a verdict — the verdict arrives later,
 posted back into the conversation that asked, in the thread it was asked in, and as the
 job's ordinary status post where `report` says. A run answered that way is announced as a
-waited-for one is, so a clean verdict is spared the channel. Give such a job a `report`
+waited-for one is, so a clean verdict is spared the channel. What is *left*, rather than
+`limits.turnTimeoutMs`: the call always arrives partway into a turn, and a scheduled turn
+that declared its own `budget.wallClockMs` was never given the manifest's number at all. So
+the same job can be waited for early in a turn and started late in one, and the tool's answer
+says which happened. With two channels mid-turn at once, the bound is the **tightest** of
+them: a `tools/call` carries nothing that says which turn it came from, and the tightest is
+the only number every live turn satisfies. An agent answering two channels can therefore
+start a job it would have waited for on a quiet one — the verdict still lands where `report`
+says, which is why that is the safe way to be wrong. Give such a job a `report`
 destination all the same: the reply can be refused by the home channel's guard, or the call
 may have arrived while no one conversation could be named, and then the post is the only
 answer — `doctor` says so when there is none. Add it with `sageox-agent mcp add jobs`, which
@@ -122,6 +130,7 @@ jobs:
     trigger: { schedules: ["0 18 * * *"], timezone: America/Los_Angeles }
     killSwitch: { failDirection: closed }
     prompt: { skill: daily-digest }           # or an inline string, for a one-liner
+    source: { surface: buzz, channel: status, withinHours: 24, empty: "Nothing in status today." }
     report: { surface: slack, channel: "C0123456789" }
 ```
 
@@ -129,6 +138,15 @@ Reach for it when the work needs the brain and no write credential — a daily d
 surface's channel posted on another, a reminder into a channel, *check X with your tools
 and post what you find*. Reach for `run:` when the work is deterministic, needs a
 credential, or is long.
+
+A digest declares `source`, and then the host does the read, not the brain. A turn's words
+prove only that it finished, so a turn left to read for itself can skip the read, post an
+excuse, and still record a pass. With `source`, the host reads the window first, posts
+`empty` itself when the window held nothing, and hands the messages to a sealed turn: its own
+session, holding no tools at all. (`source` needs the `claude-acp` brain — see the contract.)
+It posts that turn's answer only when the answer is a digest of those messages, and the run
+passes only when every one of those steps succeeded. See
+[a job that reads before it speaks](../job-contract.md#a-job-that-reads-before-it-speaks).
 
 The tick posts at top level in `report.channel`, through the same guard the brain's own
 `post_message` clears; an empty reply posts nothing. The kill switch, `suspend`, `doctor`,
@@ -163,9 +181,29 @@ past the call you were looking for.
 
 | `outcome` | What happened |
 |---|---|
-| `ok` | The tool ran and answered. |
+| `ok` | The tool ran and answered. Whether anyone was still listening is a separate question — see `tool_call_stranded` below. |
 | `refused` | A gate stopped it before it ran — the tool policy, or a write tool that is not armed. `reason` names the rule. |
 | `failed` | It ran and did not work. `reason` is what it said. |
+
+One more line is written about tool calls, by the gateway rather than by the call:
+
+```
+tool_call_stranded tool="mcp__jobs__job_run" ms=87762
+```
+
+Every turn this process was running has ended and that call is still going. Nothing here cancels it, so it finishes
+and writes its own `tool_call` line whenever it lands — reading `ok` if it worked, because
+from the call's side it did. Nobody read the answer. Read it against the `turn_done` and
+`turn_failed` lines immediately above it.
+
+**No turn ids, deliberately.** A `tools/call` carries nothing that says which turn made it,
+so with two channels mid-turn there is no way to tell whose call is whose; a line naming the
+turn that happened to finish last would point at a turn that never made the call. What is
+left is the claim this can check — the call is running and nothing is left to hear it — and
+that is why it waits for the last turn to end rather than the first. A call stranded while
+another channel is still busy is named later than it happened, and one that lands inside
+that window is not named at all. Each call is named at most once, however many turns it
+outlives.
 
 **A refusal is the line to watch.** One means a bundle is misconfigured — the tool is in
 the manifest and not in the policy, and `doctor` will name it. A stream of them, on an
@@ -198,9 +236,14 @@ retention and no shipping: it goes to the gateway's stream beside `turn_start` a
 
 ## The team brain's credential
 
-`ox` has no interactive login in a container, so it takes a **personal access token** in
-`SAGEOX_TOKEN` — its documented path for "CI/CD, headless agents, ephemeral containers."
-Create one at **https://sageox.ai/settings/tokens**; it is prefixed `oxp_` and shown once.
+The team brain authenticates to SageOx with an access token and nothing else. The gateway
+hands it to `ox` in `SAGEOX_TOKEN` — ox's documented path for "CI/CD, headless agents,
+ephemeral containers" — and never lets ox read a login from disk, so an `ox login` or an
+`auth.json` on the gateway's machine is never used. A **team access token**
+(prefixed `oxt_`, issued from the team's settings on sageox.ai) answers team search and is
+the only credential ox accepts for [ledger sync](#ledger-sync). A **personal access token**
+(prefixed `oxp_`, from **https://sageox.ai/settings/tokens**) answers team search only. Either
+is shown once.
 
 One thing to know: `doctor` checks the token with SageOx and reports its current rolling
 expiry. If SageOx rejects it, rotate the value through the deployment's secret manager. The
@@ -223,27 +266,59 @@ brains:
 
 **A token is bound to one endpoint.** ox uses it for `SAGEOX_ENDPOINT` when that is set, and
 otherwise only for `https://sageox.ai`. Against any other endpoint it is not rejected — it is
-not used, and ox falls back to `auth.json`: no credential at all, or a different identity than
-the one you configured. Team memory is on production, which is already the default, so leave
-`SAGEOX_ENDPOINT` unset unless you mean it.
+not used, and with no login on disk to fall back on, ox reports "not authenticated". Team
+memory is on production, which is already the default, so leave `SAGEOX_ENDPOINT` unset
+unless you mean it.
 
-The alternative, for a credential that renews itself, is mounting a logged-in `auth.json`:
-
-```yaml
-brains:
-  - preset: team
-    team: team_xxxxxxxx
-    configHome: /mnt/secrets-store/ox   # holds sageox/auth.json
-```
+`configHome`, which pointed ox at a mounted `auth.json`, is retired: a manifest that still sets
+it does not load. Mount a team access token as the `token` secret instead.
 
 Set `BRAIN_MCP_HOST` when the brain runs in a separate container and needs a routable
 address; it defaults to `127.0.0.1`.
 
-### Optional ledger sync
+### Ledger sync
 
-Add `ledgerSync` to the team brain to let the gateway maintain its ledger checkouts.
-Each `repo` must match a configured repository name from `team_status` / `repos list`;
-`url` is that repository's **ledger Git remote**, not its source-code remote.
+`team_sessions` and `team_recent` read a repository's ledger from a local checkout that must
+have synced within five minutes. When the policy grants either tool, the gateway syncs the
+ledger of every configured repository whose checked-in `.sageox/config.json` names this
+team. Nothing else is configured: the gateway runs `ox sync --read-only --repo <repo_id>`
+with the team brain's `token` and the agent's own `workspace/ox-data`, and ox discovers the
+ledger, authenticates to it with that token, and materializes and verifies the checkout.
+Grant neither tool and no repository syncs over the team token; `ledgerSync` repositories
+still do.
+
+It needs ox 0.17.0 or newer, which the agent base image ships; a team access token with
+access to the repository; and ledger reads enabled for the team on the SageOx endpoint.
+`team_status` tells an old ox, a refused token, and a ledger SageOx does not offer apart.
+
+Each repository syncs at startup and again a minute after each attempt ends. The first sync
+transfers every object the ledger covers, which takes most of an hour for a large ledger. It
+runs in 30-minute attempts that resume from what the last one transferred, and `team_status`
+reports the repository as `initializing` until the first sync finishes or an attempt fails
+with anything but a resumable interruption. Later refreshes take seconds to about a minute. A refused credential is not offered again until
+the mounted value changes or the gateway restarts. Any other failure is retried, and each
+attempt that fails with the same class as the one before it doubles the wait before the next,
+up to 30 minutes; a success, a different failure, or a first sync still resuming goes back to
+a minute. After fixing a failure that repeated, restart the gateway to sync at once rather than
+wait for the next attempt. A ledger whose last sync failed, or whose last
+successful sync is more than five minutes old, is refused rather than read as empty.
+
+The gateway logs one `ledger_sync` line when a repository's status or failure class changes,
+not one per attempt. For a failed attempt it names ox's failure class and ox's receipt, or,
+when ox printed no receipt, how ox exited and what it wrote.
+
+Every read first asks SageOx whether the credential mounted at that moment may read that
+exact repository, because a team token can outlive a repository's link to its team, and
+serves nothing unless SageOx confirms. It then reads through ox's guarded reader, which holds
+the checkout lock so a refresh cannot change files under it. A credential replaced while the
+read runs is checked before the result is returned. Use one gateway per data directory.
+
+#### Syncing from an explicit Git remote
+
+A repository listed under `ledgerSync` is pulled from that ledger Git remote with a separate
+Git credential instead of syncing over the team token. Each `repo` must match a configured
+repository name from `team_status` / `repos list`; `url` is that repository's **ledger Git
+remote**, not its source-code remote.
 
 ```yaml
 brains:
@@ -261,28 +336,28 @@ brains:
 The chart's existing `agents.<name>.secrets.kubernetesSecret` or CSI mount supplies it;
 no additional Secret or chart option is needed. Multiple agents can also reference the
 same Kubernetes Secret. Reusing a key requires that its credential grants access to the
-ledger Git host. A SageOx API team token does not currently supply Git authentication;
-the same Kubernetes Secret may hold both `SAGEOX_TOKEN` and the Git credential as keys.
-Supply the Git host's required username. Omit both `username` and `token` for an anonymous
-HTTPS remote. URLs cannot contain credentials, query strings, or fragments.
+ledger Git host. Supply the Git host's required username. Omit both `username` and `token`
+for an anonymous HTTPS remote. URLs cannot contain credentials, query strings, or fragments.
 
-Omit `ledgerSync` to keep externally supervised sync. With it configured, the gateway
-refreshes once at startup and every minute after the previous cycle completes, without
-blocking agent startup or waiting for code indexing. Each Git command has a two-minute
-timeout. A failed refresh makes that ledger unavailable immediately. Authentication
-failure pauses network requests until the mounted value changes or the gateway restarts;
-other failures retry on the next cycle. File-backed credentials are reread per refresh.
-Environment-backed changes require a restart, and CSI rotation must be enabled for a
-running pod's mount to change.
+The gateway refreshes these once at startup and every minute after the previous cycle
+completes, without blocking agent startup or waiting for code indexing. Each Git command has
+a two-minute timeout. A failed refresh makes that ledger unavailable immediately.
+Authentication failure pauses network requests until the mounted value changes or the
+gateway restarts; other failures retry on the next cycle. File-backed credentials are reread
+per refresh. Environment-backed changes require a restart, and CSI rotation must be enabled
+for a running pod's mount to change.
 
-Managed checkouts live under `workspace/ox-data/sageox/sageox.ai/ledgers/<repo_id>`.
+These checkouts live under `workspace/ox-data/sageox/sageox.ai/ledgers/<repo_id>`, the
+directory team-token sync uses too. ox does not take over a checkout whose origin is not its
+own read URL, so to move a repository to team-token sync, remove its `ledgerSync` entry and
+delete that directory; the gateway then syncs it afresh.
 A cold clone is published only after checkout completes. The gateway refreshes only
 checkouts it created, serializes reads with refresh, and establishes a new successful
 receipt after each restart. It stops Git's process group and releases its ownership lock
 on graceful shutdown. After a crash, a remaining `workspace/ox-data/ledger-sync.lock`
 requires the operator to verify the previous owner has stopped before removing it.
-Use one gateway per data directory; do not point an external sync daemon at its managed
-checkouts. Existing ox local configuration must resolve to the managed path.
+Do not point an external sync daemon at these checkouts. Existing ox local configuration
+must resolve to the managed path.
 
 ## What resumes after a restart
 

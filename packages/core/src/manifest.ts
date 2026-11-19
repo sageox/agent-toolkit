@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { parse as parseYaml } from "yaml";
 import { SECRET_REF } from "./secrets.ts";
+import { formatProblems } from "./digest.ts";
+import { HistoryArgs } from "./surface-read.ts";
 
 /**
  * A name a spawned child will really see — and deliberately not the POSIX identifier
@@ -294,17 +296,17 @@ export const BrainSchema = z.discriminatedUnion("preset", [
     /** Narrow to a single repo's context. Optional. */
     repo: z.string().optional(),
     /**
-     * The secretRef holding a SageOx access token, for deployments with no `ox login`.
+     * The secretRef holding this agent's SageOx access token, its only SageOx credential:
+     * the gateway never lets ox fall back to a login on disk.
      * Defaults to `SAGEOX_TOKEN`; name another when several agents on one host each carry
      * their own. Resolved in the gateway like every other credential — the brain never
      * sees it, and the value itself never belongs in this file.
      *
      * **An env-supplied token is bound to exactly one endpoint** — `SAGEOX_ENDPOINT` when
      * set, otherwise `https://sageox.ai`. Point ox at any other host and the token is not
-     * rejected, it is simply not used: ox falls back to whatever `auth.json` is on disk,
-     * which is either no credential at all or, worse, a different identity than the one
-     * this manifest names. There is deliberately no `endpoint` field here — team memory
-     * lives on production, which is already the default.
+     * rejected, it is simply not used, so every call fails as not authenticated. There is
+     * deliberately no `endpoint` field here — team memory lives on production, which is
+     * already the default.
      */
     token: z
       .string()
@@ -316,15 +318,18 @@ export const BrainSchema = z.discriminatedUnion("preset", [
       })
       .optional(),
     /**
-     * Where ox finds its credentials — the directory holding `sageox/auth.json`.
-     *
-     * Defaults to the process's own config home, which is right on a workstation after
-     * `ox login`. In a container there is no interactive login, so the token file is
-     * mounted as a secret and this points at it. A file, not an env var: env leaks
-     * through `docker inspect`, `/proc/<pid>/environ`, and crash dumps (§7.3).
+     * Retired: it pointed ox at a mounted `auth.json`. Refused by name rather than ignored,
+     * because an agent that authenticated through it would otherwise lose its credential
+     * without a word.
      */
-    configHome: z.string().optional(),
-    /** Optional gateway-owned, pull-only ledgers; token refs may be reused elsewhere. */
+    configHome: z.never(
+      "configHome is retired: the team brain authenticates only with the secret its `token` " +
+        "names (SAGEOX_TOKEN by default). Put a team access token (oxt_) there and remove configHome",
+    ).optional(),
+    /**
+     * Ledgers pulled from an explicit Git remote. Every other configured repository's ledger
+     * syncs over `token` when a ledger reader is granted. Token refs may be reused elsewhere.
+     */
     ledgerSync: z.array(z.strictObject({
       repo: z.string().min(1).max(200),
       url: z.url().refine((value) => {
@@ -432,6 +437,22 @@ export const McpServerSchema = z
           .min(1, "a bound argument needs at least one permitted value — an empty list refuses every call"),
       )
       .optional(),
+    /**
+     * Hand this server the live turn — the message being answered and who sent it — on every
+     * `tools/call`, under `params._meta["sageox.ai/turn"]`. Off unless written down.
+     *
+     * A tool otherwise learns who is asking only as an argument the brain fills in, copied
+     * from a header it was shown, and never learns which message it is answering at all. That
+     * is fine for a read and not for a server that records who asked for a write, or that
+     * deduplicates on the message: the brain can be talked into another id. The stamp is the
+     * gateway's own answer, from the same live-turn registry the reaction tool and the job
+     * door read, and the brain cannot set it — a value it sends under that key is replaced.
+     *
+     * Opt-in per server because it hands a third-party process a member id and a message id
+     * it never had before. A server that does not opt in receives its calls exactly as the
+     * brain sent them.
+     */
+    stampTurn: z.boolean().optional(),
   })
   .strict();
 
@@ -445,6 +466,7 @@ export function resolveMcpServer(decl: McpServerDecl): {
   env: Record<string, string>;
   secrets: Record<string, string>;
   scope: Record<string, string[]>;
+  stampTurn: boolean;
 } {
   return {
     name: decl.name,
@@ -453,6 +475,7 @@ export function resolveMcpServer(decl: McpServerDecl): {
     env: decl.env ?? {},
     secrets: decl.secrets ?? {},
     scope: decl.scope ?? {},
+    stampTurn: decl.stampTurn ?? false,
   };
 }
 
@@ -912,6 +935,36 @@ export const JobSchema = z
       ])
       .optional(),
     /**
+     * The channel window a `prompt` body summarizes, read by the host before the brain is
+     * invoked, so whether the read happened is something the host saw rather than something
+     * the brain said. See `docs/job-contract.md`, "A job that reads before it speaks".
+     *
+     * `read_channel`'s own arguments and bounds, with the window required: without one an
+     * empty read is a fact about the channel's whole history, not about a period. `empty` is
+     * what is posted, with no turn at all, when the whole window was read and held nothing.
+     *
+     * The rest is the digest's layout, which is the job's: `title` is posted first, `line` once
+     * per item, and `quiet` after a whole read when some author got no line. The host fills
+     * in only what it checked — `{text}`, `{authors}` of the messages a line cites, `{author}`
+     * under `byAuthor`, and the quiet `{authors}` — and refuses any other field at load.
+     * `byAuthor` makes every line one author's and no author's twice. The default `line` is
+     * the layout from before there was one to choose.
+     */
+    source: HistoryArgs.required({ withinHours: true })
+      .extend({
+        empty: z.string().trim().min(1),
+        title: z.string().trim().min(1).optional(),
+        line: z.string().trim().min(1).default("• {text} — {authors}"),
+        quiet: z.string().trim().min(1).optional(),
+        byAuthor: z.boolean().default(false),
+      })
+      .superRefine((source, ctx) => {
+        for (const [field, problem] of formatProblems(source)) {
+          ctx.addIssue({ code: "custom", message: problem, path: [field] });
+        }
+      })
+      .optional(),
+    /**
      * Values a caller may hand one run of this job, by name. See {@link JobParameterSchema}.
      *
      * The default is none, and none is the safe default: a job that declares no parameters
@@ -1062,6 +1115,13 @@ export const JobSchema = z
           ["budget"],
         );
       }
+      if (job.source) {
+        refuse(
+          `job "${job.slug}" declares a \`run\` body, so it declares no \`source\` — the host ` +
+            "reads one only for a `prompt` body; a process body reads through `report.history`",
+          ["source"],
+        );
+      }
       return;
     }
 
@@ -1092,13 +1152,14 @@ export const JobSchema = z
       [
         "report.history",
         job.report?.history,
-        "the brain reads the channel with its own read tools",
+        "the brain reads a channel with its own read tools, and the host reads one named as " +
+          "`source`",
       ],
       [
         "report.proven",
         job.report?.proven !== undefined,
-        "it renders the threaded gate lines, and a tick mints one gate — so there is no " +
-          "thread and nothing for this to phrase",
+        "it renders the threaded gate lines, and a tick posts its headline alone — so there " +
+          "is no thread and nothing for this to phrase",
       ],
     ] as const) {
       if (declared) {
@@ -1222,6 +1283,21 @@ const ManifestSchema = z
   })
   .refine((m) => m.respondTo !== "allowlist" || (m.allowlist?.length ?? 0) > 0, {
     message: "respondTo: allowlist requires a non-empty `allowlist`",
+  })
+  // A `source` job summarizes in a turn with no tools, and only the Claude adapter can be
+  // held to that: it takes the MCP servers a session declares and switches its own tools off
+  // per session. Codex reads its MCP servers from the config written for the whole process
+  // and keeps them for a session that declares none, and it asks this client's permission
+  // for command execution, file changes and added permissions alone — never for an ordinary
+  // MCP tool call. So a turn there would keep `post_message` and could publish an answer
+  // that never passed the check, which is the failure `source` exists to close. Refused here
+  // rather than run under a guarantee it does not have.
+  .refine((m) => m.brain.provider !== "codex-acp" || m.jobs.every((job) => !job.source), {
+    message:
+      "a job declaring `source` summarizes in a turn with no tools, which the codex-acp " +
+      "brain cannot provide — its MCP servers belong to the whole process. Run this agent " +
+      "on claude-acp, or drop `source` and lose the guarantee that the digest was read",
+    path: ["jobs"],
   })
   .refine(
     (m) =>
@@ -1477,6 +1553,7 @@ export type PromptJob = JobConfig & {
   prompt: NonNullable<JobConfig["prompt"]>;
   report: NonNullable<JobConfig["report"]>;
 };
+export type JobSource = NonNullable<JobConfig["source"]>;
 
 /**
  * Narrowing, not a test: `JobSchema` already refused a job with neither body or both, and

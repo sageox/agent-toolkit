@@ -1,4 +1,12 @@
-import { writeFileSync, existsSync, appendFileSync, readFileSync, chmodSync } from "node:fs";
+import {
+  writeFileSync,
+  existsSync,
+  appendFileSync,
+  readFileSync,
+  openSync,
+  fchmodSync,
+  closeSync,
+} from "node:fs";
 
 /**
  * Appends a key to `.env` without clobbering an existing one.
@@ -11,8 +19,14 @@ export function upsertEnv(path: string, name: string, value: string): "written" 
   if (new RegExp(`^${name}=`, "m").test(existing)) return "kept";
 
   const prefix = existing.length && !existing.endsWith("\n") ? "\n" : "";
-  appendFileSync(path, `${prefix}${name}=${value}\n`);
-  chmodSync(path, 0o600); // it holds a signing key
+  const fd = openSync(path, "a", 0o600);
+  try {
+    // Restrict existing files too, before writing any secret bytes.
+    fchmodSync(fd, 0o600);
+    appendFileSync(fd, `${prefix}${name}=${value}\n`);
+  } finally {
+    closeSync(fd);
+  }
   return "written";
 }
 

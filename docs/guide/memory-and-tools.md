@@ -152,7 +152,11 @@ an owner can inspect them with a NIP-AE client, and the agent can use its MCP to
 Re-running `memory add` for a brain the agent already has re-checks its tool policy instead
 of failing. That is how an agent set up by an older release picks up a brain tool added
 since — `doctor` names the missing tool, and re-running the same `memory add` allows it. The
-existing entry itself is never rewritten.
+existing entry itself is never rewritten. A missing tool is a warning, not a failure, unless
+the policy allows none of a brain's tools, so a brain narrowed on purpose (read but not
+write) still passes `doctor`. Re-running `memory add` allows every tool again, so do not run
+it for a brain you narrowed: on the team brain, allowing `team_sessions` or `team_recent`
+also starts ledger sync.
 
 The **team** brain reaches your team's indexed knowledge through `ox`:
 `team_search` over discussions, decisions, docs, plans and assistant-chat sessions. It reads;
@@ -169,36 +173,35 @@ team tools to an existing bundle's policy.
 `team_sessions` lists up to 20 sessions (default 10) from the past seven days, newest first.
 Its `repo` argument selects a name from `team_status`, such as `acme--service`, taken from
 the existing [repository configuration](#step-7b--repository-context). It accepts no path
-or extra CLI flags. Each call verifies current team-search access, the checkout's origin
-and SageOx team/repo binding, and a matching gateway or external daemon refresh receipt. The
-receipt must be less than five minutes old; the reply includes its `last_sync` timestamp.
-Missing, stale, mismatched, and unreadable sources produce a refusal, never an empty week.
+or extra CLI flags. Each call verifies the checkout's origin and SageOx team/repo binding, a
+ledger sync less than five minutes old, and SageOx's current permission for the mounted
+credential to read that exact repository; a `ledgerSync` repository checks team-search access
+instead. The reply includes the sync's `last_sync` timestamp. Missing, stale, mismatched,
+unauthorized, and unreadable sources produce a refusal, never an empty week.
 These are separate `ledger:<repo>` capabilities; code-index readiness does not gate them.
 
 `team_recent` uses the same repository, access, and freshness checks to read recent coworker
 work updates (murmurs) and session activity. Its `hours` argument ranges from 1 to 168
 (default 72), and `limit` ranges from 1 to 20 (default 10). The reply includes `since`,
-`until`, `last_sync`, the total record count in that window, and `truncated` when the list
-was limited. Records are sorted newest first across authors and activity types; titles,
-summaries, and update text are capped at 2,000 characters with an ellipsis. The reader
-projects recorded activity; it omits ox's generated collision advice and prompt guidance.
-It always supplies an explicit time window, so reading activity does not consume history
-for subsequent tool calls. ox may still update its local glance checkpoint under the
-gateway's config home; that checkpoint does not control this tool's window.
+`until`, `work_updates_since`, `last_sync`, the total record count in that window, and
+`truncated` when the list was limited. A ledger synced over the team token holds work
+updates only for the hour of its last sync and the 11 before it. For such a ledger,
+`work_updates_since` is at most 11 hours before `until`, and no older update is listed;
+session activity still covers the whole window. Records are sorted newest first across
+authors and activity types; titles, summaries, and update text are capped at 2,000
+characters with an ellipsis. The reader projects recorded activity; it omits ox's generated
+collision advice and prompt guidance. It always supplies an explicit time window, so reading
+activity does not consume history for subsequent tool calls.
 
-Configure [optional gateway sync](reference.md#optional-ledger-sync) to clone and refresh
-ledgers using an existing Git secret reference. The gateway starts no ox daemon and exposes
-no sync/write command to the brain. Without that configuration, an operator must supervise
-ox sync against the project checkouts under `workspace/repos`, with the same
-`workspace/ox-data` data home and a successful receipt for each selected ledger.
-Live credential and deployment resource validation remain in
-[#24's acceptance](../deployment-contract.md); mounting a ledger alone does not prove freshness.
+The gateway keeps these ledgers itself, over the team brain's token, and only when the policy
+grants `team_sessions` or `team_recent` — see [ledger sync](reference.md#ledger-sync). It
+starts no ox daemon and exposes no sync or write command to the brain. A local checkout alone
+proves neither freshness nor permission.
 
-With no configured repositories, `ledger_sync.status` is `not_configured`. Otherwise it
-is `managed` when at least one repository uses gateway sync, otherwise `external`.
-Managed entries include `sync_owner: gateway`; other entries use external receipts.
-Each repository has an `available` or `unavailable` result. A failed ledger
-read leaves ordinary team search usable. `ox conversation` requires its own team-context
+With no repository to read — none configured, or neither reader granted and no
+`ledgerSync` entry — `ledger_sync.status` is `not_configured`. Otherwise it is `managed`, and each repository
+reports `available`, `initializing` while its first sync runs, or `unavailable` with the
+reason. A failed ledger read leaves ordinary team search usable. `ox conversation` requires its own team-context
 checkout and readiness check. `team_search`
 works without either checkout because `ox query` is answered server-side.
 
@@ -208,17 +211,15 @@ holding nothing but a token cannot enumerate teams — which is why the id is re
 once, and written into the manifest.
 
 **About the SageOx credential.** `memory add team` sorts it out at the time you add it,
-rather than leaving you to discover it later:
+rather than leaving you to discover it later: it asks for a SageOx access token (hidden input)
+and saves it to local `.env`. It asks even where you have run `ox login`, because the agent
+never uses your login. Use a team access token (`oxt_`) if the agent reads ledgers;
+a personal one only searches.
 
-- If you have run `ox login` on this machine, it says so and asks for nothing — ox uses its
-  own credential.
-- If not, it asks for a personal access token (hidden input) and saves it to local `.env`.
-
-Either way a **container** needs a token binding of its own, since it has no login to fall
-back on. The deployment tool reports the required logical name and the chosen SOPS, CI, or
-platform integration supplies its file. See
-[The team brain's credential](reference.md#the-team-brains-credential) for why it is a PAT and not the
-token from your own login.
+A **container** needs a token binding of its own. The deployment tool reports the required
+logical name and the chosen SOPS, CI, or platform integration supplies its file. See
+[The team brain's credential](reference.md#the-team-brains-credential) for why it is an issued
+access token and not the token from your own login.
 
 ## Step 7 — tools
 
@@ -270,6 +271,52 @@ an issue body or a search query has reached a third party either way.
 Nothing about this is GitHub-shaped — `scope: {teamId: [ENG]}` and
 `scope: {database: [analytics]}` work the same. Reaching GitHub is a server you point at,
 not a feature of the toolkit.
+
+**`stampTurn: true` tells a server who it is working for.** A tool otherwise learns who is
+asking only as an argument the brain fills in, and never learns which message it is
+answering. That is fine for a read. It is not enough for a server that records who asked
+for a write, or that must not save the same message twice: the brain has read the channel,
+and text in it can talk the brain into sending someone else's id. With `stampTurn` the
+gateway writes the live turn into every `tools/call` itself:
+
+```yaml
+mcpServers:
+  - name: gtm
+    command: node
+    args: ["_base/gtm-mcp.js"]
+    stampTurn: true
+```
+
+```json
+"_meta": {
+  "sageox.ai/turn": {
+    "surface": "slack",
+    "channel": "C0LEADS",
+    "message": "C0LEADS:1786761000.000200",
+    "thread": "C0LEADS:1786760000.000100",
+    "author": { "id": "U0RYAN", "isAgent": false }
+  }
+}
+```
+
+It comes from the registry the reaction tool and the job door use: the message the gateway
+is answering, from the event it received. The brain cannot set it — anything it sends under
+that key is replaced — and every other `_meta` key passes through. `message` and `thread`
+are the surface's own references, so `message` is a deduplication key as it stands.
+
+A `tools/call` names no turn, so the stamp names one only when no other answer is possible:
+exactly one turn is live, and the only brain work running is that turn's own. Otherwise the
+value is `null`, not missing. That covers nothing being mid-turn, two channels mid-turn at
+once, a scheduled tick running, and a turn that timed out while its brain was still working
+— the timeout frees the channel but cannot stop the prompt, which can go on calling tools,
+and those calls must not be credited to whoever's turn is live by then. The stamp stays
+`null` until that prompt finishes. Treat `null` as "unknown caller" and refuse what needs
+one; a missing key means a toolkit too old to stamp. With the default
+`limits.maxConcurrentChannels: 4`, a busy agent will see `null` whenever two conversations
+overlap; set it to `1` if a stamped server should usually know who asked.
+
+Off unless you write it, because it hands a third-party process member and message ids it
+never had before. A server without it receives each call exactly as the brain sent it.
 
 **Every MCP server is gateway-hosted**, credential or not. The gateway runs the server as
 its own child with the credential in *that* process, and publishes it to the brain over

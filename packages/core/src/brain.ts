@@ -1,4 +1,4 @@
-import type { InboundEvent, GuardedMessage } from "./events.ts";
+import type { InboundEvent, GuardedMessage, ThreadReply } from "./events.ts";
 import type { ProbeResult } from "./health.ts";
 
 export interface BrainContext {
@@ -21,6 +21,16 @@ export interface BrainContext {
    */
   scheduled?: boolean;
   /**
+   * This turn's whole brief, for a turn that is handed its data instead of tools to fetch
+   * it: `event.text` is that data, fenced as untrusted, and the turn is to run with no tools
+   * at all, in a session of its own. Its reply is checked before anything is posted, so it
+   * must have no way to post around that check — see {@link AcpBrain.runTurn} for how far
+   * each provider can be held to that.
+   *
+   * Set by `Gateway.tick` for a job that declares a `source`, and by nothing else.
+   */
+  sealed?: string;
+  /**
    * How every capability the agent has is doing, right now. Trusted runtime data, not chat
    * content: each reading is built from a closed vocabulary by whoever probed it.
    *
@@ -28,6 +38,13 @@ export interface BrainContext {
    * the disclosure has to clear with it.
    */
   capabilities?: readonly ProbeResult[];
+  /**
+   * The thread `event` was posted in, as far as `event` — see
+   * {@link SurfaceAdapter.readThreadBefore}. Untrusted, like `event.text`. Absent both for a
+   * message in no thread and for one whose thread could not be read; `event.threadRoot` tells
+   * the two apart.
+   */
+  thread?: readonly ThreadReply[];
 }
 
 /** The brain returns intent. It holds no transport credential and cannot send. */

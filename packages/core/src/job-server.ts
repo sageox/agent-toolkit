@@ -23,6 +23,7 @@ import {
   type ServeOptions,
 } from "./mcp-http.ts";
 import { ToolRefused } from "./tool-audit.ts";
+import type { TurnClock } from "./turn-clock.ts";
 import type { ToolPolicy } from "./tool-policy.ts";
 
 export const JOB_SERVER = "jobs";
@@ -100,12 +101,25 @@ export interface JobToolOptions {
   /** `manifest.owner`, normalized. The whole of what {@link requester} calls a person. */
   owner?: readonly string[];
   /**
-   * `limits.turnTimeoutMs` — the clock this tool's answer has to fit inside, and the whole
-   * of what picks between {@link describeRun} and {@link describeStart}. Both numbers are
-   * already declared, so there is no field for an operator to set a third way and no
-   * argument for a caller to choose the shape with.
+   * `limits.turnTimeoutMs` — a turn's whole budget, and what this tool weighs a job against
+   * when {@link JobToolOptions.turnClock} cannot say. Declared already, so there is no field
+   * for an operator to set a third way and no argument for a caller to choose the shape
+   * with.
    */
   turnTimeoutMs: number;
+  /**
+   * What is left of the turn this call is inside, when the gateway can say.
+   *
+   * The number above bounds a *whole* turn and this call started partway into one, so it is
+   * never the time a wait actually has. Weighing a job against it is how a job that fits
+   * inside a turn gets waited for in the sliver of turn that remains — the arithmetic that
+   * was right about the wrong number in issue #44, one clock further in. A scheduled tick
+   * that declared `budget.wallClockMs` was never given the manifest's number at all.
+   *
+   * Absent, or ambiguous because two turns are in flight, and the whole budget is compared,
+   * which is what this tool did before there was anything else to ask.
+   */
+  turnClock?: TurnClock;
 }
 
 /**
@@ -237,8 +251,9 @@ function tools(jobs: readonly JobConfig[], turnTimeoutMs: number): unknown[] {
         "failure and uncertainty: a job that proved nothing did not pass. Do not copy " +
         "diagnostic IDs, gate counts, timings or exit codes into an ordinary chat reply. " +
         "A completed job is not proof of an application change; read its declared output " +
-        "before claiming one. A job whose budget is longer than a turn is " +
-        "started rather than waited for, and the answer says only that it is running and " +
+        "before claiming one. A job whose budget is longer than a turn — or than what is " +
+        "left of the turn you ask in — is started rather than waited for, and the answer " +
+        "says only that it is running and " +
         "where its result will be posted: there is no verdict in it, so say it is running " +
         "and report the result when it lands. A parked job runs when the message you are " +
         "answering came from one of this agent's owners, because they are waiting on the " +
@@ -378,7 +393,10 @@ export function jobHandler(opts: JobToolOptions): McpHandler {
       // quoted; one that cannot is started, and answers where it declared it would.
       // Both shapes below are a process job's: `requestableJobs` offers no other kind, and
       // a slug naming a prompt body falls through to the host, which records the refusal.
-      if (isProcessJob(job) && (job.worker || jobDeadlineMs(job) > turnTimeoutMs)) {
+      // Read here and never captured: it is a countdown, and what makes it the right number
+      // is exactly that the turn has been running since long before this handler was built.
+      const budget = opts.turnClock?.remaining() ?? turnTimeoutMs;
+      if (isProcessJob(job) && (job.worker || jobDeadlineMs(job) > budget)) {
         // Read now, not when the run lands: by then the turn is over and the gateway has
         // forgotten which message it was answering. Chat gets a bounded human summary;
         // diagnostic prose stays in tool results and the declared operator reports.
@@ -485,8 +503,10 @@ function describeStart(job: ProcessJob, start: JobStart, answered: boolean): str
   return (
     `job ${job.slug} is running now — run id ${start.runId}; nothing has finished yet, so ` +
     "there is no verdict to read.\n" +
-    `  its budget allows ${jobDeadlineMs(job)}ms, longer than this turn, so this tool ` +
-    "started it instead of waiting for it\n" +
+    // "Could wait" rather than "than this turn": what decided was what was left of the turn
+    // when the call arrived, and for a job asked late that is a fraction of the declared one.
+    `  its budget allows ${jobDeadlineMs(job)}ms, longer than this tool could wait, so it ` +
+    "started the job instead of waiting for it\n" +
     `  ${lands}\n` +
     home +
     "  tell whoever asked that it is running and that you will report back; you have not " +

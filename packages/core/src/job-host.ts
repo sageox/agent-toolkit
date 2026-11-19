@@ -308,6 +308,11 @@ export interface JobHostOptions {
    * this process cannot read as a file — see {@link resolveSecret}.
    */
   secretOpts?: { dir?: string | readonly string[]; env?: NodeJS.ProcessEnv };
+  /**
+   * Set by `--rehearse`. A secret ref that does not resolve is left unset instead of
+   * refusing the run, and the body is told `JOB_REHEARSAL=1`.
+   */
+  rehearsal?: boolean;
 }
 
 // Validate sections independently: unusable application data must not erase valid gates.
@@ -1303,19 +1308,34 @@ export class JobHost {
     channel?: HostedMcp,
   ): NodeJS.ProcessEnv {
     const secrets: NodeJS.ProcessEnv = {};
+    const withheld: string[] = [];
     // Both maps, one loop: `jobSecrets` says which processes are given the directory a ref
     // lives in, not how it is found. The manifest refuses a name declared in both.
     for (const [envVar, ref] of Object.entries({ ...job.run.secrets, ...job.run.jobSecrets })) {
       const value = resolveSecret(ref, this.opts.secretOpts ?? {});
+      // A rehearsal holds only the credentials its operator gave it, so a ref it was not
+      // given is one it should not have, not a fault.
+      if (!value && this.opts.rehearsal) {
+        withheld.push(envVar);
+        continue;
+      }
       // Refusing here names the missing ref. Handing the body a hole instead produces an
       // auth failure several minutes into unattended work, attributed to whatever it called.
       if (!value) throw new Error(`job ${job.slug}: secretRef ${ref} did not resolve`);
       secrets[envVar] = value;
     }
+    const hostEnv = this.opts.env ?? process.env;
+    const noAutoMemory = hostEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY;
     const env: NodeJS.ProcessEnv = {
-      ...passthroughEnv(this.opts.env ?? process.env, job.run.passthrough),
+      ...passthroughEnv(hostEnv, job.run.passthrough),
       ...job.run.env,
       ...secrets,
+      // The chart sets this where the lane keeps ~/.claude between runs, so Claude Code
+      // does not load memory an earlier run wrote there. Above `run.env`, which cannot undo it;
+      // only a host that turns memory off overrides, so a job's own opt-out always stands.
+      ...(noAutoMemory && !["0", "false"].includes(noAutoMemory.toLowerCase())
+        ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: noAutoMemory }
+        : {}),
       JOB_SLUG: job.slug,
       JOB_RUN_ID: base.runId,
       JOB_TRIGGER: base.trigger,
@@ -1332,6 +1352,9 @@ export class JobHost {
       // `JOB_*` block for the reason the rest of it is here: a body that could redefine the
       // address would be choosing what it talks to.
       ...(channel ? { JOB_CHANNEL_URL: channel.url, JOB_CHANNEL_TOKEN: channel.token } : {}),
+      // Empty rather than absent outside a rehearsal, so a `run.env` entry cannot tell a
+      // body it is rehearsing when it is not.
+      JOB_REHEARSAL: this.opts.rehearsal ? "1" : "",
     };
     if (job.budget.maxSpendUsd !== undefined) {
       env.JOB_MAX_SPEND_USD = String(job.budget.maxSpendUsd);
@@ -1344,6 +1367,9 @@ export class JobHost {
     for (const [name, value] of Object.entries(jobParams(job, base.parameters))) {
       env[`JOB_PARAM_${name.toUpperCase()}`] = String(value);
     }
+    // Unset, not left to `run.env` or `passthrough`: those rank below a secret, and the body
+    // would otherwise run on a value the secret was declared to replace.
+    for (const name of withheld) delete env[name];
     return env;
   }
 

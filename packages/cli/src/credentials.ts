@@ -39,14 +39,6 @@ export interface CredentialSpec {
    * with nothing printed but "staged". Chosen for this agent, or asked for.
    */
   neverInherited?: boolean;
-  /**
-   * A blank answer, or no terminal to answer in, returns `""` instead of throwing.
-   *
-   * For a credential whose absence degrades a capability rather than breaking the command
-   * that asks for it. The caller has already decided the agent is configured either way, so
-   * ending the interview here would cost the rest of it over something `doctor` reports.
-   */
-  optional?: boolean;
 }
 
 /**
@@ -107,9 +99,11 @@ export const GITHUB_TOKEN_SPEC: CredentialSpec = {
 
 export const SAGEOX_TOKEN_SPEC: CredentialSpec = {
   name: "SAGEOX_TOKEN",
-  label: "Paste your SageOx personal access token (input hidden)",
-  hint: "Create one at https://sageox.ai/settings/tokens — it is shown only once",
-  looksRight: (value) => value.startsWith("oxp_"),
+  label: "Paste your SageOx access token (input hidden)",
+  hint:
+    "Ledger reads need a team access token (oxt_); a personal one (oxp_, from " +
+    "https://sageox.ai/settings/tokens) searches only. Either is shown only once",
+  looksRight: (value) => value.startsWith("oxt_") || value.startsWith("oxp_"),
 };
 
 export const slackBotTokenSpec = (name: string): CredentialSpec => ({
@@ -195,10 +189,6 @@ export async function requireCredential(
 
   if (!interactive()) {
     const note = spec.hint ? `\n(${spec.hint})` : "";
-    if (spec.optional && !io.force) {
-      say(`  ${spec.name} is not set — add it to ${envPath} when you have one.${note}\n`);
-      return "";
-    }
     // Naming the one in the environment, because "not set" in front of a variable that is
     // plainly exported reads as a bug rather than the refusal it is.
     const ignored =
@@ -215,13 +205,7 @@ export async function requireCredential(
   if (spec.hint) say(`${spec.hint}\n`);
   // Trim here, not only in the prompt: a stray space-enter must not be saved as a key.
   const value = (await ask(`${spec.label}: `)).trim();
-  if (!value) {
-    if (spec.optional) {
-      say(`  skipped — ${spec.name} is still unset\n`);
-      return "";
-    }
-    throw new Error(`no value given — ${spec.name} is still unset`);
-  }
+  if (!value) throw new Error(`no value given — ${spec.name} is still unset`);
 
   if (spec.looksRight && !spec.looksRight(value)) {
     say(`  note: that does not look like a ${spec.name}, saving it anyway\n`);
@@ -332,12 +316,8 @@ export function declaredSecrets(manifest: AgentManifest, repos: RepoSpec[]): Dec
         ...SAGEOX_TOKEN_SPEC,
         name: ref,
         where: `brains[${index}].token${brain.token ? "" : ` (defaulted to ${ref})`}`,
-        // The one credential with a second source: `ox login` writes an auth.json that
-        // authenticates just as well, which is why a workstation legitimately has no
-        // token. A deployment mounts neither, and every team_search fails.
-        degraded:
-          "an `ox login` auth.json authenticates instead where one exists; a deployment " +
-          "with neither fails every team_search",
+        // Not fatal: the team brain fails without it, and chat and the other tools do not.
+        degraded: "the team brain cannot search or read ledgers until it is set",
       });
     }
   });
