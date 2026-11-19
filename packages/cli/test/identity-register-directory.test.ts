@@ -58,10 +58,9 @@ describe("identity register buzz, for an agent already in the directory", () => 
     else process.env.AGENT_TOOLKIT_HOME = savedHome;
   });
 
-  // A display name with a space is unmentionable: clients tokenize the `@…` against the
-  // record and strip the tag when it does not resolve. Renaming the agent in profile.json and
-  // re-registering is the documented fix, so it has to reach the record — and the record
-  // used to keep its first display name forever.
+  // Clients match `@…` mentions against the record, so a rename in profile.json has to reach
+  // it when the agent is re-registered — and the record used to keep its first display name
+  // forever.
   it("renames the record to the profile's display name, under the manifest's handle", async () => {
     relay = await LocalRelay.start({
       requireAuth: true,
