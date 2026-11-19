@@ -130,6 +130,7 @@ function fetchOwn(
     let settled = false;
     let found: Record<string, unknown> | undefined;
     let foundAt = -Infinity;
+    let foundId = "";
     const finish = () => {
       if (settled) return;
       settled = true;
@@ -140,12 +141,15 @@ function fetchOwn(
 
     const sub = relay.subscribe([{ kinds: [kind], authors: [pubkey] }], {
       onevent: (event: Event) => {
+        // NIP-01's replaceable-event rule: later wins, and on a tie the lower id does.
         if (event.created_at < foundAt) return;
+        if (event.created_at === foundAt && event.id > foundId) return;
         try {
           const parsed: unknown = JSON.parse(event.content);
           if (parsed && typeof parsed === "object") {
             found = parsed as Record<string, unknown>;
             foundAt = event.created_at;
+            foundId = event.id;
           }
         } catch {
           // Unreadable content counts as none: there is nothing in it worth preserving,

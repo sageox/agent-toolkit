@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createServer, type Socket } from "node:net";
 import { nip19 } from "nostr-tools";
 import { finalizeEvent, generateSecretKey } from "nostr-tools/pure";
-import { DIRECTORY_KIND, mergeDirectoryContent, publishDirectory } from "../src/profile.ts";
+import { DIRECTORY_KIND, mergeDirectoryContent, publishDirectory, readProfile } from "../src/profile.ts";
 import { LocalRelay } from "../src/local-relay.ts";
 
 const anyone = { name: "demo", channelIds: ["c1"], respondTo: "anyone" as const };
@@ -169,4 +169,26 @@ describe("publishDirectory", () => {
       await new Promise<void>((closed) => mute.close(() => closed()));
     }
   }, 20_000);
+});
+
+describe("readProfile", () => {
+  it("keeps the lower id when two profiles share a second, whichever arrives last", async () => {
+    const profiles = ["Ron", "Ron Weasley"]
+      .map((name) =>
+        finalizeEvent(
+          { kind: 0, created_at: 1786000000, tags: [], content: JSON.stringify({ name }) },
+          agentSk,
+        ),
+      )
+      .sort((a, b) => (a.id < b.id ? -1 : 1));
+    relay = await LocalRelay.start({ requireAuth: true, backlog: profiles });
+
+    const profile = await readProfile({
+      relayUrl: relay.url,
+      identityRef: "BUZZ_NSEC",
+      env: { BUZZ_NSEC: nsec },
+    });
+
+    expect(profile).toEqual(JSON.parse(profiles[0]!.content));
+  });
 });
