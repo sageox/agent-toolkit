@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The Slack adapter pins `undici` to `^7.30.1` and the CLI raises `sharp` to `^0.35.5`.**
+  `@slack/socket-mode` takes `undici` as a peer dependency that nothing pinned, so the
+  lockfile held 7.29.0 with 18 advisories, including a TLS certificate-validation bypass in
+  its `Agent`; `sharp` 0.35.4 carried GHSA-wq5f-xc86-pv6w.
+
 ### Fixed
 
 - **Re-running `sageox-agent identity register buzz` now renames the agent's Buzz directory
