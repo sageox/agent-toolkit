@@ -524,7 +524,9 @@ export async function buildBrain(
         team: cfg.team,
         repo: cfg.repo,
         clientId: oxClientId(cfg.team, manifest.name),
-        repositories: codeWorkspace?.states.map(({ dirName, path, url }) => ({ name: dirName, path, url })),
+        repositories: codeWorkspace?.states.map(({ dirName, path, url, expectedRepoId }) => ({
+          name: dirName, path, url, expectedRepoId,
+        })),
         dataHome: codeWorkspace ? join(agentDir, "workspace", "ox-data") : undefined,
         ledgerSync: cfg.ledgerSync?.map(({ token, ...remote }) => ({
           ...remote,

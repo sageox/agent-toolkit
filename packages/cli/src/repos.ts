@@ -30,6 +30,8 @@ export interface RepoSpec {
   private: boolean;
   name: string;
   dirName: string;
+  /** Operator-owned SageOx ID for hosted ledger access, never learned from a checkout. */
+  expectedRepoId?: string;
 }
 
 /** Which step of the warmup a repository is on. Only ever a `Warming` reading's reason. */
@@ -108,7 +110,7 @@ function repoIdentity(
   return { url: raw, name, dirName };
 }
 
-/** One HTTPS URL per line; prefix a private repository with `private `. */
+/** One HTTPS URL per line; optional `private ` prefix and `repo=repo_<id>` suffix. */
 export function parseReposConf(text: string): RepoSpec[] {
   const repos: RepoSpec[] = [];
   const urls = new Set<string>();
@@ -120,7 +122,10 @@ export function parseReposConf(text: string): RepoSpec[] {
 
     const source = `repos.conf:${offset + 1}`;
     const isPrivate = line.startsWith("private ");
-    const raw = isPrivate ? line.slice("private ".length).trim() : line;
+    const [raw, pin, ...extra] = (isPrivate ? line.slice("private ".length).trim() : line).split(/\s+/);
+    if (extra.length || (pin !== undefined && !/^repo=repo_[A-Za-z0-9_-]+$/.test(pin))) {
+      throw new Error(`${source}: expected an HTTPS URL optionally followed by repo=repo_<id>`);
+    }
     const identity = repoIdentity(raw, source);
     if (isPrivate && new URL(identity.url).hostname.toLowerCase() !== "github.com") {
       throw new Error(`${source}: private repositories currently require a github.com HTTPS URL`);
@@ -135,7 +140,7 @@ export function parseReposConf(text: string): RepoSpec[] {
     }
     urls.add(identity.url);
     dirs.add(identity.dirName);
-    repos.push({ ...identity, private: isPrivate });
+    repos.push({ ...identity, private: isPrivate, ...(pin ? { expectedRepoId: pin.slice("repo=".length) } : {}) });
   }
 
   return repos;

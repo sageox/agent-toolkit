@@ -365,7 +365,9 @@ have no tracker records: warmup runs only `ox index code`, while pull requests a
 come from `ox index github`, which needs a forge token.
 
 `repos.conf` is deliberately deployment-neutral: one HTTPS URL per line, with `private `
-in front of a private GitHub repository. Private clones use a narrowly scoped read-only
+in front of a private GitHub repository. For hosted ledger reads, add an operator-owned
+`repo=repo_<id>` suffix as described under [ledger sync](reference.md#ledger-sync).
+Private clones use a narrowly scoped read-only
 `GITHUB_TOKEN`; `secrets` prompts for it and containers receive it as a mounted file. A
 credential embedded in a URL is rejected, and the token is never stored in the checkout's
 remote URL.

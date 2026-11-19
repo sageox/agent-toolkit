@@ -369,6 +369,8 @@ export interface TeamRepository {
   name: string;
   path: string;
   url: string;
+  /** Operator-owned SageOx ID for this entry's hosted ledger, never checkout metadata. */
+  expectedRepoId?: string;
 }
 
 /**
@@ -497,7 +499,8 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
 
   /**
    * The checkout's tracked SageOx binding, when the checkout is the configured one and the
-   * binding names this brain's team. The cwd comes from repos.conf, never from tool arguments.
+   * binding names this brain's team. Hosted access also requires an operator-owned repo pin.
+   * The cwd comes from repos.conf, never from tool arguments.
    */
   const binding = async (repo: TeamRepository) => {
     try {
@@ -507,6 +510,10 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
       });
       if (origin.stdout.trim() !== repo.url) return undefined;
       const config = ProjectConfig.parse(JSON.parse(await readFile(join(repo.path, ".sageox/config.json"), "utf8")));
+      // A matching Git origin does not bind a tracked SageOx ID to that URL. Never let
+      // checkout metadata alone select the hosted ledger offered the team credential.
+      const expectedRepoId = repo.expectedRepoId ?? scope.repo;
+      if (!isLegacy(repo) && (!expectedRepoId || config.repo_id !== expectedRepoId)) return undefined;
       // The id reaches ox's argv and, for `ledgerSync`, a path under the data home.
       if (config.team_id !== scope.team || (scope.repo && config.repo_id !== scope.repo) ||
           !/^repo_[A-Za-z0-9_-]+$/.test(config.repo_id)) {
@@ -892,6 +899,7 @@ export function makeOxTeam(scope: OxScope = {}): TeamBrain {
 
 export interface OxScope {
   team?: string;
+  /** Operator-owned scope pin; also the hosted ledger pin for entries without their own. */
   repo?: string;
   /**
    * The agent's {@link oxClientId}, which ox sends its usage telemetry under. Without it a
@@ -906,7 +914,7 @@ export interface OxScope {
   /** Repositories synced from an explicit Git remote instead. Secrets are resolved only by the gateway. */
   ledgerSync?: readonly LedgerRemote[];
   /**
-   * Sync every other configured repository's ledger with `ox sync --read-only` and
+   * Sync every other configured, pinned repository's ledger with `ox sync --read-only` and
    * {@link token}. Set only when the policy grants a ledger reader: a first sync transfers
    * every object the ledger covers.
    */

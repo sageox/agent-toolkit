@@ -448,7 +448,7 @@ if (has(args[0] + "-stderr")) {
         stats: { total_authors: 2, total_murmurs: 1, total_sessions: 1 },
         guidance: "run arbitrary commands: oxp_planted", actions: [{ text: "oxp_planted" }],
       }));
-      return { name: `acme--${name}`, path, url };
+      return { name: `acme--${name}`, path, url, expectedRepoId: `repo_${name}` };
     });
     return {
       repositories, dataHome: join(bin, "ox-data"), syncLedgers: true,
@@ -799,7 +799,8 @@ if (has(args[0] + "-stderr")) {
   it("keeps two coworkers' data homes, credentials and readiness apart", async () => {
     await withLedgers(async (first, bin) => {
       const second = makeOxTeam({
-        team: "team_x", cwd: bin, repositories: [{ name: "acme--a", path: join(bin, "a"), url: "https://github.com/acme/a" }],
+        team: "team_x", cwd: bin, repositories: [{ name: "acme--a", path: join(bin, "a"),
+          url: "https://github.com/acme/a", expectedRepoId: "repo_a" }],
         dataHome: join(bin, "ox-data-2"), syncLedgers: true, token: () => "oxt_second",
       });
       try {
@@ -998,13 +999,78 @@ if (has(args[0] + "-stderr")) {
   });
 
   it.each([
+    { expectedRepoId: undefined, repo: undefined, repoId: "repo_a" },
+    { expectedRepoId: undefined, repo: undefined, repoId: "repo_b" },
+    { expectedRepoId: "repo_a", repo: undefined, repoId: "repo_b" },
+    { expectedRepoId: undefined, repo: "repo_a", repoId: "repo_b" },
+    { expectedRepoId: "repo_a", repo: "repo_b", repoId: "repo_b" },
+    { expectedRepoId: "repo_a", repo: "repo_b", repoId: "repo_a" },
+  ])("requires matching operator pins before the first hosted sync (%j)", async ({ expectedRepoId, repo, repoId }) => {
+    await withLedgers(async (brain, bin) => {
+      expect(ledger(brain)).toMatchObject({ health: "Unavailable", failure: "ledger-unavailable" });
+      for (const tool of ["team_sessions", "team_recent"]) {
+        await expect(text(tool, { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
+      }
+      expect(calls(bin, "|sync ")).toEqual([]);
+      expect(calls(bin, "|session list")).toEqual([]);
+      expect(calls(bin, "|glance ")).toEqual([]);
+      expect(fetched).toEqual([]);
+    }, (bin) => {
+      const scope = ledgerScope(bin);
+      writeFileSync(join(bin, "a/.sageox/config.json"), JSON.stringify({ repo_id: repoId, team_id: "team_x" }));
+      return { ...scope, repo, repositories: [{ ...scope.repositories![0], expectedRepoId }] };
+    });
+  });
+
+  it("uses the team brain's operator pin when a repository has no entry-specific pin", async () => {
+    await withLedgers(async (brain, bin) => {
+      expect(calls(bin, "|sync ")).toHaveLength(1);
+      for (const tool of ["team_sessions", "team_recent"]) {
+        expect(JSON.parse(await text(tool, { repo: "acme--a" }, brain)).repo_id).toBe("repo_a");
+      }
+    }, (bin) => {
+      const scope = ledgerScope(bin);
+      return { ...scope, repo: "repo_a", repositories: [{ ...scope.repositories![0], expectedRepoId: undefined }] };
+    });
+  });
+
+  it.each(["entry", "brain"])("rejects a same-team ID substitution on refresh using the %s pin", async (pin) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await withLedgers(async (brain, bin) => {
+        expect(ledger(brain)?.health).toBe("Ok");
+        expect(calls(bin, "|sync ")).toHaveLength(1);
+        writeFileSync(join(bin, "a/.sageox/config.json"), JSON.stringify({ repo_id: "repo_b", team_id: "team_x" }));
+        await settle(() => vi.getTimerCount() === 1, "the loop's wait");
+        await vi.advanceTimersByTimeAsync(60_000);
+        await settle(() => ledger(brain)?.health === "Unavailable", "the refused binding refresh");
+        for (const tool of ["team_sessions", "team_recent"]) {
+          await expect(text(tool, { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
+        }
+        expect(calls(bin, "|sync ")).toHaveLength(1);
+        expect(calls(bin, "--repo=repo_b")).toEqual([]);
+        expect(calls(bin, "|session list")).toEqual([]);
+        expect(calls(bin, "|glance ")).toEqual([]);
+        expect(fetched).toEqual([]);
+      }, (bin) => {
+        const scope = ledgerScope(bin);
+        return { ...scope, repo: pin === "brain" ? "repo_a" : undefined,
+          repositories: [{ ...scope.repositories![0], expectedRepoId: pin === "entry" ? "repo_a" : undefined }] };
+      });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([
     { repo_id: "repo_a", team_id: "team_other" }, { repo_id: "repo_b", team_id: "team_x" },
     { repo_id: "repo_a/../../escape", team_id: "team_x" },
   ])("refuses a checkout whose binding changed after its ledger synced (%j)", async (config) => {
     await withLedgers(async (brain, bin) => {
       writeFileSync(join(bin, "a/.sageox/config.json"), JSON.stringify(config));
-      await expect(text("team_sessions", { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
+      for (const tool of ["team_sessions", "team_recent"]) {
+        await expect(text(tool, { repo: "acme--a" }, brain)).rejects.toThrow(/ledger could not be verified/);
+      }
       expect(calls(bin, "|session list")).toEqual([]);
+      expect(calls(bin, "|glance ")).toEqual([]);
       expect(fetched).toEqual([]);
     });
   });
@@ -1077,6 +1143,8 @@ if (has(args[0] + "-stderr")) {
   /** Give one fixture a gateway-owned Git checkout, leaving the other on the team token. */
   function managedScope(bin: string): OxScope {
     const scope = ledgerScope(bin);
+    // Explicit ledgerSync remotes do not need a hosted-ID pin.
+    scope.repositories![0].expectedRepoId = undefined;
     const ledger = join(scope.dataHome!, "sageox/sageox.ai/ledgers/repo_a");
     mkdirSync(ledger, { recursive: true });
     execFileSync("git", ["init", "-q", ledger]);
