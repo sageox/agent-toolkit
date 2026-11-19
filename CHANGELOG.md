@@ -14,6 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lockfile held 7.29.0 with 18 advisories, including a TLS certificate-validation bypass in
   its `Agent`; `sharp` 0.35.4 carried GHSA-wq5f-xc86-pv6w.
 
+### Added
+
+- Buzz: a `subscription_stalled channel=<id> missed_event=<id>` warning when one channel's
+  live subscription stops delivering while the socket stays up. A configured channel that
+  has heard nothing for five minutes (`stallCheckIntervalMs`) is asked about with a fresh
+  read; anything the relay returns that the subscription never received is the stall. A
+  channel that is merely quiet logs nothing. Before this, a stalled subscription looked
+  healthy — process alive, pings answered — until someone noticed missed messages. A miss
+  can still go unreported if it is timestamped at or before the newest message the channel
+  did receive: that covers a second flooded past 100 messages, and a sender whose clock runs
+  ahead.
+
 ### Fixed
 
 - **Re-running `sageox-agent identity register buzz` now renames the agent's Buzz directory
