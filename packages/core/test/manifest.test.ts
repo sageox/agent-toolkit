@@ -87,7 +87,8 @@ surfaces:
     // silently stops applying at the one layer the brain cannot skip. The second case is
     // the same ambiguity arriving by sanitization: anything outside `[A-Za-z0-9_-]` in a
     // server name becomes `_`, so `my..server` would show up as `my__server`.
-    for (const name of ["my__server", "my..server"]) {
+    // A trailing `_` overlaps the separator too: `docs_` / `read` and `docs` / `_read`.
+    for (const name of ["my__server", "my..server", "docs_", "my_server_"]) {
       expect(() =>
         loadManifest(
           `name: x\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: console}]\n` +
@@ -99,7 +100,7 @@ surfaces:
   });
 
   it("keeps the server names the toolkit itself generates", () => {
-    for (const name of ["brain", "team-brain", "brain-shared-0", "github", "surface-egress"]) {
+    for (const name of ["brain", "team-brain", "brain-shared-0", "github", "surface-egress", "my_server"]) {
       expect(() =>
         loadManifest(
           `name: x\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: console}]\n` +

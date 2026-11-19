@@ -380,6 +380,11 @@ const ServerName = z
     (name) => !name.includes("__"),
     "a doubled underscore separates server from tool in `mcp__<server>__<tool>`, so a " +
       "server name carrying one makes a whole-server rule ambiguous — use a single `_` or `-`",
+  )
+  .refine(
+    (name) => !name.endsWith("_"),
+    "a trailing underscore overlaps the separator in `mcp__<server>__<tool>` and can " +
+      "collide with another server's tools — end the server name with a letter, number, or `-`",
   );
 
 export const McpServerSchema = z

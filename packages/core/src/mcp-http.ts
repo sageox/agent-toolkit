@@ -103,11 +103,14 @@ export async function serveMcp(handle: McpHandler, opts: ServeOptions = {}): Pro
   const guarded: McpHandler = async (msg) => {
     const gate = opts.toolPolicy;
     if (gate && msg.method === "tools/call") {
-      const tool = qualifyTool(gate.server, String(msg.params?.name ?? ""));
-      const verdict = gate.policy.allowsTool(tool);
+      const identity = { server: gate.server, tool: String(msg.params?.name ?? "") };
+      const verdict = gate.policy.allowsTool(identity);
       if (!verdict.ok) {
         return auditToolCall(
-          { tool, args: (msg.params?.arguments ?? {}) as Record<string, unknown> },
+          {
+            tool: qualifyTool(identity.server, identity.tool),
+            args: (msg.params?.arguments ?? {}) as Record<string, unknown>,
+          },
           async () => { throw new ToolRefused(verdict.reason); },
         );
       }
@@ -117,7 +120,7 @@ export async function serveMcp(handle: McpHandler, opts: ServeOptions = {}): Pro
       return {
         ...result,
         tools: result.tools.filter((tool: { name: string }) =>
-          gate.policy.allowsTool(qualifyTool(gate.server, tool.name)).ok),
+          gate.policy.allowsTool({ server: gate.server, tool: tool.name }).ok),
       };
     }
     return result;

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { DEFAULT_SECRETS_DIR } from "../src/secrets.ts";
-import { loadToolPolicy, ToolPolicy } from "../src/tool-policy.ts";
+import { loadToolPolicy, qualifyTool, ToolPolicy } from "../src/tool-policy.ts";
 
 const ok = {
   permissions: {
@@ -201,6 +201,40 @@ describe("the rule language, which is Claude Code's", () => {
     expect(
       policy(["mcp__my_server__*"], ["mcp__my_server"]).allowsTool("mcp__my_server__tool").ok,
     ).toBe(false);
+  });
+
+  it.each(["mcp__docs", "mcp__docs__*", "mcp__docs___read"])(
+    "keeps %s on its actual server, even when qualified names collide",
+    (rule) => {
+      const p = policy([rule]);
+      expect(qualifyTool("docs", "_read")).toBe(qualifyTool("docs_", "read"));
+      expect(p.allowsTool({ server: "docs", tool: "_read" }).ok).toBe(true);
+      for (const tool of ["read", "_read", "__read"]) {
+        expect(p.allowsTool({ server: "docs_", tool }).ok).toBe(false);
+      }
+    },
+  );
+
+  it.each(["mcp__docs", "mcp__docs__*", "mcp__docs___read"])(
+    "keeps an anchored deny %s on its actual server too",
+    (rule) => {
+      const p = policy(["mcp__docs", "mcp__docs_"], [rule]);
+      expect(p.allowsTool({ server: "docs", tool: "_read" }).ok).toBe(false);
+      expect(p.allowsTool({ server: "docs_", tool: "read" }).ok).toBe(true);
+      expect(policy(["mcp__docs"], ["mcp__docs_"])
+        .allowsTool({ server: "docs", tool: "_read" }).ok).toBe(true);
+    },
+  );
+
+  it("agrees on brain-facing and structured identities for unambiguous server names", () => {
+    for (const rule of ["mcp__my_server", "mcp__my_server__*", "mcp__my_server___read"]) {
+      const p = policy([rule], ["mcp__*__delete", "mcp__my_server__read__admin"]);
+      for (const server of ["my_server", "other"]) {
+        for (const tool of ["read", "_read", "__read", "read__admin", "delete"]) {
+          expect(p.allowsTool({ server, tool })).toEqual(p.allowsTool(qualifyTool(server, tool)));
+        }
+      }
+    }
   });
 
   it("keeps a qualified tool rule exact, so it cannot expand into a suffixed name", () => {

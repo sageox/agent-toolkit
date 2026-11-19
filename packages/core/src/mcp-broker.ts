@@ -198,6 +198,7 @@ export interface McpBrokerOptions {
 export class McpBroker {
   private connections = new Map<string, { server: McpServerConfig; conn: McpConnection }>();
   private pinnedSchemas = new Map<string, string>();
+  private qualifiedServers = new Map<string, string>();
   private nextId = 0;
 
   constructor(private opts: McpBrokerOptions) {}
@@ -234,11 +235,11 @@ export class McpBroker {
       return method === "tools/list" ? this.pinTools(result, entry.server.name) : result;
     }
 
-    // A server knows its tools by their bare names; the policy — like the brain's own
-    // permission requests — names them `mcp__<server>__<tool>`. Qualifying here is what
-    // makes one policy line govern both the brain asking and the broker relaying.
+    // Keep the connection's server separate from the requested bare tool for policy;
+    // qualification is only an audit label, not an unambiguous authorization identity.
     const call = params as { name?: string; arguments?: Record<string, unknown> } | undefined;
-    const tool = qualifyTool(entry.server.name, call?.name ?? "");
+    const identity = { server: entry.server.name, tool: call?.name ?? "" };
+    const tool = qualifyTool(identity.server, identity.tool);
     const args = call?.arguments;
     const scope = entry.server.scope ?? {};
 
@@ -259,7 +260,7 @@ export class McpBroker {
       .map(([name]) => name);
 
     return auditToolCall({ tool, args, declared }, async () => {
-      const verdict = this.opts.policy.allowsTool(tool);
+      const verdict = this.opts.policy.allowsTool(identity);
       // Thrown as a refusal rather than a plain failure so the audit can tell the two
       // apart: a call the policy stopped is the line an operator goes looking for.
       if (!verdict.ok) throw new ToolRefused(`MCP call refused: ${verdict.reason}`);
@@ -314,6 +315,19 @@ export class McpBroker {
   private pinTools(result: unknown, server: string): unknown {
     const tools = (result as { tools?: Array<{ name: string }> } | undefined)?.tools;
     if (!Array.isArray(tools)) return result;
+
+    // Discovery must not hand the brain two identities with the same policy spelling,
+    // even when a caller constructs broker config without going through the manifest.
+    const seen = new Set<string>();
+    for (const tool of tools) {
+      const qualified = qualifyTool(server, tool.name);
+      const owner = this.qualifiedServers.get(qualified);
+      if (seen.has(qualified) || (owner !== undefined && owner !== server)) {
+        throw new Error(`ambiguous MCP tool identity ${qualified}`);
+      }
+      seen.add(qualified);
+      this.qualifiedServers.set(qualified, server);
+    }
 
     const kept = tools.filter((tool) => {
       const key = `${server}:${tool.name}`;

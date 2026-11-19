@@ -532,7 +532,7 @@ export async function buildBrain(
         })),
         // A granted reader is the only use for a synced ledger, and a first sync is not cheap.
         syncLedgers: ["team_sessions", "team_recent"].some(
-          (tool) => policy?.allowsTool(qualifyTool(cfg.name, tool)).ok === true,
+          (tool) => policy?.allowsTool({ server: cfg.name, tool }).ok === true,
         ),
         // Resolved here, in the gateway, and per lookup rather than once: file-first, so a
         // mounted secret beats an env var, and a mount rewritten under this process is what
@@ -2804,7 +2804,7 @@ async function doctorCmd(argv: string[]): Promise<boolean> {
             continue;
           }
           const allowed = tools.filter(
-            (t) => policy.allowsTool(`mcp__${server.name}__${t.name}`).ok,
+            (t) => policy.allowsTool({ server: server.name, tool: t.name }).ok,
           );
           if (!allowed.length) {
             problems.push(

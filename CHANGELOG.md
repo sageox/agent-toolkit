@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- MCP tool grants now match the actual server and bare tool separately, preventing a
+  grant for `docs` from authorizing `docs_`. MCP server names ending in `_` are rejected;
+  rename them and update their policy rules. Discovery also rejects duplicate qualified
+  tool identities.
+
 ### Added
 
 - Buzz: a `subscription_stalled channel=<id> missed_event=<id>` warning when one channel's

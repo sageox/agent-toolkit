@@ -42,14 +42,16 @@ const SettingsSchema = z
 
 export type ToolVerdict = { ok: true } | { ok: false; reason: string };
 
+/** The server comes from trusted gateway wiring, not from a flattened tool name. */
+export type McpToolIdentity = { server: string; tool: string };
+
 /**
  * The name a tool is known by outside its own server, and the only place that spelling is
  * built.
  *
- * It lives beside the matcher because it is the same language: a server knows its tools by
- * their bare names, while the policy — like the brain's own permission requests — names them
- * `mcp__<server>__<tool>`. Both `tools/call` chokepoints qualify through this, so one policy
- * line governs the brain asking, the broker relaying, and the gateway hosting.
+ * Used for policy text and audit labels. Authorization at a gateway chokepoint must pass
+ * the server and bare tool separately: `docs_` / `read` and `docs` / `_read` have the same
+ * spelling here, but must never share a grant.
  */
 export function qualifyTool(server: string, tool: string): string {
   return `mcp__${server}__${tool}`;
@@ -72,23 +74,22 @@ const MCP = "mcp__";
  */
 const ANCHORED_ALLOW_GLOB = /^mcp__[^*]+__/;
 
+type McpToolRule = { server: string; toolPattern?: string };
+
 /**
- * A rule naming a whole server: `mcp__<server>`, with nothing after the server segment.
- *
- * Only a bare one expands to a prefix. A qualified `mcp__<server>__<tool>` rule names that
- * tool and stops there — expanding it too would turn `mcp__github__pr_list` into a grant
- * for any tool whose name extends it, `pr_list__admin` included, and MCP tool names may
- * contain the separator. One tool is what the operator wrote and one tool is what it has
- * to mean. Both spellings begin `mcp__`, so the discriminator is what follows the server.
- *
- * That discriminator is only sound because a server name cannot contain `__`, which
- * `manifest.ts`'s `ServerName` enforces where the name is chosen. Relax it there and
- * `mcp__my__server` becomes ambiguous here, with a whole-server deny silently ceasing to
- * apply — the ambiguity is not resolvable from the rule text, which is why it is refused
- * at the source rather than guessed at in this function.
+ * Split at the first separator only: a bare tool may start with `_` or contain `__`.
+ * Manifest server names cannot contain `__` or end in `_`, so policy text and the brain's
+ * qualified permission requests have one interpretation. Gateway calls retain the actual
+ * identity instead of round-tripping it through this parser.
  */
-const isServerRule = (rule: string): boolean =>
-  rule.startsWith(MCP) && !rule.slice(MCP.length).includes("__");
+function parseMcpRule(rule: string): McpToolRule | undefined {
+  if (!rule.startsWith(MCP)) return undefined;
+  const rest = rule.slice(MCP.length);
+  const separator = rest.indexOf("__");
+  return separator === -1
+    ? { server: rest }
+    : { server: rest.slice(0, separator), toolPattern: rest.slice(separator + 2) };
+}
 
 /** The tool-name position: everything before an argument list, if there is one. */
 const toolNameOf = (rule: string): string => rule.split("(")[0];
@@ -181,13 +182,20 @@ export class ToolPolicy {
    * The brain reads untrusted text, so a side-effecting tool is an exfiltration and
    * write vector. Read-only is the low-risk default; anything else gets named on purpose.
    */
-  allowsTool(name: string): ToolVerdict {
+  allowsTool(name: string | McpToolIdentity): ToolVerdict {
+    if (typeof name === "string") {
+      const parsed = parseMcpRule(name);
+      if (parsed?.toolPattern !== undefined) {
+        name = { server: parsed.server, tool: parsed.toolPattern };
+      }
+    }
+    const label = typeof name === "string" ? name : qualifyTool(name.server, name.tool);
     if (this.deny.some((rule) => matches(rule, name, "deny")))
-      return { ok: false, reason: `tool ${name} is denied by policy` };
+      return { ok: false, reason: `tool ${label} is denied by policy` };
 
     if (this.allow.some((rule) => matches(rule, name, "allow"))) return { ok: true };
 
-    return { ok: false, reason: `tool ${name} is not allowlisted` };
+    return { ok: false, reason: `tool ${label} is not allowlisted` };
   }
 }
 
@@ -196,7 +204,8 @@ export class ToolPolicy {
  *
  *  - `mcp__<server>` covers every tool that server provides;
  *  - `mcp__<server>__<tool>` is that one tool;
- *  - a `*` is a glob over the whole tool name — but only a **deny** may be unanchored.
+ *  - an anchored `*` globs the bare tool name on one exact server;
+ *  - only a **deny** may glob across server boundaries.
  *
  * It is Claude Code's language rather than one of our own because `settings.json` is read
  * by both matchers: Claude Code decides whether the brain may call a tool, and this
@@ -210,13 +219,23 @@ export class ToolPolicy {
  * a redundancy. `test/policy-cases` adjudicates what these rules actually reach; change
  * this function and read the verdicts that flip.
  */
-function matches(rule: string, name: string, direction: Direction): boolean {
+function matches(rule: string, name: string | McpToolIdentity, direction: Direction): boolean {
+  if (typeof name !== "string") {
+    const parsed = parseMcpRule(rule);
+    if (parsed && !parsed.server.includes("*")) {
+      return parsed.server === name.server &&
+        (parsed.toolPattern === undefined || parsed.toolPattern === name.tool ||
+          (parsed.toolPattern.includes("*") && globToRegExp(parsed.toolPattern).test(name.tool)));
+    }
+
+    // Only broad denies retain full-name glob semantics, e.g. `*` or `mcp__*__delete`.
+    // Falling back to flattened matching for a grant would lose the server boundary.
+    if (direction === "allow") return false;
+    name = qualifyTool(name.server, name.tool);
+  }
+
   if (rule === name) return true;
-
-  // A bare `mcp__<server>` is the whole server. Written without a glob, so it is checked
-  // before one — and `${rule}__` keeps `mcp__github` off `mcp__github_actions__run`.
-  if (!rule.includes("*")) return isServerRule(rule) && name.startsWith(`${rule}__`);
-
+  if (!rule.includes("*")) return false;
   if (direction === "allow" && grantsNothing(rule)) return false;
   return globToRegExp(rule).test(name);
 }
