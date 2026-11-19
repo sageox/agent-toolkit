@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-17
+
+Everything below shipped after `v0.12.1`.
+
+On publication, `ghcr.io/sageox/agent-base:0.13.0` takes `:latest` and starts `:0.13`. Before 1.0.0 a minor release may break configuration, so no `:0` tag is published. Pin the digest recorded on the GitHub Release in production.
+
 ### Added
 
 - `run.work` and the chart's `work: true`: a scheduled job may split into a work phase
@@ -30,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drops a malformed tag without an error. The tag is public — minted with the
   owner secret, which never enters the pod. Omit it to leave an agent
   "owner unavailable" (the prior behavior). Values-only and backward compatible.
+
+### Changed
+
+- **The agent base image ships `ox` 0.26.0.** `OX_VERSION` and both architecture checksums in
+  `deploy/docker/Dockerfile` move up from 0.25.0. For a job that records its coding sessions,
+  this release gives one complete session per run even when ox's hooks are wired twice, credits
+  the job's Ledger commits to its AI coworker rather than to the harness's git identity, and
+  no longer kills a large Team Context's first clone at 60 seconds.
+  ox's [0.26.0 release notes](https://github.com/sageox/ox/releases/tag/v0.26.0) list what
+  else changed.
 
 ## [0.12.1] - 2026-11-11
 
