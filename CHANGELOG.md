@@ -18,10 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `jobSecrets`, reads the staged output read-only from `JOB_STAGE_DIR`, and folds the
   work phase's exit into the verdict as `job:<slug>:work`. `run.work.wallClockMs` is
   carved out of `budget.wallClockMs`. Refused beside `trigger.onRequest`, `worker`,
-  `serviceAccount.automountJobToken` and `persistence.jobHome`. Opt-in; jobs without
+  `serviceAccount.automountJobToken`, `persistence.jobHome`, and a `sharedVolumes`
+  entry that reuses `job-work`/`job-stage` or overlaps `/stage`. Opt-in; jobs without
   it render and run as before. The work phase refuses to start its body when its
   container holds an AWS credential variable or an IRSA, EKS Pod Identity or cluster
   token file, so a webhook that injects into every container cannot hand it one.
+
+### Fixed
+
+- **Re-running `sageox-agent identity register buzz` now renames the agent's Buzz directory
+  record.** The record kept the first `display_name` it was ever published with, so renaming
+  an agent in `profile.json` updated its profile and left the record unchanged, so mentions
+  by the new name did not match the record. Registration
+  now writes the display name it was given (from `profile.json` or `--name`) over the
+  record's, and publishes the record under the manifest's `name`, as `run` does, so the two
+  no longer flip the field on every restart. `run`'s own reconcile still keeps whatever
+  display name the record carries.
 
 ## [0.13.0] - 2026-11-17
 
