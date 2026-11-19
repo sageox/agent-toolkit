@@ -33,13 +33,14 @@ export interface RepoSpec {
 }
 
 /** Which step of the warmup a repository is on. Only ever a `Warming` reading's reason. */
-type WarmStep = "pending" | "cloning" | "fetching" | "indexing";
+type WarmStep = "pending" | "cloning" | "fetching" | "indexing" | "checking";
 
 const STEP_REASON: Readonly<Record<WarmStep, string>> = {
   pending: "the code index is queued behind another repository and has not started",
   cloning: "the first clone of this repository is still running",
   fetching: "the checkout is being fast-forwarded",
   indexing: "the code index is being built",
+  checking: "the code index is built and its status is being read",
 };
 
 export interface RepoState extends RepoSpec {
@@ -74,6 +75,12 @@ export type CommandRunner = (
   args: string[],
   options: RunOptions,
 ) => Promise<{ stdout: string; stderr: string }>;
+
+/**
+ * How long `ox code status` gets. It opens the index for writing, and ox runs a full
+ * integrity check on every writable open, so on a large index the check alone takes minutes.
+ */
+const STATUS_TIMEOUT_MS = 5 * 60_000;
 
 const systemRunner: CommandRunner = async (command, args, options) =>
   exec(command, args, options) as Promise<{ stdout: string; stderr: string }>;
@@ -227,6 +234,20 @@ function failureReading(capability: string, step: WarmStep, error: unknown): Pro
       "fetch-failed",
       "resolve the checkout under workspace/repos, or delete it for a fresh clone, then restart",
       "the checkout could not be fast-forwarded to its remote",
+    );
+  }
+  if (step === "checking") {
+    // `killed` is set by Node when it ends the child at `timeout`, so it is this process's
+    // own fact rather than anything ox wrote.
+    const timedOut = (error as { killed?: boolean } | null)?.killed === true;
+    return probeUnavailable(
+      capability,
+      "status-failed",
+      "run `ox code status` in this repository's directory under workspace/repos to see how " +
+        "long it takes, then restart",
+      timedOut
+        ? `the code index was built, but reading its status took longer than ${STATUS_TIMEOUT_MS}ms`
+        : "the code index was built, but its status could not be read",
     );
   }
   return probeUnavailable(
@@ -445,10 +466,11 @@ export function createRepoWorkspace(
         timeout: 30 * 60_000,
         maxBuffer: 16 * 1024 * 1024,
       });
+      enter("checking");
       const canary = await run("ox", ["code", "status", "--json"], {
         cwd: state.path,
         env: oxEnv,
-        timeout: 30_000,
+        timeout: STATUS_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024,
       });
       const status = JSON.parse(canary.stdout) as {

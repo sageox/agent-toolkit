@@ -48,6 +48,7 @@ const PROBE_FAILURES = [
   "clone-failed",
   "fetch-failed",
   "index-failed",
+  "status-failed",
   // The team brain's two, spelled the same as the `OxFailure` classes they are latched
   // from, so `failure=not-authenticated` here and `class=not-authenticated` on the
   // `ox_failed` line are one word to grep for rather than two.

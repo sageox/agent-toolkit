@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A slow `ox code status` after a successful index build no longer reads as a failed
+  build.** Warmup gave the status check 30 seconds, but ox runs a full integrity check on
+  every writable open, which takes minutes on a large index, so most startups killed it
+  and reported `index-failed` with a remedy to reinstall ox. The check now gets 5 minutes
+  and its own warm step, and a failure there reads `status-failed`, saying whether it
+  timed out.
+
 - **Re-running `sageox-agent identity register buzz` now renames the agent's Buzz directory
   record.** The record kept the first `display_name` it was ever published with, so renaming
   an agent in `profile.json` updated its profile and left the record unchanged, so mentions
