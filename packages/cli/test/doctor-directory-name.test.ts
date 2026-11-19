@@ -65,9 +65,11 @@ surfaces:
       await record("Ron Weasley"),
       await signed(0, { name: "Ron" }),
     ]);
-    expect(stdout).toContain(
-      `surface buzz: the directory record's display_name is "Ron Weasley" but the profile names it "Ron"`,
-    );
+    const drift = `surface buzz: the directory record's display_name is "Ron Weasley" but the profile names it "Ron"`;
+    // A warning, not a problem: the profile's name still reaches the agent, and a FAIL here
+    // would block bring-up of an agent that can still be mentioned.
+    expect(stdout).toContain(`  warn  ${drift}`);
+    expect(stdout).not.toContain(`  FAIL  ${drift}`);
     expect(stdout).toContain("re-run `sageox-agent identity register buzz`");
     expect(stdout).not.toContain("so it is mentionable");
   }, 30_000);
