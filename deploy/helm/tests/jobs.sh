@@ -559,6 +559,47 @@ then
   fail 'dispatcher resource relationships are invalid'
 fi
 
+# Workers and their dispatcher are scheduled where the agent's own Pods are (#151): the
+# chart's top-level nodeSelector and tolerations reach the dispatcher Deployment and, through
+# profiles.json, every worker Job it creates. Unset, neither appears.
+placed=(--set agents.harry.dispatcher.tokenSecret=dispatcher-auth
+  --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'
+  --show-only templates/dispatcher.yaml)
+rendered=$(helm template agents "$chart" --values "$values" "${placed[@]}" \
+  --set nodeSelector.pool=agents \
+  --set 'tolerations[0].key=dedicated' --set 'tolerations[0].operator=Equal' \
+  --set 'tolerations[0].value=agents' --set 'tolerations[0].effect=NoSchedule')
+printf '%s\n' "$rendered" >"$work/dispatcher-placed.yaml"
+if ! pnpm --filter @sageox/agent-toolkit-core exec node --input-type=module \
+  - "$work/dispatcher-placed.yaml" <<'NODE'
+import { readFileSync } from "node:fs";
+import { parseAllDocuments } from "yaml";
+
+const resources = parseAllDocuments(readFileSync(process.argv[2], "utf8"))
+  .map((document) => document.toJS()).filter(Boolean);
+const pod = resources.find((resource) => resource.kind === "Deployment").spec.template.spec;
+const profiles = JSON.parse(resources.find((resource) => resource.data?.["profiles.json"]).data["profiles.json"]);
+const toleration = [{ key: "dedicated", operator: "Equal", value: "agents", effect: "NoSchedule" }];
+// Helm sorts map keys, so compare canonically rather than in insertion order.
+const canon = (v) => Array.isArray(v) ? v.map(canon)
+  : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v;
+const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+if (!same(pod.nodeSelector, { pool: "agents" }) || !same(pod.tolerations, toleration)) {
+  throw new Error("dispatcher Deployment is not placed with the agent");
+}
+const worker = Object.values(profiles)[0];
+if (!same(worker?.nodeSelector, { pool: "agents" }) || !same(worker?.tolerations, toleration)
+  || worker?.serviceAccountName !== "task-worker") {
+  throw new Error("worker profile does not carry the agent's placement");
+}
+NODE
+then
+  fail 'dispatcher and worker placement is invalid'
+fi
+rendered=$(helm template agents "$chart" --values "$values" "${placed[@]}")
+absent 'nodeSelector'
+absent 'tolerations'
+
 refuses "worker without dispatcher" \
   "harry/shift: external worker requires dispatcher.tokenSecret" \
   --set 'agents.harry.jobs[0].worker.serviceAccountName=task-worker'

@@ -2,9 +2,13 @@
 {{- if $agent.dispatcher }}
 {{- $context := dict "root" $ "name" $name "agent" $agent -}}
 {{- $full := include "agent.dispatcherName" $context -}}
+{{- /* Workers are scheduled where the agent's own Pods are. */ -}}
+{{- $placement := dict -}}
+{{- with $.Values.nodeSelector }}{{- $_ := set $placement "nodeSelector" . -}}{{- end }}
+{{- with $.Values.tolerations }}{{- $_ := set $placement "tolerations" . -}}{{- end }}
 {{- $profiles := dict -}}
 {{- range $job := $agent.jobs -}}
-{{- if $job.worker -}}{{- $_ := set $profiles $job.slug $job.worker -}}{{- end -}}
+{{- if $job.worker -}}{{- $_ := set $profiles $job.slug (merge (deepCopy $job.worker) $placement) -}}{{- end -}}
 {{- end -}}
 ---
 apiVersion: v1
@@ -89,6 +93,14 @@ spec:
     spec:
       serviceAccountName: {{ $full }}
       automountServiceAccountToken: true
+      {{- with $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

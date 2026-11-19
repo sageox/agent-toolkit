@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
-import { JobDispatcher, KubeError, serveJobDispatcher, type KubeObject } from "../src/job-dispatcher.ts";
+import { JobDispatcher, KubeError, WorkerProfilesSchema, serveJobDispatcher, type KubeObject } from "../src/job-dispatcher.ts";
 import { ExternalJobs, externalRun, jobDefinition, workerResult, publishJobOutput, type ExternalRequest, type ExternalStatus } from "../src/external-jobs.ts";
 import { JOB_STATUS_LIMIT_BYTES, type FinalJobOutput } from "../src/job-output.ts";
 import { JobSchema, loadManifest, type JobConfig } from "../src/manifest.ts";
@@ -342,6 +342,31 @@ describe("durable Kubernetes job lifecycle", () => {
     expect(pod.spec.serviceAccountName).toBe("task-worker");
     expect(pod.spec.automountServiceAccountToken).toBe(false);
     expect(pod.spec.containers[0]!.env).toContainEqual({ name: "TASK_TOKEN", valueFrom: { secretKeyRef: { name: "task-secret", key: "token" } } });
+  });
+
+  it("schedules a worker Pod with its profile's nodeSelector and tolerations, and adds neither when unset (#151)", async () => {
+    const placed = new Cluster();
+    const tolerations = [{ key: "dedicated", operator: "Equal" as const, value: "agents", effect: "NoSchedule" as const }];
+    const a = new JobDispatcher({
+      api: placed, name: "demo-dispatcher", jobs: manifest().jobs, url: "http://dispatcher:8090",
+      profiles: { task: { serviceAccountName: "task-worker", secrets: { TASK_TOKEN: { name: "task-secret", key: "token" } }, resources: {},
+        nodeSelector: { pool: "agents" }, tolerations } },
+    });
+    const req = request(manifest().jobs[0]!);
+    await a.dispatch(req); await a.reconcile();
+    const spec = (placed.objects.get(`jobs/${runName(req.runId)}`)!.spec!.template as { spec: Record<string, unknown> }).spec;
+    expect(spec.nodeSelector).toEqual({ pool: "agents" });
+    expect(spec.tolerations).toEqual(tolerations);
+
+    const plain = new Cluster(), b = dispatcher(plain);
+    await b.dispatch(req); await b.reconcile();
+    const unplaced = (plain.objects.get(`jobs/${runName(req.runId)}`)!.spec!.template as { spec: Record<string, unknown> }).spec;
+    expect(unplaced).not.toHaveProperty("nodeSelector");
+    expect(unplaced).not.toHaveProperty("tolerations");
+
+    // The empty spellings Kubernetes accepts must not stop the dispatcher from starting.
+    expect(() => WorkerProfilesSchema.parse({ task: { serviceAccountName: "task-worker",
+      tolerations: [{ key: "dedicated", operator: "", effect: "" }] } })).not.toThrow();
   });
 
   it("retains the result after worker cleanup and dispatcher restart, then expires it without replay", async () => {

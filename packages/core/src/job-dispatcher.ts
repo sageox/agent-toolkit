@@ -23,6 +23,17 @@ export const WorkerProfilesSchema = z.record(z.string(), z.object({
     requests: z.record(z.string(), z.string()).optional(),
     limits: z.record(z.string(), z.string()).optional(),
   }).strict().default({}),
+  // Where the worker Pod may be scheduled. The chart fills these from its top-level values,
+  // so workers land on the same nodes as the agent's own Pods.
+  nodeSelector: z.record(z.string(), z.string()).optional(),
+  tolerations: z.array(z.object({
+    key: z.string().optional(),
+    // Kubernetes reads an empty operator as `Equal` and an empty effect as every effect.
+    operator: z.enum(["", "Exists", "Equal"]).optional(),
+    value: z.string().optional(),
+    effect: z.enum(["", "NoSchedule", "PreferNoSchedule", "NoExecute"]).optional(),
+    tolerationSeconds: z.number().int().optional(),
+  }).strict()).optional(),
 }).strict());
 type WorkerProfiles = z.infer<typeof WorkerProfilesSchema>;
 
@@ -378,6 +389,8 @@ export class JobDispatcher {
           spec: {
             restartPolicy: "Never", automountServiceAccountToken: false,
             serviceAccountName: profile.serviceAccountName,
+            ...(profile.nodeSelector && { nodeSelector: profile.nodeSelector }),
+            ...(profile.tolerations && { tolerations: profile.tolerations }),
             terminationGracePeriodSeconds: Math.ceil(job.budget.deadlineHeadroomMs / 1000),
             securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: "RuntimeDefault" } },
             containers: [{

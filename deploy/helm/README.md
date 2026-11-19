@@ -196,6 +196,8 @@ next stage. Immutable sources keep that to the one apply that changes them.
 
 `podAnnotations`, `nodeSelector`, `tolerations`, `priorityClassName`, and
 [`networkPolicy`](#network-policy) are release-wide.
+`nodeSelector` and `tolerations` also place each agent's job dispatcher and the worker Pods
+it creates.
 Resources, secret sources, persistence, shutdown grace, and shared volumes are per agent.
 Use `persistence.existingClaim` for operator-owned state, and add one `sharedVolumes` entry
 for each shared brain path. Shared-memory claims must support access from every participating

@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dispatched workers and their dispatcher are now scheduled where the agent's own Pods
+  are.** The chart's top-level `nodeSelector` and `tolerations` reached the agent Deployment
+  and its CronJobs but not `dispatcher.yaml` or the worker Jobs it creates, so on a cluster
+  whose agent pool is tainted every worker went to the untainted pool and could sit
+  `Pending` until its deadline. Both now reach the dispatcher Deployment and, through each
+  worker profile, the worker Pod. With neither set, nothing rendered changes.
+
 - **Re-running `sageox-agent identity register buzz` now renames the agent's Buzz directory
   record.** The record kept the first `display_name` it was ever published with, so renaming
   an agent in `profile.json` updated its profile and left the record unchanged, so mentions
