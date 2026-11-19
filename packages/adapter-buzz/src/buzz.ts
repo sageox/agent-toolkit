@@ -161,6 +161,8 @@ export class BuzzAdapter implements SurfaceAdapter {
   /** Bumped by every {@link subscribeAll}, so a retry of an older socket's REQ stands down. */
   private generation = 0;
   private resubscribeTimers = new Set<ReturnType<typeof setTimeout>>();
+  /** The live REQ per channel (or `mentions`), so a fresh `subscribeAll` closes the last one. */
+  private liveSubs = new Map<string, { close(reason?: string): void }>();
   /** Held so a reconnect can re-open the subscriptions `start` opened. */
   private onEvent?: (e: InboundEvent) => void;
   /**
@@ -336,9 +338,19 @@ export class BuzzAdapter implements SurfaceAdapter {
   ): void {
     const onEvent = this.onEvent;
     if (!onEvent) return;
+    const key = subscribed ?? "mentions";
+    // A retry opened just before a re-auth's `subscribeAll` would otherwise stay live
+    // beside the new REQ and deliver every message twice.
+    if (attempt === 0) this.liveSubs.get(key)?.close("superseded");
+    // A retry asks from this channel's own newest second, inclusive, so it skips only the
+    // ids it already received in that second.
+    const seen = attempt > 0 && subscribed !== undefined
+      ? new Set(this.heard.get(subscribed)?.atNewest ?? [])
+      : undefined;
     let delivered = false;
-    relay.subscribe([filter], {
+    const sub = relay.subscribe([filter], {
       onevent: (event: Event) => {
+        if (seen?.has(event.id)) return;
         delivered = true;
         // On receipt, and before the cross-post check below: the question is whether
         // this REQ is being fed, not whether it was the one to deliver.
@@ -376,16 +388,25 @@ export class BuzzAdapter implements SurfaceAdapter {
           `subscription_closed surface=${SURFACE} channel=${subscribed ?? "mentions"} ` +
             `reason=${JSON.stringify(String(reason).slice(0, 200))} retry_in_ms=${delay}`,
         );
-        const timer = setTimeout(() => {
-          this.resubscribeTimers.delete(timer);
-          if (this.relay !== relay || this.generation !== generation) return;
-          const resumed = this.since === undefined ? filter : { ...filter, since: this.since };
-          this.subscribeChannel(relay, resumed, subscribed, gate, generation, next + 1);
-        }, delay);
-        timer.unref?.();
-        this.resubscribeTimers.add(timer);
+        const retry = () => {
+          const timer = setTimeout(() => {
+            this.resubscribeTimers.delete(timer);
+            if (this.relay !== relay || this.generation !== generation) return;
+            // A REQ sent on a dropped socket rejects with nobody to catch it; wait for the
+            // reconnect instead.
+            if (!relay.connected) return retry();
+            const newest = subscribed === undefined ? undefined : this.heard.get(subscribed)?.newest;
+            const since = Math.max(filter.since ?? 0, newest ?? 0);
+            const resumed = since > 0 ? { ...filter, since } : filter;
+            this.subscribeChannel(relay, resumed, subscribed, gate, generation, next + 1);
+          }, delay);
+          timer.unref?.();
+          this.resubscribeTimers.add(timer);
+        };
+        retry();
       },
     });
+    this.liveSubs.set(key, sub);
   }
 
   async send(channel: ChannelRef, msg: GuardedMessage, context?: InboundEvent): Promise<void> {
@@ -841,6 +862,7 @@ export class BuzzAdapter implements SurfaceAdapter {
     this.stallTimer = undefined;
     for (const timer of this.resubscribeTimers) clearTimeout(timer);
     this.resubscribeTimers.clear();
+    this.liveSubs.clear();
     this.relay?.close();
     this.relay = undefined;
     this.onEvent = undefined;
