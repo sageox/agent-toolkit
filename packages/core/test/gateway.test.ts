@@ -40,6 +40,28 @@ const ev = (text: string, mentionsMe = true): InboundEvent => ({
 });
 
 describe("Gateway", () => {
+  it.each(["buzz", "slack", "console", "custom"])(
+    "refuses duplicate %s adapters before any can start or send",
+    (kind) => {
+      const manifest = loadManifest(
+        `name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: ${kind}}]`,
+      );
+      const adapters: SurfaceAdapter[] = [0, 1].map(() => ({
+        kind,
+        start: vi.fn(async () => {}),
+        stop: vi.fn(async () => {}),
+        send: vi.fn(async () => {}),
+      }));
+      expect(() =>
+        new Gateway({ manifest, adapters, brain: new MockBrain() }),
+      ).toThrow(`duplicate surface adapter kind: ${kind}`);
+      for (const adapter of adapters) {
+        expect(adapter.start).not.toHaveBeenCalled();
+        expect(adapter.send).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it("replies to a mention via the guarded egress", async () => {
     const f = fakeAdapter();
     const gw = new Gateway({

@@ -1292,6 +1292,12 @@ const ManifestSchema = z
     killSwitchParkBy: z.array(z.string().min(1)).optional(),
   })
   .strict()
+  // Routing and public-channel consent identify a connection only by its surface kind.
+  // Two of one kind would share grants and silently route replies through the last one.
+  .refine(
+    (m) => new Set(m.surfaces.map((surface) => surface.kind)).size === m.surfaces.length,
+    { message: "surface kinds must be unique", path: ["surfaces"] },
+  )
   // A gate that cannot identify anyone admits nobody, so refuse the config at load
   // rather than discovering it at 3am.
   .refine((m) => !m.allowedRespondTo?.length || m.allowedRespondTo.includes(m.respondTo), {

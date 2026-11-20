@@ -37,6 +37,40 @@ surfaces:
     expect(m.guard.publicChannels).toEqual(["buzz:town", "slack:C0123"]);
   });
 
+  it.each(["buzz", "slack", "console", "custom"])(
+    "refuses duplicate %s surfaces even without a private brain",
+    (kind) => {
+      expect(() =>
+        loadManifest(
+          "name: demo\nbrain: {provider: mock}\nrespondTo: anyone\n" +
+            `surfaces: [{kind: ${kind}}, {kind: ${kind}}]`,
+        ),
+      ).toThrow(/surface kinds must be unique/);
+    },
+  );
+
+  it.each(["public", "private"])(
+    "refuses duplicate Buzz relays that could reuse a %s channel's consent or routing",
+    (reply) => {
+      expect(() =>
+        loadManifest(`
+name: demo
+brain: { provider: mock }
+respondTo: anyone
+surfaces:
+  - kind: buzz
+    relayUrl: wss://one.example
+    identity: ONE
+    channels: [{ id: C, reply: ${reply} }]
+  - kind: buzz
+    relayUrl: wss://two.example
+    identity: TWO
+    channels: []
+`),
+      ).toThrow(/surface kinds must be unique/);
+    },
+  );
+
   it("refuses a channel listed twice, which would answer the question twice", () => {
     expect(() =>
       loadManifest(`

@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Duplicate surface kinds are rejected at manifest load, adapter construction, and gateway
+  registration, before adapters start. This prevents multiple Buzz relays from sharing
+  public-channel consent or sending a private conversation's reply through another relay
+  and signer.
+
 - **Re-running `sageox-agent identity register buzz` now renames the agent's Buzz directory
   record.** The record kept the first `display_name` it was ever published with, so renaming
   an agent in `profile.json` updated its profile and left the record unchanged, so mentions

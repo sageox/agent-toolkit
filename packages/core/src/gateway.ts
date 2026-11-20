@@ -110,7 +110,12 @@ export class Gateway {
   private stoppedReason?: string;
 
   constructor(private opts: GatewayOpts) {
-    for (const a of opts.adapters) this.byKind.set(a.kind, a);
+    // Programmatic callers can bypass the manifest loader. Refuse ambiguous routing
+    // before any adapter starts, rather than overwriting the connection replies use.
+    for (const a of opts.adapters) {
+      if (this.byKind.has(a.kind)) throw new Error(`duplicate surface adapter kind: ${a.kind}`);
+      this.byKind.set(a.kind, a);
+    }
     this.clock = opts.turnClock ?? new TurnClock();
     const limits = opts.manifest.limits;
     this.policy = opts.policy ?? new TurnPolicy(limits);

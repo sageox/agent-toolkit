@@ -104,6 +104,10 @@ export async function buildAdapters(
   manifest: AgentManifest,
   opts: BuildOptions = {},
 ): Promise<SurfaceAdapter[]> {
+  // A programmatically assembled manifest may not have passed through the loader.
+  if (new Set(manifest.surfaces.map((surface) => surface.kind)).size !== manifest.surfaces.length) {
+    throw new Error("surface kinds must be unique");
+  }
   const adapters: SurfaceAdapter[] = [];
 
   for (const surface of manifest.surfaces) {

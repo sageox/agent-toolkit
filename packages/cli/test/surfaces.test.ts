@@ -17,6 +17,21 @@ surfaces:
 
 const config = slackConfig("{ id: GENG, reply: private }");
 
+describe("buildAdapters", () => {
+  it.each(["buzz", "slack", "console"])(
+    "refuses duplicate %s surfaces before building any adapter",
+    async (kind) => {
+      const manifest = loadManifest(
+        "name: t\nbrain: {provider: mock}\nrespondTo: anyone\nsurfaces: [{kind: console}]",
+      );
+      // Bypass the loader to exercise the runtime boundary. Buzz and Slack deliberately
+      // lack credentials: uniqueness must be checked before either adapter is built.
+      manifest.surfaces = [{ kind, channels: [] }, { kind, channels: [] }];
+      await expect(buildAdapters(manifest)).rejects.toThrow(/surface kinds must be unique/);
+    },
+  );
+});
+
 describe("buildAdapters Slack wiring", () => {
   afterEach(() => {
     delete process.env.TEST_SLACK_BOT_TOKEN;
