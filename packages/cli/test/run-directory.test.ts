@@ -128,43 +128,6 @@ surfaces:
       agent_type: "claude-agent-acp",
     });
   }, 30_000);
-
-  // The record is filed under the signing pubkey, so these two surfaces are one record even
-  // though they name the key differently and spell the relay differently. Publishing them in
-  // turn would leave it listing `late` alone, and a mention in `early` would be stripped at
-  // send — the exact failure this reconcile exists to prevent, caused by the reconcile.
-  it("unions the channels of two surfaces that resolve to one record", async () => {
-    relay = await LocalRelay.start({
-      requireAuth: true,
-      backlog: [
-        await held({ name: "demo", channel_ids: [], respond_to: "anyone" }),
-      ],
-    });
-
-    home = mkdtempSync(join(tmpdir(), "sageox-agent-run-shared-"));
-    const output = start(
-      home,
-      `name: demo
-brain:
-  provider: mock
-respondTo: anyone
-surfaces:
-  - kind: buzz
-    relayUrl: ${relay.url}
-    identity: BUZZ_NSEC
-    channels: [{ id: early, reply: private }]
-  - kind: buzz
-    relayUrl: ${relay.url}/
-    identity: BUZZ_ALIAS
-    channels: [{ id: late, reply: private }]
-`,
-    );
-
-    const record = (await waitForRecord(relay, output)) as { channel_ids: string[] };
-    expect([...record.channel_ids].sort()).toEqual(["early", "late"]);
-    // One record, so one write. A second publish here is the overwrite, not a retry.
-    expect(relay.published.filter((e) => e.kind === DIRECTORY_KIND)).toHaveLength(1);
-  }, 30_000);
 });
 
 /** What `run` published, or the launch output that explains why it never did. */

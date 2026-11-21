@@ -392,23 +392,6 @@ respondTo: anyone
     expect(directory.respondTo).toBe("anyone");
   });
 
-  it("gives each Buzz surface its own channels, not the first one's", () => {
-    // Every surface would otherwise be told the agent answers where the first one does,
-    // which is a mention stripped on one relay and invited on another.
-    const two = `  - kind: buzz
-    relayUrl: wss://first.example.ai
-    identity: BUZZ_NSEC
-    channels: [{ id: first-only, reply: private }]
-  - kind: buzz
-    relayUrl: wss://second.example.ai
-    identity: BUZZ_NSEC
-    channels: [{ id: second-only, reply: private }]
-respondTo: anyone
-`;
-    expect(directoryAt(two, "wss://first.example.ai").channelIds).toEqual(["first-only"]);
-    expect(directoryAt(two, "wss://second.example.ai").channelIds).toEqual(["second-only"]);
-  });
-
   it("publishes owner-only as the allowlist of owners it actually is", () => {
     // A mode clients do not recognise reads as "never mentionable", which would hide the
     // agent from the picker for the one person it answers.

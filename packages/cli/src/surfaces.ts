@@ -64,7 +64,7 @@ export function buzzTarget(surface: unknown): BuzzTarget | undefined {
   return { relayUrl: buzz.relayUrl, identity: buzz.identity };
 }
 
-/** `find` is safe: the manifest refuses a second Buzz surface wherever it would be ambiguous. */
+/** `find` is safe: the manifest refuses a second surface of any kind, Buzz included. */
 export function buzzSurface(manifest: AgentManifest): BuzzTarget | undefined {
   return buzzTarget(manifest.surfaces.find((surface) => surface.kind === "buzz"));
 }
@@ -104,6 +104,10 @@ export async function buildAdapters(
   manifest: AgentManifest,
   opts: BuildOptions = {},
 ): Promise<SurfaceAdapter[]> {
+  // A programmatically assembled manifest may not have passed through the loader.
+  if (new Set(manifest.surfaces.map((surface) => surface.kind)).size !== manifest.surfaces.length) {
+    throw new Error("surface kinds must be unique");
+  }
   const adapters: SurfaceAdapter[] = [];
 
   for (const surface of manifest.surfaces) {
