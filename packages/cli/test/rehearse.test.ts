@@ -90,7 +90,7 @@ surfaces:
     expect(status).toBe(0);
   }, 30_000);
 
-  it("refuses Buzz surfaces on two relays, which one stand-in would merge", () => {
+  it("refuses Buzz surfaces on two relays before one stand-in could merge them", () => {
     writeFileSync(
       join(bundle, "agent.yaml"),
       `name: demo
@@ -110,7 +110,7 @@ surfaces:
 
     const { status, output } = cli(["run", "--bundle", bundle, "--rehearse"]);
 
-    expect(output).toContain("--rehearse stands in for one Buzz relay");
+    expect(output).toContain("surface kinds must be unique");
     expect(status).toBe(1);
   }, 30_000);
 

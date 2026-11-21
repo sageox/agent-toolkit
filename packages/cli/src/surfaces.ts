@@ -64,7 +64,7 @@ export function buzzTarget(surface: unknown): BuzzTarget | undefined {
   return { relayUrl: buzz.relayUrl, identity: buzz.identity };
 }
 
-/** `find` is safe: the manifest refuses a second Buzz surface wherever it would be ambiguous. */
+/** `find` is safe: the manifest refuses a second surface of any kind, Buzz included. */
 export function buzzSurface(manifest: AgentManifest): BuzzTarget | undefined {
   return buzzTarget(manifest.surfaces.find((surface) => surface.kind === "buzz"));
 }
